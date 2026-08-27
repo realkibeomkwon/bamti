@@ -54,8 +54,11 @@ constexpr UINT kRebuildDelayMs = 50;
 constexpr UINT_PTR kHideTimerId = 1;
 constexpr UINT_PTR kPollTimerId = 2;
 constexpr UINT_PTR kRebuildTimerId = 3;
+constexpr UINT_PTR kTrayWatchTimerId = 4;
+constexpr UINT kTrayWatchMs = 5000;
 constexpr UINT kTasksChangedMsg = WM_APP + 20;
 constexpr UINT kMenuCommandMsg = WM_APP + 21;
+constexpr UINT kTrayChangedMsg = WM_APP + 22;
 constexpr UINT kPinCommand = 1;
 constexpr UINT kUnpinCommand = 2;
 constexpr UINT kQuitCommand = 3;
@@ -65,6 +68,7 @@ constexpr UINT kWindowCommandBase = 100;
 
 HWND g_notify = nullptr;
 std::atomic<bool> g_rebuild_posted{false};
+std::atomic<bool> g_tray_posted{false};
 
 const wchar_t* MenuCmdName(UINT cmd) {
   if (cmd >= kWindowCommandBase) {
@@ -851,6 +855,7 @@ Dock::~Dock() {
     g_notify = nullptr;
   }
   ResetIconCache();
+  TaskbarController::UnwatchTray();
   popup_.Destroy();
   if (hwnd_ != nullptr) {
     DestroyWindow(hwnd_);
@@ -916,17 +921,18 @@ bool Dock::Create(HINSTANCE instance) {
   LayoutHot();
   ShowWindow(hot_hwnd_, SW_SHOWNA);
 
-  const DWORD hook_flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
-  const DWORD ranges[][2] = {
-      {EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE},
-      {EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED},
+  const DWORD hook_flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS | WINEVENT_SKIPOWNTHREAD;
+  static const DWORD kEvents[] = {
+      EVENT_OBJECT_CREATE,   EVENT_OBJECT_DESTROY, EVENT_OBJECT_SHOW,
+      EVENT_OBJECT_HIDE,     EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED,
   };
-  for (const auto& range : ranges) {
-    HWINEVENTHOOK hook = SetWinEventHook(range[0], range[1], nullptr, WinEventProc, 0, 0, hook_flags);
-    if (hook != nullptr) {
+  for (DWORD e : kEvents) {
+    if (HWINEVENTHOOK hook = SetWinEventHook(e, e, nullptr, WinEventProc, 0, 0, hook_flags)) {
       hooks_.push_back(hook);
     }
   }
+  TaskbarController::WatchTray(TrayWinEventProc);
+  SetTimer(hwnd_, kTrayWatchTimerId, kTrayWatchMs, nullptr);
 
   SetTimer(hwnd_, kPollTimerId, 50, nullptr);
   menu_content_ = std::make_unique<DockMenuContent>();
@@ -996,25 +1002,32 @@ LRESULT CALLBACK Dock::HotProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
   return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
-void CALLBACK Dock::WinEventProc(HWINEVENTHOOK, DWORD, HWND hwnd, LONG object, LONG, DWORD, DWORD) {
-  if (hwnd != nullptr) {
-    wchar_t cls[64]{};
-    if (GetClassNameW(hwnd, cls, 64) > 0 &&
-        (lstrcmpiW(cls, L"Shell_TrayWnd") == 0 || lstrcmpiW(cls, L"Shell_SecondaryTrayWnd") == 0)) {
-      TaskbarController::Rehide();
-    }
-  }
-  if (object != OBJID_WINDOW) {
+void CALLBACK Dock::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG object, LONG child, DWORD, DWORD) {
+  if (object != OBJID_WINDOW || child != CHILDID_SELF || hwnd == nullptr) {
     return;
   }
-  if (hwnd != nullptr && GetAncestor(hwnd, GA_ROOT) != hwnd) {
+  if (GetAncestor(hwnd, GA_ROOT) != hwnd) {
     return;
+  }
+  if (event == EVENT_OBJECT_DESTROY && hwnd == TaskbarController::WatchedTray()) {
+    TaskbarController::UnwatchTray();
+    TaskbarController::RewatchTray();
   }
   if (g_notify == nullptr) {
     return;
   }
   if (!g_rebuild_posted.exchange(true)) {
     PostMessageW(g_notify, kTasksChangedMsg, 0, 0);
+  }
+}
+
+void CALLBACK Dock::TrayWinEventProc(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
+  if (g_notify == nullptr) {
+    TaskbarController::Rehide();
+    return;
+  }
+  if (!g_tray_posted.exchange(true)) {
+    PostMessageW(g_notify, kTrayChangedMsg, 0, 0);
   }
 }
 
@@ -1060,6 +1073,13 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         } else {
           Rebuild();
         }
+      } else if (wparam == kTrayWatchTimerId) {
+        if (TaskbarController::WatchedTray() == nullptr || !IsWindow(TaskbarController::WatchedTray())) {
+          TaskbarController::RewatchTray();
+        }
+        if (TaskbarController::Rehide()) {
+          RaiseOverlays();
+        }
       }
       return 0;
     case kTasksChangedMsg:
@@ -1074,6 +1094,12 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       ApplyMenuCommand(cmd, app, windows);
       return 0;
     }
+    case kTrayChangedMsg:
+      g_tray_posted = false;
+      if (TaskbarController::Rehide()) {
+        RaiseOverlays();
+      }
+      return 0;
     case kPopupClosedMsg:
       if (pending_rebuild_) {
         ScheduleRebuild();
@@ -1205,6 +1231,8 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kHideTimerId);
       KillTimer(hwnd_, kPollTimerId);
       KillTimer(hwnd_, kRebuildTimerId);
+      KillTimer(hwnd_, kTrayWatchTimerId);
+      TaskbarController::UnwatchTray();
       popup_.Destroy();
       if (g_notify == hwnd_) {
         g_notify = nullptr;

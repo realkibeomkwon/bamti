@@ -17,6 +17,10 @@ class TaskbarController {
   void EnsureHidden();
   static bool Rehide();
   static void ForceRestore();
+  static bool WatchTray(WINEVENTPROC proc);
+  static void UnwatchTray();
+  static bool RewatchTray();
+  static HWND WatchedTray();
 
   bool hidden() const { return hidden_; }
   const std::wstring& warning() const { return warning_; }

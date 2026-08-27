@@ -33,6 +33,8 @@ class Dock {
   static LRESULT CALLBACK HotProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
   static void CALLBACK WinEventProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd, LONG object, LONG child,
                                     DWORD thread, DWORD time);
+  static void CALLBACK TrayWinEventProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd, LONG object, LONG child,
+                                        DWORD thread, DWORD time);
 
   LRESULT HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam);
   LRESULT HandleHot(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);

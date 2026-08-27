@@ -1,7 +1,8 @@
 #include "taskbar_controller.hpp"
 
-#include <knownfolders.h>
-#include <shlobj.h>
+#include "log.hpp"
+#include "paths.hpp"
+
 #include <shellapi.h>
 
 #include <algorithm>
@@ -16,6 +17,10 @@ namespace {
 constexpr wchar_t kPrimaryClass[] = L"Shell_TrayWnd";
 constexpr wchar_t kSecondaryClass[] = L"Shell_SecondaryTrayWnd";
 constexpr LONG kParkY = 32000;
+
+HWINEVENTHOOK g_tray_hook = nullptr;
+HWND g_tray_hwnd = nullptr;
+WINEVENTPROC g_tray_proc = nullptr;
 
 void EnumTrays(const auto& fn) {
   if (HWND primary = FindWindowW(kPrimaryClass, nullptr)) {
@@ -53,15 +58,6 @@ bool LookupTray(HWND hwnd, RECT& rc) {
   return false;
 }
 
-std::wstring JoinPath(const std::wstring& dir, const wchar_t* file) {
-  std::wstring path = dir;
-  if (!path.empty() && path.back() != L'\\') {
-    path.push_back(L'\\');
-  }
-  path += file;
-  return path;
-}
-
 }  // namespace
 
 TaskbarController::~TaskbarController() {
@@ -73,15 +69,7 @@ HWND TaskbarController::PrimaryTray() {
 }
 
 std::wstring TaskbarController::GuardPath() {
-  PWSTR root = nullptr;
-  if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &root)) || root == nullptr) {
-    return {};
-  }
-  std::wstring dir = root;
-  CoTaskMemFree(root);
-  dir = JoinPath(dir, L"bamti");
-  CreateDirectoryW(dir.c_str(), nullptr);
-  return JoinPath(dir, L"taskbar.guard");
+  return TaskbarGuardPath();
 }
 
 bool TaskbarController::WriteGuard() const {
@@ -192,6 +180,7 @@ bool TaskbarController::Hide() {
   const HWND tray = PrimaryTray();
   if (tray == nullptr) {
     warning_ = L"태스크바를 찾지 못했습니다";
+    Log(L"tray", L"hide failed: tray not found");
     return false;
   }
 
@@ -199,11 +188,14 @@ bool TaskbarController::Hide() {
   const bool hidden_windows = HideTrayWindows();
   if (!autohide && !hidden_windows) {
     warning_ = L"태스크바를 숨기지 못했습니다";
+    Log(L"tray", L"hide failed autohide=%d windows=%d", autohide ? 1 : 0, hidden_windows ? 1 : 0);
     return false;
   }
 
   hidden_ = true;
   WriteGuard();
+  Log(L"tray", L"hidden autohide=%d windows=%d guard=%s", autohide ? 1 : 0, hidden_windows ? 1 : 0,
+      GuardPath().c_str());
   if (!hidden_windows && autohide) {
     // Auto-hide still peeks at the edge, but work area is released. Not a hard failure.
   }
@@ -239,6 +231,7 @@ void TaskbarController::Restore() {
   hidden_ = false;
   warning_.clear();
   DeleteGuard();
+  Log(L"tray", L"restored");
 }
 
 void TaskbarController::EnsureHidden() {
@@ -287,6 +280,40 @@ void TaskbarController::ForceRestore() {
     }
   }
   DeleteGuard();
+}
+
+bool TaskbarController::WatchTray(WINEVENTPROC proc) {
+  UnwatchTray();
+  g_tray_proc = proc;
+  HWND tray = PrimaryTray();
+  if (tray == nullptr || proc == nullptr) {
+    return false;
+  }
+  DWORD pid = 0;
+  const DWORD tid = GetWindowThreadProcessId(tray, &pid);
+  if (tid == 0) {
+    return false;
+  }
+  g_tray_hwnd = tray;
+  g_tray_hook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_LOCATIONCHANGE, nullptr, proc, pid, tid,
+                                WINEVENT_OUTOFCONTEXT);
+  return g_tray_hook != nullptr;
+}
+
+void TaskbarController::UnwatchTray() {
+  if (g_tray_hook != nullptr) {
+    UnhookWinEvent(g_tray_hook);
+    g_tray_hook = nullptr;
+  }
+  g_tray_hwnd = nullptr;
+}
+
+HWND TaskbarController::WatchedTray() {
+  return g_tray_hwnd;
+}
+
+bool TaskbarController::RewatchTray() {
+  return g_tray_proc != nullptr && WatchTray(g_tray_proc);
 }
 
 }  // namespace bamti
