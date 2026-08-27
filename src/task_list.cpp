@@ -1,14 +1,17 @@
 #include "task_list.hpp"
 
+#include "log.hpp"
+#include "paths.hpp"
+
 #include <appmodel.h>
 #include <dwmapi.h>
 #include <knownfolders.h>
-#include <propkey.h>
 #include <propsys.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
+#include <propkey.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -20,40 +23,10 @@
 namespace bamti {
 namespace {
 
-constexpr wchar_t kPinFile[] = L"dock-pins.txt";
 constexpr wchar_t kAumidPinPrefix[] = L"aumid:";
 
 bool EqualsIgnoreCase(const std::wstring& a, const std::wstring& b) {
   return lstrcmpiW(a.c_str(), b.c_str()) == 0;
-}
-
-std::wstring JoinPath(const std::wstring& dir, const wchar_t* file) {
-  std::wstring path = dir;
-  if (!path.empty() && path.back() != L'\\') {
-    path.push_back(L'\\');
-  }
-  path += file;
-  return path;
-}
-
-std::wstring BamtiDir() {
-  PWSTR root = nullptr;
-  if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &root)) || root == nullptr) {
-    return {};
-  }
-  std::wstring dir = root;
-  CoTaskMemFree(root);
-  dir = JoinPath(dir, L"bamti");
-  CreateDirectoryW(dir.c_str(), nullptr);
-  return dir;
-}
-
-std::wstring PinPath() {
-  const std::wstring dir = BamtiDir();
-  if (dir.empty()) {
-    return {};
-  }
-  return JoinPath(dir, kPinFile);
 }
 
 std::wstring Lower(std::wstring text) {
@@ -88,6 +61,10 @@ bool SkipClass(const wchar_t* cls) {
       L"bamti.Spotlight",
       L"IME",
       L"MSCTFIME UI",
+      L"CiceroUIWndFrame",
+      L"XamlExplorerHostIslandWindow",
+      L"Windows.Internal.Shell.TabProxyWindow",
+      L"ImmediateContentWindow",
       L"tooltips_class32",
   };
   for (const wchar_t* skip : kSkip) {
@@ -125,6 +102,13 @@ bool IsTaskWindow(HWND hwnd) {
   }
   if ((ex & WS_EX_TOOLWINDOW) != 0 && (ex & WS_EX_APPWINDOW) == 0) {
     return false;
+  }
+  if ((ex & WS_EX_NOACTIVATE) != 0 && (ex & WS_EX_APPWINDOW) == 0) {
+    DWORD_PTR text_len = 0;
+    if (SendMessageTimeoutW(hwnd, WM_GETTEXTLENGTH, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 30, &text_len) == 0 ||
+        text_len == 0) {
+      return false;
+    }
   }
   if ((ex & WS_EX_APPWINDOW) == 0 && GetWindow(hwnd, GW_OWNER) != nullptr) {
     return false;
@@ -164,6 +148,13 @@ bool SkipChromeExe(const std::wstring& path) {
       L"shellexperiencehost",
       L"textinputhost",
       L"lockapp",
+      L"crossdeviceresume",
+      L"widgetservice",
+      L"widgets",
+      L"widgetboard",
+      L"gamebarftw",
+      L"gamebarpresencewriter",
+      L"phoneexperiencehost",
   };
   for (const wchar_t* skip : kSkip) {
     if (stem == skip) {
@@ -171,6 +162,12 @@ bool SkipChromeExe(const std::wstring& path) {
     }
   }
   return false;
+}
+
+bool IsExplorerFolderWindow(HWND hwnd) {
+  wchar_t cls[256]{};
+  GetClassNameW(hwnd, cls, 256);
+  return lstrcmpiW(cls, L"CabinetWClass") == 0 || lstrcmpiW(cls, L"ExploreWClass") == 0;
 }
 
 std::wstring WindowExePath(HWND hwnd) {
@@ -204,6 +201,16 @@ bool IsHostExe(const std::wstring& path) {
   const std::wstring stem = Lower(FileStem(path));
   return stem == L"applicationframehost" || stem == L"wwahost" || stem == L"dllhost" ||
          stem == L"runtimebroker";
+}
+
+bool SkipGhostWindow(HWND hwnd, const std::wstring& path, const std::wstring& aumid, const std::wstring& title) {
+  if (!path.empty() && Lower(FileStem(path)) == L"explorer" && !IsExplorerFolderWindow(hwnd)) {
+    return true;
+  }
+  if (IsHostExe(path) && aumid.empty()) {
+    return true;
+  }
+  return path.empty() && aumid.empty() && title.empty();
 }
 
 bool LooksLikeHostedWebApp(const std::wstring& aumid) {
@@ -407,19 +414,23 @@ std::wstring PathAumid(const std::wstring& path) {
   if (path.empty()) {
     return {};
   }
+  static std::unordered_map<std::wstring, std::wstring> cache;
+  if (const auto it = cache.find(path); it != cache.end()) {
+    return it->second;
+  }
   Microsoft::WRL::ComPtr<IPropertyStore> store;
-  if (FAILED(SHGetPropertyStoreFromParsingName(path.c_str(), nullptr, GPS_DEFAULT, IID_PPV_ARGS(&store))) ||
-      !store) {
-    return {};
-  }
-  PROPVARIANT value;
-  PropVariantInit(&value);
   std::wstring out;
-  if (SUCCEEDED(store->GetValue(PKEY_AppUserModel_ID, &value)) && value.vt == VT_LPWSTR &&
-      value.pwszVal != nullptr && value.pwszVal[0] != L'\0') {
-    out = value.pwszVal;
+  if (SUCCEEDED(SHGetPropertyStoreFromParsingName(path.c_str(), nullptr, GPS_DEFAULT, IID_PPV_ARGS(&store))) &&
+      store) {
+    PROPVARIANT value;
+    PropVariantInit(&value);
+    if (SUCCEEDED(store->GetValue(PKEY_AppUserModel_ID, &value)) && value.vt == VT_LPWSTR &&
+        value.pwszVal != nullptr && value.pwszVal[0] != L'\0') {
+      out = value.pwszVal;
+    }
+    PropVariantClear(&value);
   }
-  PropVariantClear(&value);
+  cache.emplace(path, out);
   return out;
 }
 
@@ -441,6 +452,10 @@ std::wstring AppsFolderDisplayName(const std::wstring& aumid) {
   if (aumid.empty()) {
     return {};
   }
+  static std::unordered_map<std::wstring, std::wstring> cache;
+  if (const auto it = cache.find(aumid); it != cache.end()) {
+    return it->second;
+  }
   Microsoft::WRL::ComPtr<IShellItem> item;
   if (FAILED(SHCreateItemInKnownFolder(FOLDERID_AppsFolder, 0, aumid.c_str(), IID_PPV_ARGS(&item))) || !item) {
     item.Reset();
@@ -454,14 +469,17 @@ std::wstring AppsFolderDisplayName(const std::wstring& aumid) {
     SHCreateItemFromParsingName(parsing.c_str(), nullptr, IID_PPV_ARGS(&item));
   }
   if (!item) {
+    cache.emplace(aumid, std::wstring{});
     return {};
   }
   PWSTR name = nullptr;
   if (FAILED(item->GetDisplayName(SIGDN_NORMALDISPLAY, &name)) || name == nullptr) {
+    cache.emplace(aumid, std::wstring{});
     return {};
   }
   std::wstring out = name;
   CoTaskMemFree(name);
+  cache.emplace(aumid, out);
   return out;
 }
 
@@ -510,16 +528,30 @@ std::wstring WindowTitle(HWND hwnd) {
   if (hwnd == nullptr || !IsWindow(hwnd)) {
     return {};
   }
-  const int n = GetWindowTextLengthW(hwnd);
-  if (n <= 0) {
+  wchar_t buf[513]{};
+  using InternalGetWindowTextFn = int(WINAPI*)(HWND, LPWSTR, int);
+  static const auto internal_text = reinterpret_cast<InternalGetWindowTextFn>(
+      GetProcAddress(GetModuleHandleW(L"user32.dll"), "InternalGetWindowText"));
+  if (internal_text != nullptr) {
+    const int n = internal_text(hwnd, buf, 512);
+    if (n > 0) {
+      return {buf, static_cast<size_t>(n)};
+    }
+  }
+  DWORD_PTR len = 0;
+  if (SendMessageTimeoutW(hwnd, WM_GETTEXTLENGTH, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 10, &len) == 0 ||
+      len == 0) {
     return {};
   }
-  std::wstring text(static_cast<size_t>(n) + 1, L'\0');
-  const int written = GetWindowTextW(hwnd, text.data(), n + 1);
-  if (written <= 0) {
+  const int cap = static_cast<int>((std::min)(len, static_cast<DWORD_PTR>(512)));
+  std::wstring text(static_cast<size_t>(cap) + 1, L'\0');
+  DWORD_PTR written = 0;
+  if (SendMessageTimeoutW(hwnd, WM_GETTEXT, static_cast<WPARAM>(cap + 1), reinterpret_cast<LPARAM>(text.data()),
+                          SMTO_ABORTIFHUNG | SMTO_BLOCK, 10, &written) == 0 ||
+      written == 0) {
     return {};
   }
-  text.resize(static_cast<size_t>(written));
+  text.resize(wcsnlen(text.c_str(), text.size()));
   return text;
 }
 
@@ -568,12 +600,14 @@ bool SameDockPin(const std::wstring& a, const std::wstring& b) {
 
 std::vector<std::wstring> LoadDockPins() {
   std::vector<std::wstring> pins;
-  const std::wstring path = PinPath();
+  const std::wstring path = DockPinsPath();
   if (path.empty()) {
+    Log(L"pins", L"load skipped: empty path");
     return pins;
   }
   FILE* file = nullptr;
   if (_wfopen_s(&file, path.c_str(), L"r, ccs=UTF-8") != 0 || file == nullptr) {
+    Log(L"pins", L"load missing %s", path.c_str());
     return pins;
   }
   wchar_t line[4096]{};
@@ -588,12 +622,14 @@ std::vector<std::wstring> LoadDockPins() {
     pins.push_back(std::move(text));
   }
   fclose(file);
+  Log(L"pins", L"loaded %zu from %s", pins.size(), path.c_str());
   return pins;
 }
 
 bool SaveDockPins(const std::vector<std::wstring>& paths) {
-  const std::wstring path = PinPath();
+  const std::wstring path = DockPinsPath();
   if (path.empty()) {
+    Log(L"pins", L"save failed: empty path");
     return false;
   }
   const std::wstring tmp = path + L".tmp";
@@ -608,8 +644,10 @@ bool SaveDockPins(const std::vector<std::wstring>& paths) {
   fclose(file);
   if (MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) == FALSE) {
     DeleteFileW(tmp.c_str());
+    Log(L"pins", L"save failed move %s", path.c_str());
     return false;
   }
+  Log(L"pins", L"saved %zu to %s", paths.size(), path.c_str());
   return true;
 }
 
@@ -641,6 +679,9 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
           raw.aumid = PathAumid(raw.path);
         }
         raw.title = WindowTitle(hwnd);
+        if (SkipGhostWindow(hwnd, raw.path, raw.aumid, raw.title)) {
+          return TRUE;
+        }
         raw.icon_resource = WindowPropString(hwnd, PKEY_AppUserModel_RelaunchIconResource);
         raw.relaunch_name = WindowPropString(hwnd, PKEY_AppUserModel_RelaunchDisplayNameResource);
         raw.relaunch_command = WindowPropString(hwnd, PKEY_AppUserModel_RelaunchCommand);
@@ -841,13 +882,20 @@ bool ActivateHwnd(HWND hwnd) {
     fg_tid = GetWindowThreadProcessId(fg, nullptr);
   }
   const DWORD self_tid = GetCurrentThreadId();
+  bool attached = false;
   if (fg_tid != 0 && fg_tid != self_tid) {
-    AttachThreadInput(self_tid, fg_tid, TRUE);
+    DWORD_PTR dummy = 0;
+    if (SendMessageTimeoutW(fg, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &dummy) != 0) {
+      attached = AttachThreadInput(self_tid, fg_tid, TRUE) != FALSE;
+    }
   }
   BringWindowToTop(hwnd);
   const BOOL ok = SetForegroundWindow(hwnd);
-  if (fg_tid != 0 && fg_tid != self_tid) {
+  if (attached) {
     AttachThreadInput(self_tid, fg_tid, FALSE);
+  }
+  if (ok == FALSE) {
+    Log(L"task", L"activate failed hwnd=%p", hwnd);
   }
   return ok != FALSE;
 }
@@ -903,12 +951,43 @@ bool LaunchDockApp(const DockApp& app) {
   return false;
 }
 
+void RestoreHwnds(const std::vector<HWND>& windows) {
+  HWND focus = nullptr;
+  for (auto it = windows.rbegin(); it != windows.rend(); ++it) {
+    HWND hwnd = *it;
+    if (hwnd == nullptr || !IsWindow(hwnd)) {
+      continue;
+    }
+    if (IsIconic(hwnd)) {
+      ShowWindow(hwnd, SW_RESTORE);
+    } else if (!IsWindowVisible(hwnd)) {
+      ShowWindow(hwnd, SW_SHOW);
+    }
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    focus = hwnd;
+  }
+  if (focus != nullptr) {
+    ActivateHwnd(focus);
+  }
+}
+
+void HideHwnds(const std::vector<HWND>& windows) {
+  for (HWND hwnd : windows) {
+    if (hwnd != nullptr && IsWindow(hwnd) && !IsIconic(hwnd)) {
+      ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
+    }
+  }
+}
+
 void CloseHwnds(const std::vector<HWND>& windows) {
+  int n = 0;
   for (HWND hwnd : windows) {
     if (hwnd != nullptr && IsWindow(hwnd)) {
       PostMessageW(hwnd, WM_CLOSE, 0, 0);
+      ++n;
     }
   }
+  Log(L"task", L"close posted n=%d", n);
 }
 
 }  // namespace bamti

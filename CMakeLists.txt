@@ -9,6 +9,8 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_executable(bamti WIN32
   src/main.cpp
   src/host.cpp
+  src/paths.cpp
+  src/log.cpp
   src/menu_bar.cpp
   src/clock_renderer.cpp
   src/theme.cpp
@@ -17,6 +19,7 @@ add_executable(bamti WIN32
   src/fullscreen.cpp
   src/task_list.cpp
   src/dock.cpp
+  src/popup_surface.cpp
   src/start_menu.cpp
   src/spotlight.cpp
 )

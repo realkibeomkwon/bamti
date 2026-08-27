@@ -2,6 +2,7 @@
 
 #include "dwm.hpp"
 #include "fullscreen.hpp"
+#include "log.hpp"
 #include "taskbar_controller.hpp"
 #include "theme.hpp"
 
@@ -25,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <numeric>
+#include <utility>
 #include <vector>
 
 namespace bamti {
@@ -33,7 +35,7 @@ namespace {
 constexpr int kIconDip = 36;
 constexpr int kSlotDip = 52;
 constexpr int kHeightDip = 64;
-constexpr int kPadXDip = 18;
+constexpr int kPadXDip = 10;
 constexpr int kGroupGapDip = 12;
 constexpr int kDragSlopDip = 6;
 constexpr int kMarginBottomDip = 8;
@@ -41,21 +43,67 @@ constexpr int kHotDip = 8;
 // macOS Dock is ~20pt at the default bar height (~64pt). DWM ROUND/ROUNDSMALL cannot
 // express that, so the pill is drawn with Direct2D.
 constexpr int kCornerRadiusDip = 20;
+constexpr int kMenuPadDip = 6;
+constexpr int kMenuRowDip = 28;
+constexpr int kMenuSepDip = 8;
+constexpr int kMenuMinWidthDip = 168;
+constexpr int kMenuMaxWidthDip = 280;
+constexpr int kMenuTextPadDip = 12;
 constexpr UINT kHideDelayMs = 100;
+constexpr UINT kRebuildDelayMs = 50;
 constexpr UINT_PTR kHideTimerId = 1;
 constexpr UINT_PTR kPollTimerId = 2;
+constexpr UINT_PTR kRebuildTimerId = 3;
 constexpr UINT kTasksChangedMsg = WM_APP + 20;
+constexpr UINT kMenuCommandMsg = WM_APP + 21;
 constexpr UINT kPinCommand = 1;
 constexpr UINT kUnpinCommand = 2;
-constexpr UINT kCloseCommand = 3;
-constexpr UINT kNewWindowCommand = 4;
+constexpr UINT kQuitCommand = 3;
+constexpr UINT kShowAllCommand = 4;
+constexpr UINT kHideCommand = 5;
 constexpr UINT kWindowCommandBase = 100;
 
 HWND g_notify = nullptr;
 std::atomic<bool> g_rebuild_posted{false};
 
+const wchar_t* MenuCmdName(UINT cmd) {
+  if (cmd >= kWindowCommandBase) {
+    return L"window";
+  }
+  switch (cmd) {
+    case kPinCommand:
+      return L"pin";
+    case kUnpinCommand:
+      return L"unpin";
+    case kQuitCommand:
+      return L"quit";
+    case kShowAllCommand:
+      return L"show-all";
+    case kHideCommand:
+      return L"hide";
+    default:
+      return L"none";
+  }
+}
+
 int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
+}
+
+COLORREF Channel(float x) {
+  return static_cast<COLORREF>(std::clamp(static_cast<int>(x * 255.0f + 0.5f), 0, 255));
+}
+
+COLORREF OpaqueColor(const D2D1_COLOR_F& c) {
+  return RGB(Channel(c.r), Channel(c.g), Channel(c.b));
+}
+
+COLORREF BlendOn(COLORREF under, const D2D1_COLOR_F& over) {
+  const float a = std::clamp(over.a, 0.0f, 1.0f);
+  auto mix = [a](int dst, float src) {
+    return std::clamp(static_cast<int>(dst * (1.0f - a) + src * 255.0f * a + 0.5f), 0, 255);
+  };
+  return RGB(mix(GetRValue(under), over.r), mix(GetGValue(under), over.g), mix(GetBValue(under), over.b));
 }
 
 HMONITOR PrimaryMonitor() {
@@ -601,6 +649,197 @@ HICON QueryWindowIcon(HWND hwnd) {
 
 }  // namespace
 
+struct DockMenuRow {
+  UINT id = 0;
+  std::wstring text;
+  bool separator = false;
+};
+
+class DockMenuContent : public PopupContent {
+ public:
+  void Reset(Dock* owner, const DockApp& app) {
+    owner_ = owner;
+    app_ = app;
+    rows_.clear();
+    window_targets_.clear();
+    if (owner_ == nullptr) {
+      return;
+    }
+
+    window_targets_.reserve(app.windows.size());
+    for (HWND hwnd : app.windows) {
+      if (hwnd == nullptr || !IsWindow(hwnd)) {
+        continue;
+      }
+      std::wstring title = WindowTitle(hwnd);
+      if (title.empty()) {
+        title = app.display_name.empty() ? std::wstring(L"(제목 없음)") : app.display_name;
+      }
+      if (title.size() > 48) {
+        title.resize(47);
+        title.push_back(L'\u2026');
+      }
+      const UINT id = kWindowCommandBase + static_cast<UINT>(window_targets_.size());
+      rows_.push_back({id, std::move(title), false});
+      window_targets_.push_back(hwnd);
+    }
+
+    const bool has_windows = !window_targets_.empty();
+    const bool can_pin = app.pinned || (app.can_pin && !IsSelfExecutable(app.exe_path));
+    auto add_sep = [&]() {
+      if (!rows_.empty() && !rows_.back().separator) {
+        rows_.push_back({0, L"", true});
+      }
+    };
+    if (has_windows && can_pin) {
+      add_sep();
+    }
+    if (app.pinned) {
+      rows_.push_back({kUnpinCommand, L"고정 해제", false});
+    } else if (app.can_pin && !IsSelfExecutable(app.exe_path)) {
+      rows_.push_back({kPinCommand, L"독에 고정", false});
+    }
+    if (has_windows) {
+      if (can_pin) {
+        add_sep();
+      }
+      rows_.push_back({kShowAllCommand, L"모두 보기", false});
+      rows_.push_back({kHideCommand, L"가리기", false});
+      rows_.push_back({kQuitCommand, L"종료", false});
+    }
+    if (!rows_.empty() && rows_.back().separator) {
+      rows_.pop_back();
+    }
+  }
+
+  bool empty() const { return rows_.empty(); }
+  size_t size() const { return rows_.size(); }
+
+  SIZE Measure(UINT dpi) override {
+    const int pad = DipToPx(kMenuPadDip, dpi);
+    const int row_h = DipToPx(kMenuRowDip, dpi);
+    const int sep_h = DipToPx(kMenuSepDip, dpi);
+    const int text_pad = DipToPx(kMenuTextPadDip, dpi);
+    int text_w = 0;
+    for (const DockMenuRow& row : rows_) {
+      if (row.separator || row.text.empty()) {
+        continue;
+      }
+      text_w = (std::max)(text_w, static_cast<int>(PopupTextWidth(dpi, row.text) + 0.5f));
+    }
+    int width = text_w + pad * 2 + text_pad * 2;
+    width = (std::max)(width, DipToPx(kMenuMinWidthDip, dpi));
+    width = (std::min)(width, DipToPx(kMenuMaxWidthDip, dpi));
+    int height = pad * 2;
+    for (const DockMenuRow& row : rows_) {
+      height += row.separator ? sep_h : row_h;
+    }
+    return SIZE{width, height};
+  }
+
+  void Render(ID2D1RenderTarget* target, UINT dpi, int hot) override {
+    if (target == nullptr) {
+      return;
+    }
+    const D2D1_SIZE_F sz = target->GetSize();
+    const RECT client{0, 0, static_cast<LONG>(sz.width), static_cast<LONG>(sz.height)};
+    const bool dark = owner_ != nullptr ? owner_->dark_ : true;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> text;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> line;
+    const D2D1_COLOR_F text_c = ClockTextColor(dark);
+    const D2D1_COLOR_F hover_c = MenuItemHoverFill(dark, false);
+    const D2D1_COLOR_F line_c = DockStrokeColor(dark);
+    target->CreateSolidColorBrush(D2D1::ColorF(text_c.r, text_c.g, text_c.b, 1.0f), text.GetAddressOf());
+    target->CreateSolidColorBrush(hover_c, hover.GetAddressOf());
+    target->CreateSolidColorBrush(D2D1::ColorF(line_c.r, line_c.g, line_c.b, line_c.a), line.GetAddressOf());
+    const int text_pad = DipToPx(kMenuTextPadDip, dpi);
+    for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
+      const DockMenuRow& row = rows_[static_cast<size_t>(i)];
+      const RECT rc = RowRect(i, dpi, client.right);
+      if (row.separator) {
+        if (!line) {
+          continue;
+        }
+        const float y = static_cast<float>(rc.top + (rc.bottom - rc.top) / 2) + 0.5f;
+        target->DrawLine(D2D1::Point2F(static_cast<float>(rc.left), y),
+                         D2D1::Point2F(static_cast<float>(rc.right), y), line.Get(), 1.0f);
+        continue;
+      }
+      if (i == hot && hover) {
+        target->FillRectangle(
+            D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top), static_cast<float>(rc.right),
+                        static_cast<float>(rc.bottom)),
+            hover.Get());
+      }
+      if (text) {
+        DrawPopupText(target, dpi, row.text,
+                      D2D1::RectF(static_cast<float>(rc.left + text_pad), static_cast<float>(rc.top),
+                                  static_cast<float>(rc.right - text_pad), static_cast<float>(rc.bottom)),
+                      text.Get());
+      }
+    }
+  }
+
+  int HitTest(POINT client, UINT dpi) const override {
+    int width = 0;
+    if (owner_ != nullptr && owner_->popup_.hwnd() != nullptr) {
+      RECT rc{};
+      GetClientRect(owner_->popup_.hwnd(), &rc);
+      width = rc.right;
+    }
+    for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
+      if (rows_[static_cast<size_t>(i)].separator) {
+        continue;
+      }
+      const RECT rc = RowRect(i, dpi, width);
+      if (PtInRect(&rc, client)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  void Invoke(int index) override {
+    if (owner_ == nullptr || owner_->hwnd_ == nullptr || index < 0 || index >= static_cast<int>(rows_.size())) {
+      return;
+    }
+    const UINT cmd = rows_[static_cast<size_t>(index)].id;
+    if (cmd == 0) {
+      return;
+    }
+    owner_->pending_menu_cmd_ = cmd;
+    owner_->pending_menu_app_ = app_;
+    owner_->pending_menu_windows_ = window_targets_;
+    PostMessageW(owner_->hwnd_, kMenuCommandMsg, 0, 0);
+  }
+
+ private:
+  RECT RowRect(int index, UINT dpi, int width) const {
+    RECT result{};
+    if (index < 0 || index >= static_cast<int>(rows_.size())) {
+      return result;
+    }
+    const int pad = DipToPx(kMenuPadDip, dpi);
+    const int row_h = DipToPx(kMenuRowDip, dpi);
+    const int sep_h = DipToPx(kMenuSepDip, dpi);
+    int y = pad;
+    for (int i = 0; i < index; ++i) {
+      y += rows_[static_cast<size_t>(i)].separator ? sep_h : row_h;
+    }
+    const int h = rows_[static_cast<size_t>(index)].separator ? sep_h : row_h;
+    result = {pad, y, width - pad, y + h};
+    return result;
+  }
+
+  Dock* owner_ = nullptr;
+  DockApp app_{};
+  std::vector<DockMenuRow> rows_;
+  std::vector<HWND> window_targets_;
+};
+
+Dock::Dock() = default;
+
 Dock::~Dock() {
   for (HWINEVENTHOOK hook : hooks_) {
     if (hook != nullptr) {
@@ -612,6 +851,7 @@ Dock::~Dock() {
     g_notify = nullptr;
   }
   ResetIconCache();
+  popup_.Destroy();
   if (hwnd_ != nullptr) {
     DestroyWindow(hwnd_);
     hwnd_ = nullptr;
@@ -646,15 +886,17 @@ bool Dock::RegisterClasses(HINSTANCE instance) {
 
 bool Dock::Create(HINSTANCE instance) {
   if (!RegisterClasses(instance)) {
+    Log(L"dock", L"register classes failed");
     return false;
   }
 
   dark_ = ShellUsesDarkMode();
   pins_ = LoadDockPins();
   SanitizePins();
+  Log(L"dock", L"create pins=%zu", pins_.size());
 
-  hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, kDockClass, L"bamti dock", WS_POPUP, 0, 0, 0,
-                          0, nullptr, nullptr, instance, this);
+  hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_NOACTIVATE, kDockClass,
+                          L"bamti dock", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance, this);
   if (hwnd_ == nullptr) {
     return false;
   }
@@ -676,10 +918,7 @@ bool Dock::Create(HINSTANCE instance) {
 
   const DWORD hook_flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
   const DWORD ranges[][2] = {
-      {EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND},
-      {EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND},
       {EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE},
-      {EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE},
       {EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED},
   };
   for (const auto& range : ranges) {
@@ -690,7 +929,13 @@ bool Dock::Create(HINSTANCE instance) {
   }
 
   SetTimer(hwnd_, kPollTimerId, 50, nullptr);
+  menu_content_ = std::make_unique<DockMenuContent>();
+  if (!popup_.Create(instance, hwnd_)) {
+    Log(L"dock", L"popup create failed err=%lu", GetLastError());
+  }
+  popup_.SetDark(dark_);
   RefreshFullscreen();
+  Log(L"dock", L"ready hwnd=%p items=%zu", hwnd_, items_.size());
   return true;
 }
 
@@ -762,6 +1007,9 @@ void CALLBACK Dock::WinEventProc(HWINEVENTHOOK, DWORD, HWND hwnd, LONG object, L
   if (object != OBJID_WINDOW) {
     return;
   }
+  if (hwnd != nullptr && GetAncestor(hwnd, GA_ROOT) != hwnd) {
+    return;
+  }
   if (g_notify == nullptr) {
     return;
   }
@@ -776,6 +1024,12 @@ LRESULT Dock::HandleHot(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_NCMOUSEMOVE:
       if (!fullscreen_occluded_) {
         ShowPill();
+      }
+      return 0;
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+      if (popup_.IsOpen()) {
+        popup_.Close();
       }
       return 0;
     default:
@@ -799,16 +1053,34 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         if (!PointerOverUi() && !Busy()) {
           HidePill();
         }
+      } else if (wparam == kRebuildTimerId) {
+        KillTimer(hwnd_, kRebuildTimerId);
+        if (Busy()) {
+          pending_rebuild_ = true;
+        } else {
+          Rebuild();
+        }
       }
       return 0;
     case kTasksChangedMsg:
       g_rebuild_posted = false;
-      TaskbarController::Rehide();
-      if (Busy()) {
-        pending_rebuild_ = true;
-        return 0;
+      ScheduleRebuild();
+      return 0;
+    case kMenuCommandMsg: {
+      const UINT cmd = pending_menu_cmd_;
+      DockApp app = std::move(pending_menu_app_);
+      std::vector<HWND> windows = std::move(pending_menu_windows_);
+      pending_menu_cmd_ = 0;
+      ApplyMenuCommand(cmd, app, windows);
+      return 0;
+    }
+    case kPopupClosedMsg:
+      if (pending_rebuild_) {
+        ScheduleRebuild();
       }
-      Rebuild();
+      if (!PointerOverUi()) {
+        StartHideTimer();
+      }
       return 0;
     case WM_DPICHANGED:
     case WM_DISPLAYCHANGE:
@@ -822,6 +1094,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (area != nullptr && lstrcmpiW(area, L"ImmersiveColorSet") == 0) {
         dark_ = ShellUsesDarkMode();
         ApplyBackdrop();
+        popup_.SetDark(dark_);
         RenderLayered();
       }
       return 0;
@@ -846,6 +1119,9 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     case WM_LBUTTONDOWN: {
+      if (popup_.IsOpen()) {
+        popup_.Close();
+      }
       const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       pressed_ = HitTest(pt);
       dragging_ = false;
@@ -873,12 +1149,17 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       RenderLayered();
       if (index >= 0 && index == pressed && index < static_cast<int>(items_.size())) {
-        const DockApp& app = items_[static_cast<size_t>(index)];
+        const DockApp app = items_[static_cast<size_t>(index)];
+        Log(L"dock", L"click index=%d running=%d hwnd=%p name=%s", index, app.running ? 1 : 0, app.hwnd,
+            app.display_name.c_str());
         if (app.running && app.hwnd != nullptr) {
           ActivateHwnd(app.hwnd);
         } else {
           LaunchDockApp(app);
         }
+      }
+      if (pending_rebuild_) {
+        ScheduleRebuild();
       }
       return 0;
     }
@@ -895,7 +1176,9 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (index >= 0) {
         POINT screen = pt;
         ClientToScreen(hwnd_, &screen);
-        ShowContextMenu(screen, index);
+        OpenDockMenu(screen, index);
+      } else if (popup_.IsOpen()) {
+        popup_.Close();
       }
       return 0;
     }
@@ -921,6 +1204,8 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_DESTROY:
       KillTimer(hwnd_, kHideTimerId);
       KillTimer(hwnd_, kPollTimerId);
+      KillTimer(hwnd_, kRebuildTimerId);
+      popup_.Destroy();
       if (g_notify == hwnd_) {
         g_notify = nullptr;
       }
@@ -939,6 +1224,20 @@ void Dock::Rebuild() {
   pending_rebuild_ = false;
   items_ = CollectDockApps(pins_);
   EnsureIcons();
+  size_t kept = 0;
+  for (size_t i = 0; i < items_.size(); ++i) {
+    if (items_[i].pinned || (i < icons_.size() && icons_[i] != nullptr)) {
+      if (kept != i) {
+        items_[kept] = std::move(items_[i]);
+      }
+      ++kept;
+    }
+  }
+  if (kept != items_.size()) {
+    items_.resize(kept);
+    EnsureIcons();
+  }
+  Log(L"dock", L"rebuild items=%zu pins=%zu shown=%d", items_.size(), pins_.size(), shown_ ? 1 : 0);
   if (shown_) {
     if (items_.empty()) {
       HidePill();
@@ -1237,6 +1536,9 @@ void Dock::ShowPill() {
 
 void Dock::HidePill() {
   CancelHideTimer();
+  if (popup_.IsOpen()) {
+    popup_.Close();
+  }
   if (dragging_) {
     EndDrag(false);
   }
@@ -1276,6 +1578,14 @@ void Dock::ArmMouseLeave() {
 }
 
 void Dock::PollPointer() {
+  if (popup_.IsOpen()) {
+    RefreshFullscreen();
+    if (TaskbarController::Rehide()) {
+      RaiseOverlays();
+    }
+    CancelHideTimer();
+    return;
+  }
   RefreshFullscreen();
   if (TaskbarController::Rehide()) {
     RaiseOverlays();
@@ -1313,78 +1623,68 @@ void Dock::SetFullscreenOccluded(bool occluded) {
 }
 
 void Dock::RaiseOverlays() {
-  if (fullscreen_occluded_) {
-    return;
-  }
-  const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-  if (hot_hwnd_ != nullptr) {
-    SetWindowPos(hot_hwnd_, HWND_TOPMOST, 0, 0, 0, 0, flags);
-  }
-  if (shown_ && hwnd_ != nullptr) {
-    SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, flags);
+  SetOverlaysTopmost(true);
+  if (popup_.IsOpen() && popup_.hwnd() != nullptr) {
+    SetWindowPos(popup_.hwnd(), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
   }
 }
 
-void Dock::ShowContextMenu(POINT screen, int index) {
+void Dock::SetOverlaysTopmost(bool topmost) {
+  if (fullscreen_occluded_ && topmost) {
+    return;
+  }
+  const HWND z = topmost ? HWND_TOPMOST : HWND_NOTOPMOST;
+  const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+  if (hot_hwnd_ != nullptr) {
+    SetWindowPos(hot_hwnd_, z, 0, 0, 0, 0, flags);
+  }
+  if (shown_ && hwnd_ != nullptr) {
+    SetWindowPos(hwnd_, z, 0, 0, 0, 0, flags);
+  }
+}
+
+void Dock::OpenDockMenu(POINT screen, int index) {
   if (index < 0 || index >= static_cast<int>(items_.size())) {
     return;
   }
-  const HMENU menu = CreatePopupMenu();
-  if (menu == nullptr) {
+  const ULONGLONG started = GetTickCount64();
+  popup_.Close();
+  CancelHideTimer();
+  if (tooltip_ != nullptr) {
+    SendMessageW(tooltip_, TTM_POP, 0, 0);
+  }
+  if (!menu_content_) {
+    menu_content_ = std::make_unique<DockMenuContent>();
+  }
+  const DockApp& app = items_[static_cast<size_t>(index)];
+  Log(L"dock", L"menu open index=%d name=%s running=%d windows=%zu pinned=%d", index, app.display_name.c_str(),
+      app.running ? 1 : 0, app.windows.size(), app.pinned ? 1 : 0);
+  menu_content_->Reset(this, app);
+  if (menu_content_->empty()) {
+    Log(L"dock", L"menu empty index=%d", index);
     return;
   }
-  menu_open_ = true;
-  CancelHideTimer();
-  context_index_ = index;
-  const DockApp& app = items_[static_cast<size_t>(index)];
-  std::vector<HWND> window_cmds;
-  window_cmds.reserve(app.windows.size());
-  for (HWND hwnd : app.windows) {
-    if (hwnd == nullptr || !IsWindow(hwnd)) {
-      continue;
-    }
-    std::wstring title = WindowTitle(hwnd);
-    if (title.empty()) {
-      title = app.display_name.empty() ? std::wstring(L"(제목 없음)") : app.display_name;
-    }
-    if (title.size() > 48) {
-      title.resize(47);
-      title.push_back(L'\u2026');
-    }
-    const UINT id = kWindowCommandBase + static_cast<UINT>(window_cmds.size());
-    AppendMenuW(menu, MF_STRING, id, title.c_str());
-    window_cmds.push_back(hwnd);
+  popup_.SetDark(dark_);
+  if (!popup_.Open(menu_content_.get(), screen, PopupSurface::Anchor::AboveAt)) {
+    Log(L"dock", L"menu open failed err=%lu", GetLastError());
+    return;
   }
-  if (!window_cmds.empty()) {
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  }
-  AppendMenuW(menu, MF_STRING, kNewWindowCommand, L"새 창");
-  if (app.pinned) {
-    AppendMenuW(menu, MF_STRING, kUnpinCommand, L"고정 해제");
-  } else if (app.can_pin && !IsSelfExecutable(app.exe_path)) {
-    AppendMenuW(menu, MF_STRING, kPinCommand, L"독에 고정");
-  }
-  if (app.running) {
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kCloseCommand, L"닫기");
-  }
+  Log(L"dock", L"menu hwnd=%p rows=%zu %ums", popup_.hwnd(), menu_content_->size(),
+      static_cast<unsigned>(GetTickCount64() - started));
+}
 
-  UINT cmd = 0;
-  if (GetMenuItemCount(menu) > 0) {
-    cmd = TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN | TPM_RETURNCMD, screen.x, screen.y,
-                           hwnd_, nullptr);
-  }
-  DestroyMenu(menu);
-  menu_open_ = false;
-  context_index_ = -1;
-
+void Dock::ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND>& window_cmds) {
+  Log(L"dock", L"menu cmd=%u %s name=%s windows=%zu", cmd, MenuCmdName(cmd), app.display_name.c_str(),
+      app.windows.size());
   if (cmd >= kWindowCommandBase) {
     const size_t window_index = static_cast<size_t>(cmd - kWindowCommandBase);
     if (window_index < window_cmds.size()) {
       ActivateHwnd(window_cmds[window_index]);
     }
-  } else if (cmd == kNewWindowCommand) {
-    LaunchDockApp(app);
+  } else if (cmd == kShowAllCommand) {
+    RestoreHwnds(app.windows);
+  } else if (cmd == kHideCommand) {
+    HideHwnds(app.windows);
   } else if (cmd == kPinCommand) {
     const std::wstring id = DockPinId(app);
     if (app.can_pin && !id.empty()) {
@@ -1399,7 +1699,7 @@ void Dock::ShowContextMenu(POINT screen, int index) {
         pins_.push_back(std::move(stored));
         SaveDockPins(pins_);
       }
-      Rebuild();
+      pending_rebuild_ = true;
     }
   } else if (cmd == kUnpinCommand) {
     const std::wstring id = DockPinId(app);
@@ -1407,13 +1707,13 @@ void Dock::ShowContextMenu(POINT screen, int index) {
                                [&](const std::wstring& pin) { return SameDockPin(pin, id); }),
                 pins_.end());
     SaveDockPins(pins_);
-    Rebuild();
-  } else if (cmd == kCloseCommand) {
+    pending_rebuild_ = true;
+  } else if (cmd == kQuitCommand) {
     CloseHwnds(app.windows);
   }
 
-  if (pending_rebuild_ && !Busy()) {
-    Rebuild();
+  if (pending_rebuild_) {
+    ScheduleRebuild();
   }
   if (!PointerOverUi()) {
     StartHideTimer();
@@ -1430,8 +1730,16 @@ void Dock::SanitizePins() {
   }
 }
 
+void Dock::ScheduleRebuild() {
+  pending_rebuild_ = true;
+  if (hwnd_ == nullptr || Busy()) {
+    return;
+  }
+  SetTimer(hwnd_, kRebuildTimerId, kRebuildDelayMs, nullptr);
+}
+
 bool Dock::Busy() const {
-  return menu_open_ || dragging_;
+  return popup_.IsOpen() || dragging_ || pressed_ >= 0;
 }
 
 int Dock::PinnedCount() const {
@@ -1542,7 +1850,7 @@ void Dock::EndDrag(bool commit) {
     }
   }
   if (pending_rebuild_) {
-    Rebuild();
+    ScheduleRebuild();
   } else if (shown_) {
     RenderLayered();
   }

@@ -28,6 +28,8 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
 bool ActivateHwnd(HWND hwnd);
 bool LaunchExe(const std::wstring& path);
 bool LaunchDockApp(const DockApp& app);
+void RestoreHwnds(const std::vector<HWND>& windows);
+void HideHwnds(const std::vector<HWND>& windows);
 void CloseHwnds(const std::vector<HWND>& windows);
 
 std::wstring DockPinId(const DockApp& app);

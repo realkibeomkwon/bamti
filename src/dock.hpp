@@ -1,10 +1,12 @@
 #pragma once
 
+#include "popup_surface.hpp"
 #include "task_list.hpp"
 
 #include <windows.h>
 
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -13,9 +15,11 @@ namespace bamti {
 inline constexpr wchar_t kDockClass[] = L"bamti.Dock";
 inline constexpr wchar_t kDockHotClass[] = L"bamti.DockHot";
 
+class DockMenuContent;
+
 class Dock {
  public:
-  Dock() = default;
+  Dock();
   Dock(const Dock&) = delete;
   Dock& operator=(const Dock&) = delete;
   ~Dock();
@@ -23,6 +27,8 @@ class Dock {
   bool Create(HINSTANCE instance);
 
  private:
+  friend class DockMenuContent;
+
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
   static LRESULT CALLBACK HotProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
   static void CALLBACK WinEventProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd, LONG object, LONG child,
@@ -49,8 +55,11 @@ class Dock {
   void RefreshFullscreen();
   void SetFullscreenOccluded(bool occluded);
   void RaiseOverlays();
-  void ShowContextMenu(POINT screen, int index);
+  void OpenDockMenu(POINT screen, int index);
+  void ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND>& window_cmds);
+  void ScheduleRebuild();
   void ArmMouseLeave();
+  void SetOverlaysTopmost(bool topmost);
   void SanitizePins();
   void BeginDragIfNeeded(POINT client);
   void UpdateDrag(POINT client);
@@ -72,14 +81,15 @@ class Dock {
   bool shown_ = false;
   bool fullscreen_occluded_ = false;
   bool dark_ = true;
-  bool menu_open_ = false;
   bool hide_armed_ = false;
   bool dragging_ = false;
   bool pending_rebuild_ = false;
   int pressed_ = -1;
-  int context_index_ = -1;
   int drag_index_ = -1;
   int drop_index_ = -1;
+  UINT pending_menu_cmd_ = 0;
+  DockApp pending_menu_app_{};
+  std::vector<HWND> pending_menu_windows_;
   POINT drag_origin_{};
   std::vector<DockApp> items_;
   std::vector<std::wstring> pins_;
@@ -88,6 +98,8 @@ class Dock {
   std::map<std::wstring, HBITMAP> icon_cache_;
   std::wstring tooltip_text_;
   std::vector<HWINEVENTHOOK> hooks_;
+  PopupSurface popup_;
+  std::unique_ptr<DockMenuContent> menu_content_;
 };
 
 }  // namespace bamti

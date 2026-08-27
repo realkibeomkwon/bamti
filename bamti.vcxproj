@@ -80,6 +80,8 @@
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\host.cpp" />
+    <ClCompile Include="src\paths.cpp" />
+    <ClCompile Include="src\log.cpp" />
     <ClCompile Include="src\menu_bar.cpp" />
     <ClCompile Include="src\clock_renderer.cpp" />
     <ClCompile Include="src\theme.cpp" />
@@ -88,11 +90,14 @@
     <ClCompile Include="src\fullscreen.cpp" />
     <ClCompile Include="src\task_list.cpp" />
     <ClCompile Include="src\dock.cpp" />
+    <ClCompile Include="src\popup_surface.cpp" />
     <ClCompile Include="src\start_menu.cpp" />
     <ClCompile Include="src\spotlight.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\host.hpp" />
+    <ClInclude Include="src\paths.hpp" />
+    <ClInclude Include="src\log.hpp" />
     <ClInclude Include="src\menu_bar.hpp" />
     <ClInclude Include="src\clock_renderer.hpp" />
     <ClInclude Include="src\theme.hpp" />
@@ -103,6 +108,7 @@
     <ClInclude Include="src\fullscreen.hpp" />
     <ClInclude Include="src\task_list.hpp" />
     <ClInclude Include="src\dock.hpp" />
+    <ClInclude Include="src\popup_surface.hpp" />
     <ClInclude Include="src\start_menu.hpp" />
     <ClInclude Include="src\spotlight.hpp" />
     <ClInclude Include="src\json_line.hpp" />
