@@ -2,6 +2,7 @@
 
 #include "clock_renderer.hpp"
 #include "pipe_server.hpp"
+#include "popup_surface.hpp"
 #include "spotlight.hpp"
 #include "start_menu.hpp"
 #include "status_item.hpp"
@@ -9,6 +10,7 @@
 
 #include <windows.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -16,9 +18,11 @@ namespace bamti {
 
 inline constexpr wchar_t kMenuBarClass[] = L"bamti.MenuBar";
 
+class StatusPanelContent;
+
 class MenuBar {
  public:
-  MenuBar() = default;
+  MenuBar();
   MenuBar(const MenuBar&) = delete;
   MenuBar& operator=(const MenuBar&) = delete;
   ~MenuBar();
@@ -47,10 +51,13 @@ class MenuBar {
   void ArmMouseLeave();
   void ToggleStartMenu(bool from_keyboard = false);
   void ToggleSpotlight();
+  void OpenStatusPanel(const StatusHit& hit);
   bool InstallWinHook();
   void RemoveWinHook();
   UINT Dpi() const;
   int BarHeightPx() const;
+
+  friend class StatusPanelContent;
 
   HWND hwnd_ = nullptr;
   HWND tooltip_ = nullptr;
@@ -67,6 +74,8 @@ class MenuBar {
   TaskbarController taskbar_;
   StartMenu start_menu_;
   Spotlight spotlight_;
+  PopupSurface status_popup_;
+  std::unique_ptr<StatusPanelContent> status_panel_;
   std::vector<StatusHit> hits_;
   std::wstring tooltip_text_;
 };

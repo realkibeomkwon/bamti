@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,23 @@ constexpr float kStartHoverInsetYDip = 4.0f;
 constexpr float kStartHoverRadiusDip = 6.0f;
 // @WLOGO_96x96.png glyph is 80px with 38px tiles and a 4px gap, color #0078D4.
 constexpr float kWindowsLogoGap = 4.0f / 80.0f;
+
+std::wstring StatusBarText(const StatusItem& item) {
+  if (item.icon_glyph.empty()) {
+    return item.text;
+  }
+  if (item.text.empty()) {
+    return item.icon_glyph;
+  }
+  return item.icon_glyph + L" " + item.text;
+}
+
+D2D1_COLOR_F StatusItemColor(bool dark, uint32_t accent) {
+  if (accent != 0) {
+    return D2D1::ColorF(accent);
+  }
+  return ClockTextColor(dark);
+}
 
 void FillWindowsLogo(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, float left_dip, float top_dip, float size_dip,
                      UINT dpi) {
@@ -266,16 +284,18 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, bool dark, const std::wstr
 
   struct Fitted {
     const StatusItem* item;
+    std::wstring label;
     Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
     DWRITE_TEXT_METRICS metrics;
   };
   std::vector<Fitted> fitted;
   for (const auto& item : ordered) {
-    if (item.text.empty()) {
+    Fitted next{};
+    next.label = StatusBarText(item);
+    if (next.label.empty()) {
       continue;
     }
-    Fitted next{};
-    if (!MakeLayout(item.text, width_dip, height_dip, next.layout, next.metrics)) {
+    if (!MakeLayout(next.label, width_dip, height_dip, next.layout, next.metrics)) {
       continue;
     }
     const float left = cursor - next.metrics.widthIncludingTrailingWhitespace;
@@ -304,6 +324,7 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, bool dark, const std::wstr
     const float width = entry.metrics.widthIncludingTrailingWhitespace;
     const float x = cursor - width;
     const float y = (height_dip - entry.metrics.height) * 0.5f;
+    brush->SetColor(StatusItemColor(dark, entry.item->accent));
     rt_->DrawTextLayout(D2D1::Point2F(x, y), entry.layout.Get(), brush.Get(),
                         D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
     if (hits != nullptr) {

@@ -7,14 +7,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <optional>
 
 namespace bamti {
 namespace {
 
-constexpr DWORD kPipeBuffer = 4096;
+constexpr DWORD kPipeBuffer = 16384;
 constexpr DWORD kMaxPipeInstances = 16;
 constexpr ULONGLONG kHeartbeatMs = 15000;
-constexpr size_t kMaxLineBytes = 4096;
+constexpr size_t kMaxLineBytes = 16384;
 constexpr size_t kMaxIdBytes = 128;
 
 struct UserOnlySd {
@@ -85,13 +86,78 @@ std::wstring Utf8ToWide(std::string_view u8) {
   return wide;
 }
 
-std::wstring TruncateLabel(std::wstring text) {
-  if (text.size() <= kStatusTextMaxChars) {
+std::wstring TruncateWide(std::wstring text, size_t max_chars) {
+  if (text.size() <= max_chars) {
     return text;
   }
-  text.resize(kStatusTextMaxChars - 1);
+  if (max_chars == 0) {
+    return {};
+  }
+  text.resize(max_chars - 1);
   text.push_back(L'\u2026');
   return text;
+}
+
+std::wstring TruncateLabel(std::wstring text) {
+  return TruncateWide(std::move(text), kStatusTextMaxChars);
+}
+
+float ClampUnit(double value) {
+  if (value < 0.0) {
+    return 0.0f;
+  }
+  if (value > 1.0) {
+    return 1.0f;
+  }
+  return static_cast<float>(value);
+}
+
+std::optional<StatusPanel> ParsePanel(std::string_view raw) {
+  StatusPanel panel;
+  if (const auto title = json::GetString(raw, "title")) {
+    panel.title = TruncateWide(Utf8ToWide(*title), kStatusPanelTextMaxChars);
+  }
+  if (const auto subtitle = json::GetString(raw, "subtitle")) {
+    panel.subtitle = TruncateWide(Utf8ToWide(*subtitle), kStatusPanelTextMaxChars);
+  }
+  if (const auto updated = json::GetString(raw, "updated")) {
+    panel.updated_text = TruncateWide(Utf8ToWide(*updated), kStatusPanelTextMaxChars);
+  }
+  if (const auto gauges = json::GetRaw(raw, "gauges")) {
+    json::ForEachArray(*gauges, [&](std::string_view one) {
+      if (panel.gauges.size() >= kStatusGaugeMax) {
+        return true;
+      }
+      StatusGauge gauge;
+      if (const auto label = json::GetString(one, "label")) {
+        gauge.label = TruncateWide(Utf8ToWide(*label), kStatusPanelTextMaxChars);
+      }
+      if (const auto value = json::GetDouble(one, "value")) {
+        gauge.value = ClampUnit(*value);
+      }
+      if (const auto detail = json::GetString(one, "detail")) {
+        gauge.detail = TruncateWide(Utf8ToWide(*detail), kStatusPanelTextMaxChars);
+      }
+      if (const auto note = json::GetString(one, "note")) {
+        gauge.note = TruncateWide(Utf8ToWide(*note), kStatusPanelTextMaxChars);
+      }
+      panel.gauges.push_back(std::move(gauge));
+      return true;
+    });
+  }
+  for (const auto& action : json::GetStringArray(raw, "actions")) {
+    if (panel.actions.size() >= kStatusActionMax) {
+      break;
+    }
+    const std::wstring wide = TruncateWide(Utf8ToWide(action), kStatusPanelTextMaxChars);
+    if (!wide.empty()) {
+      panel.actions.push_back(wide);
+    }
+  }
+  if (panel.title.empty() && panel.gauges.empty() && panel.actions.empty()) {
+    return std::nullopt;
+  }
+  return panel;
 }
 
 bool ValidId(std::string_view id) {
@@ -447,8 +513,19 @@ void PipeServer::HandleLine(Client* client, std::string_view line) {
     if (const auto tip = json::GetString(line, "tooltip")) {
       item.tooltip = Utf8ToWide(*tip);
     }
+    if (const auto glyph = json::GetString(line, "icon_glyph")) {
+      item.icon_glyph = TruncateWide(Utf8ToWide(*glyph), 8);
+    } else if (const auto icon = json::GetString(line, "icon")) {
+      item.icon_glyph = TruncateWide(Utf8ToWide(*icon), 8);
+    }
+    if (const auto accent = json::GetUint32(line, "accent")) {
+      item.accent = *accent;
+    }
     if (const auto pri = json::GetInt(line, "priority")) {
       item.priority = *pri;
+    }
+    if (const auto panel = json::GetRaw(line, "panel")) {
+      item.panel = ParsePanel(*panel);
     }
     std::lock_guard lock(mu_);
     items_[item.id] = Record{item, client->id};

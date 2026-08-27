@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace bamti::json {
 namespace {
@@ -273,6 +274,116 @@ inline std::optional<int> GetInt(std::string_view json, std::string_view key) {
     return std::nullopt;
   }
   return found;
+}
+
+inline std::optional<std::string_view> GetRaw(std::string_view json, std::string_view key) {
+  std::optional<std::string_view> found;
+  const bool ok = ForEachField(json, [&](const std::string& k, std::string_view raw) {
+    if (k == key) {
+      found = raw;
+    }
+    return true;
+  });
+  if (!ok) {
+    return std::nullopt;
+  }
+  return found;
+}
+
+inline std::optional<double> GetDouble(std::string_view json, std::string_view key) {
+  std::optional<double> found;
+  const bool ok = ForEachField(json, [&](const std::string& k, std::string_view raw) {
+    if (k == key) {
+      std::string_view cur = raw;
+      SkipWs(cur);
+      if (cur.empty()) {
+        return true;
+      }
+      char* end = nullptr;
+      const double value = std::strtod(cur.data(), &end);
+      if (end != cur.data()) {
+        found = value;
+      }
+    }
+    return true;
+  });
+  if (!ok) {
+    return std::nullopt;
+  }
+  return found;
+}
+
+inline std::optional<uint32_t> GetUint32(std::string_view json, std::string_view key) {
+  std::optional<uint32_t> found;
+  const bool ok = ForEachField(json, [&](const std::string& k, std::string_view raw) {
+    if (k == key) {
+      std::string_view cur = raw;
+      SkipWs(cur);
+      if (cur.empty()) {
+        return true;
+      }
+      char* end = nullptr;
+      const unsigned long value = std::strtoul(cur.data(), &end, 10);
+      if (end != cur.data()) {
+        found = static_cast<uint32_t>(value);
+      }
+    }
+    return true;
+  });
+  if (!ok) {
+    return std::nullopt;
+  }
+  return found;
+}
+
+inline bool ForEachArray(std::string_view json, const auto& fn) {
+  SkipWs(json);
+  if (json.empty() || json.front() != '[') {
+    return false;
+  }
+  json.remove_prefix(1);
+  SkipWs(json);
+  if (!json.empty() && json.front() == ']') {
+    return true;
+  }
+  for (;;) {
+    SkipWs(json);
+    if (json.empty()) {
+      return false;
+    }
+    std::string_view value = json;
+    if (!SkipValue(json)) {
+      return false;
+    }
+    const size_t n = static_cast<size_t>(json.data() - value.data());
+    if (!fn(value.substr(0, n))) {
+      return false;
+    }
+    SkipWs(json);
+    if (!json.empty() && json.front() == ',') {
+      json.remove_prefix(1);
+      continue;
+    }
+    SkipWs(json);
+    return !json.empty() && json.front() == ']';
+  }
+}
+
+inline std::vector<std::string> GetStringArray(std::string_view json, std::string_view key) {
+  std::vector<std::string> out;
+  const auto raw = GetRaw(json, key);
+  if (!raw) {
+    return out;
+  }
+  ForEachArray(*raw, [&](std::string_view one) {
+    std::string_view cur = one;
+    SkipWs(cur);
+    if (const auto s = ParseString(cur)) {
+      out.push_back(*s);
+    }
+    return true;
+  });
+  return out;
 }
 
 inline std::string Escape(std::string_view s) {
