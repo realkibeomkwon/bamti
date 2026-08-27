@@ -360,9 +360,10 @@ bool LaunchAumid(const std::wstring& aumid) {
   return false;
 }
 
-std::wstring WindowPropString(HWND hwnd, const PROPERTYKEY& key) {
-  Microsoft::WRL::ComPtr<IPropertyStore> store;
-  if (FAILED(SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&store))) || !store) {
+std::wstring ProcessAumid(HWND hwnd);
+
+std::wstring ReadStoreString(IPropertyStore* store, const PROPERTYKEY& key) {
+  if (store == nullptr) {
     return {};
   }
   PROPVARIANT value;
@@ -373,6 +374,28 @@ std::wstring WindowPropString(HWND hwnd, const PROPERTYKEY& key) {
     out = value.pwszVal;
   }
   PropVariantClear(&value);
+  return out;
+}
+
+struct WindowProps {
+  std::wstring aumid;
+  std::wstring icon_resource;
+  std::wstring relaunch_name;
+  std::wstring relaunch_command;
+};
+
+WindowProps ReadWindowProps(HWND hwnd) {
+  WindowProps out;
+  Microsoft::WRL::ComPtr<IPropertyStore> store;
+  if (SUCCEEDED(SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&store))) && store) {
+    out.aumid = ReadStoreString(store.Get(), PKEY_AppUserModel_ID);
+    out.icon_resource = ReadStoreString(store.Get(), PKEY_AppUserModel_RelaunchIconResource);
+    out.relaunch_name = ReadStoreString(store.Get(), PKEY_AppUserModel_RelaunchDisplayNameResource);
+    out.relaunch_command = ReadStoreString(store.Get(), PKEY_AppUserModel_RelaunchCommand);
+  }
+  if (out.aumid.empty()) {
+    out.aumid = ProcessAumid(hwnd);
+  }
   return out;
 }
 
@@ -402,14 +425,6 @@ std::wstring ProcessAumid(HWND hwnd) {
   return id;
 }
 
-std::wstring WindowAumid(HWND hwnd) {
-  std::wstring aumid = WindowPropString(hwnd, PKEY_AppUserModel_ID);
-  if (aumid.empty()) {
-    aumid = ProcessAumid(hwnd);
-  }
-  return aumid;
-}
-
 std::wstring PathAumid(const std::wstring& path) {
   if (path.empty()) {
     return {};
@@ -432,6 +447,50 @@ std::wstring PathAumid(const std::wstring& path) {
   }
   cache.emplace(path, out);
   return out;
+}
+
+struct WindowCacheEntry {
+  std::wstring path;
+  WindowProps props;
+};
+
+constexpr size_t kWindowCacheMax = 512;
+std::unordered_map<HWND, WindowCacheEntry> g_window_cache;
+
+const WindowCacheEntry& CachedWindow(HWND hwnd) {
+  if (const auto it = g_window_cache.find(hwnd); it != g_window_cache.end()) {
+    return it->second;
+  }
+  if (g_window_cache.size() >= kWindowCacheMax) {
+    g_window_cache.clear();
+  }
+  WindowCacheEntry entry;
+  entry.path = WindowExePath(hwnd);
+  entry.props = ReadWindowProps(hwnd);
+  if (entry.props.aumid.empty() && !entry.path.empty() && !IsHostExe(entry.path)) {
+    entry.props.aumid = PathAumid(entry.path);
+  }
+  return g_window_cache.emplace(hwnd, std::move(entry)).first->second;
+}
+
+void PruneWindowCache() {
+  for (auto it = g_window_cache.begin(); it != g_window_cache.end();) {
+    if (it->first == nullptr || !IsWindow(it->first)) {
+      it = g_window_cache.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+IVirtualDesktopManager* DesktopManager() {
+  static Microsoft::WRL::ComPtr<IVirtualDesktopManager> vdm;
+  static bool tried = false;
+  if (!tried) {
+    tried = true;
+    CoCreateInstance(CLSID_VirtualDesktopManager, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&vdm));
+  }
+  return vdm.Get();
 }
 
 std::wstring LoadIndirect(const std::wstring& value) {
@@ -652,8 +711,7 @@ bool SaveDockPins(const std::vector<std::wstring>& paths) {
 }
 
 std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_paths) {
-  Microsoft::WRL::ComPtr<IVirtualDesktopManager> vdm;
-  CoCreateInstance(CLSID_VirtualDesktopManager, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&vdm));
+  IVirtualDesktopManager* vdm = DesktopManager();
 
   struct Raw {
     HWND hwnd;
@@ -671,24 +729,23 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
           return TRUE;
         }
         auto* out = reinterpret_cast<std::vector<Raw>*>(lp);
+        const WindowCacheEntry& cached = CachedWindow(hwnd);
         Raw raw{};
         raw.hwnd = hwnd;
-        raw.path = WindowExePath(hwnd);
-        raw.aumid = WindowAumid(hwnd);
-        if (raw.aumid.empty() && !raw.path.empty() && !IsHostExe(raw.path)) {
-          raw.aumid = PathAumid(raw.path);
-        }
+        raw.path = cached.path;
+        raw.aumid = cached.props.aumid;
+        raw.icon_resource = cached.props.icon_resource;
+        raw.relaunch_name = cached.props.relaunch_name;
+        raw.relaunch_command = cached.props.relaunch_command;
         raw.title = WindowTitle(hwnd);
         if (SkipGhostWindow(hwnd, raw.path, raw.aumid, raw.title)) {
           return TRUE;
         }
-        raw.icon_resource = WindowPropString(hwnd, PKEY_AppUserModel_RelaunchIconResource);
-        raw.relaunch_name = WindowPropString(hwnd, PKEY_AppUserModel_RelaunchDisplayNameResource);
-        raw.relaunch_command = WindowPropString(hwnd, PKEY_AppUserModel_RelaunchCommand);
         out->push_back(std::move(raw));
         return TRUE;
       },
       reinterpret_cast<LPARAM>(&windows));
+  PruneWindowCache();
 
   std::unordered_map<std::wstring, DockApp> groups;
   std::vector<std::wstring> order;
@@ -709,7 +766,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
     groups.clear();
     order.clear();
     for (const auto& raw : windows) {
-      if (filter_desktop && !OnCurrentDesktop(vdm.Get(), raw.hwnd)) {
+      if (filter_desktop && !OnCurrentDesktop(vdm, raw.hwnd)) {
         continue;
       }
       if (!raw.path.empty() && (IsSelfExecutable(raw.path) || SkipChromeExe(raw.path))) {
@@ -867,6 +924,12 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
   }
 
   return result;
+}
+
+void ForgetCachedWindow(HWND hwnd) {
+  if (hwnd != nullptr) {
+    g_window_cache.erase(hwnd);
+  }
 }
 
 bool ActivateHwnd(HWND hwnd) {

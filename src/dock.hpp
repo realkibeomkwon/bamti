@@ -104,6 +104,7 @@ class Dock {
   std::vector<HWINEVENTHOOK> hooks_;
   PopupSurface popup_;
   std::unique_ptr<DockMenuContent> menu_content_;
+  std::wstring last_collect_snap_;
 };
 
 }  // namespace bamti

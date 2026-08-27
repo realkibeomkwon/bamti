@@ -24,6 +24,7 @@ std::vector<std::wstring> LoadDockPins();
 bool SaveDockPins(const std::vector<std::wstring>& paths);
 
 std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_paths);
+void ForgetCachedWindow(HWND hwnd);
 
 bool ActivateHwnd(HWND hwnd);
 bool LaunchExe(const std::wstring& path);

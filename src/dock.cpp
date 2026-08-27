@@ -50,7 +50,7 @@ constexpr int kMenuMinWidthDip = 168;
 constexpr int kMenuMaxWidthDip = 280;
 constexpr int kMenuTextPadDip = 12;
 constexpr UINT kHideDelayMs = 100;
-constexpr UINT kRebuildDelayMs = 50;
+constexpr UINT kRebuildDelayMs = 150;
 constexpr UINT_PTR kHideTimerId = 1;
 constexpr UINT_PTR kPollTimerId = 2;
 constexpr UINT_PTR kRebuildTimerId = 3;
@@ -94,6 +94,23 @@ const wchar_t* MenuCmdName(UINT cmd) {
 
 int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
+}
+
+std::wstring CollectSnap(const std::vector<DockApp>& apps) {
+  std::wstring snap;
+  snap.reserve(apps.size() * 64);
+  for (const auto& app : apps) {
+    snap += app.key;
+    snap.push_back(L'|');
+    snap += std::to_wstring(reinterpret_cast<std::uintptr_t>(app.hwnd));
+    snap.push_back(L'|');
+    snap.push_back(app.running ? L'1' : L'0');
+    snap.push_back(app.pinned ? L'1' : L'0');
+    snap.push_back(L'|');
+    snap += std::to_wstring(app.windows.size());
+    snap.push_back(L'\n');
+  }
+  return snap;
 }
 
 COLORREF Channel(float x) {
@@ -1012,9 +1029,12 @@ void CALLBACK Dock::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG obj
   if (GetAncestor(hwnd, GA_ROOT) != hwnd) {
     return;
   }
-  if (event == EVENT_OBJECT_DESTROY && hwnd == TaskbarController::WatchedTray()) {
-    TaskbarController::UnwatchTray();
-    TaskbarController::RewatchTray();
+  if (event == EVENT_OBJECT_DESTROY) {
+    ForgetCachedWindow(hwnd);
+    if (hwnd == TaskbarController::WatchedTray()) {
+      TaskbarController::UnwatchTray();
+      TaskbarController::RewatchTray();
+    }
   }
   if (g_notify == nullptr) {
     return;
@@ -1264,7 +1284,16 @@ void Dock::Rebuild() {
     return;
   }
   pending_rebuild_ = false;
-  items_ = CollectDockApps(pins_);
+  const ULONGLONG started = GetTickCount64();
+  std::vector<DockApp> next = CollectDockApps(pins_);
+  const std::wstring snap = CollectSnap(next);
+  if (snap == last_collect_snap_ && !items_.empty()) {
+    Log(L"perf", L"rebuild skip items=%zu %ums", items_.size(),
+        static_cast<unsigned>(GetTickCount64() - started));
+    return;
+  }
+  last_collect_snap_ = snap;
+  items_ = std::move(next);
   EnsureIcons();
   size_t kept = 0;
   for (size_t i = 0; i < items_.size(); ++i) {
@@ -1279,7 +1308,8 @@ void Dock::Rebuild() {
     items_.resize(kept);
     EnsureIcons();
   }
-  Log(L"dock", L"rebuild items=%zu pins=%zu shown=%d", items_.size(), pins_.size(), shown_ ? 1 : 0);
+  Log(L"perf", L"rebuild items=%zu pins=%zu shown=%d %ums", items_.size(), pins_.size(), shown_ ? 1 : 0,
+      static_cast<unsigned>(GetTickCount64() - started));
   if (shown_) {
     if (items_.empty()) {
       HidePill();
