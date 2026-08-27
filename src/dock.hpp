@@ -50,6 +50,14 @@ class Dock {
   void SetFullscreenOccluded(bool occluded);
   void ShowContextMenu(POINT screen, int index);
   void ArmMouseLeave();
+  void SanitizePins();
+  void BeginDragIfNeeded(POINT client);
+  void UpdateDrag(POINT client);
+  void EndDrag(bool commit);
+  bool Busy() const;
+  int PinnedCount() const;
+  int DropIndexAt(POINT client) const;
+  std::vector<size_t> DisplayOrder() const;
   int HitTest(POINT client) const;
   bool PointerOverUi() const;
   bool PointerOverHotEdge() const;
@@ -65,8 +73,13 @@ class Dock {
   bool dark_ = true;
   bool menu_open_ = false;
   bool hide_armed_ = false;
+  bool dragging_ = false;
+  bool pending_rebuild_ = false;
   int pressed_ = -1;
   int context_index_ = -1;
+  int drag_index_ = -1;
+  int drop_index_ = -1;
+  POINT drag_origin_{};
   std::vector<DockApp> items_;
   std::vector<std::wstring> pins_;
   std::vector<RECT> slots_;

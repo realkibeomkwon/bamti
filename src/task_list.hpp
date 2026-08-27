@@ -9,6 +9,8 @@ namespace bamti {
 struct DockApp {
   std::wstring key;
   std::wstring exe_path;
+  std::wstring aumid;
+  std::wstring icon_resource;
   std::wstring display_name;
   HWND hwnd = nullptr;
   std::vector<HWND> windows;
@@ -27,5 +29,7 @@ bool LaunchExe(const std::wstring& path);
 void CloseHwnds(const std::vector<HWND>& windows);
 
 std::wstring CanonicalPath(const std::wstring& path);
+std::wstring WindowTitle(HWND hwnd);
+bool IsSelfExecutable(const std::wstring& path);
 
 }  // namespace bamti

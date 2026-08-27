@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -18,31 +19,38 @@ constexpr float kStatusClockGapDip = 20.0f;
 constexpr float kItemGapDip = 14.0f;
 constexpr float kStartPadLeftDip = 4.0f;
 constexpr float kStartHitWidthDip = 34.0f;
-constexpr float kStartLogoDip = 16.0f;
-constexpr float kStartGapDip = 1.7f;
-constexpr float kStartTileRadiusDip = 1.15f;
+constexpr float kStartLogoDip = 20.0f;
 constexpr float kStartHoverInsetXDip = 2.0f;
 constexpr float kStartHoverInsetYDip = 4.0f;
 constexpr float kStartHoverRadiusDip = 6.0f;
+// @WLOGO_96x96.png glyph is 80px with 38px tiles and a 4px gap, color #0078D4.
+constexpr float kWindowsLogoGap = 4.0f / 80.0f;
 
-void DrawFallbackStartLogo(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, bool dark, float height_dip) {
-  const float tile = (kStartLogoDip - kStartGapDip) * 0.5f;
-  const float logo_left = kStartPadLeftDip + (kStartHitWidthDip - kStartLogoDip) * 0.5f;
-  const float logo_top = (height_dip - kStartLogoDip) * 0.5f;
-  const float x1 = logo_left;
-  const float x2 = logo_left + tile + kStartGapDip;
-  const float y1 = logo_top;
-  const float y2 = logo_top + tile + kStartGapDip;
-  const D2D1_ROUNDED_RECT tiles[] = {
-      {D2D1::RectF(x1, y1, x1 + tile, y1 + tile), kStartTileRadiusDip, kStartTileRadiusDip},
-      {D2D1::RectF(x2, y1, x2 + tile, y1 + tile), kStartTileRadiusDip, kStartTileRadiusDip},
-      {D2D1::RectF(x1, y2, x1 + tile, y2 + tile), kStartTileRadiusDip, kStartTileRadiusDip},
-      {D2D1::RectF(x2, y2, x2 + tile, y2 + tile), kStartTileRadiusDip, kStartTileRadiusDip},
-  };
-  brush->SetColor(ClockTextColor(dark));
-  for (const auto& tile_rect : tiles) {
-    rt->FillRoundedRectangle(tile_rect, brush);
+void FillWindowsLogo(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, float left_dip, float top_dip, float size_dip,
+                     UINT dpi) {
+  const float scale = static_cast<float>(dpi) / 96.0f;
+  const int origin_x = static_cast<int>(std::lround(left_dip * scale));
+  const int origin_y = static_cast<int>(std::lround(top_dip * scale));
+  int size_px = std::max(8, static_cast<int>(std::lround(size_dip * scale)));
+  int gap_px = std::max(1, static_cast<int>(std::lround(static_cast<float>(size_px) * kWindowsLogoGap)));
+  if ((size_px - gap_px) % 2 != 0) {
+    ++gap_px;
   }
+  const int tile_px = (size_px - gap_px) / 2;
+  const float inv = 96.0f / static_cast<float>(dpi);
+  auto pixel_rect = [inv](int x, int y, int w, int h) {
+    return D2D1::RectF(static_cast<float>(x) * inv, static_cast<float>(y) * inv,
+                       static_cast<float>(x + w) * inv, static_cast<float>(y + h) * inv);
+  };
+
+  brush->SetColor(D2D1::ColorF(0x0078D4));
+  const D2D1_ANTIALIAS_MODE previous = rt->GetAntialiasMode();
+  rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+  rt->FillRectangle(pixel_rect(origin_x, origin_y, tile_px, tile_px), brush);
+  rt->FillRectangle(pixel_rect(origin_x + tile_px + gap_px, origin_y, tile_px, tile_px), brush);
+  rt->FillRectangle(pixel_rect(origin_x, origin_y + tile_px + gap_px, tile_px, tile_px), brush);
+  rt->FillRectangle(pixel_rect(origin_x + tile_px + gap_px, origin_y + tile_px + gap_px, tile_px, tile_px), brush);
+  rt->SetAntialiasMode(previous);
 }
 
 }  // namespace
@@ -55,15 +63,7 @@ bool ClockRenderer::Initialize() {
 
   hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
                            reinterpret_cast<IUnknown**>(dwrite_.ReleaseAndGetAddressOf()));
-  if (FAILED(hr)) {
-    return false;
-  }
-
-  hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic_));
-  if (FAILED(hr)) {
-    wic_.Reset();
-  }
-  return true;
+  return SUCCEEDED(hr);
 }
 
 void ClockRenderer::SetDpi(UINT dpi) {
@@ -73,82 +73,6 @@ void ClockRenderer::SetDpi(UINT dpi) {
   dpi_ = dpi == 0 ? 96 : dpi;
   format_.Reset();
   rt_.Reset();
-  ResetStartBitmap();
-}
-
-void ClockRenderer::ResetStartBitmap() {
-  start_bitmap_.Reset();
-  start_bitmap_px_ = 0;
-}
-
-bool ClockRenderer::EnsureStartLogo(int px) {
-  if (px <= 0 || rt_ == nullptr) {
-    return false;
-  }
-  if (start_bitmap_ && start_bitmap_px_ == px) {
-    return true;
-  }
-  ResetStartBitmap();
-  if (start_logo_missing_ || wic_ == nullptr) {
-    return false;
-  }
-
-  if (!start_wic_) {
-    wchar_t dir[MAX_PATH]{};
-    if (GetSystemDirectoryW(dir, MAX_PATH) == 0) {
-      start_logo_missing_ = true;
-      return false;
-    }
-    wchar_t path[MAX_PATH]{};
-    if (swprintf_s(path, L"%s\\@WLOGO_96x96.png", dir) < 0) {
-      start_logo_missing_ = true;
-      return false;
-    }
-
-    Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
-    HRESULT hr = wic_->CreateDecoderFromFilename(path, nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad,
-                                                 decoder.ReleaseAndGetAddressOf());
-    if (FAILED(hr)) {
-      start_logo_missing_ = true;
-      return false;
-    }
-    Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
-    hr = decoder->GetFrame(0, frame.ReleaseAndGetAddressOf());
-    if (FAILED(hr)) {
-      start_logo_missing_ = true;
-      return false;
-    }
-    hr = wic_->CreateFormatConverter(start_wic_.ReleaseAndGetAddressOf());
-    if (FAILED(hr)) {
-      start_logo_missing_ = true;
-      return false;
-    }
-    hr = start_wic_->Initialize(frame.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0.0,
-                                WICBitmapPaletteTypeMedianCut);
-    if (FAILED(hr)) {
-      start_wic_.Reset();
-      start_logo_missing_ = true;
-      return false;
-    }
-  }
-
-  Microsoft::WRL::ComPtr<IWICBitmapScaler> scaler;
-  HRESULT hr = wic_->CreateBitmapScaler(scaler.ReleaseAndGetAddressOf());
-  if (FAILED(hr)) {
-    return false;
-  }
-  hr = scaler->Initialize(start_wic_.Get(), static_cast<UINT>(px), static_cast<UINT>(px),
-                          WICBitmapInterpolationModeFant);
-  if (FAILED(hr)) {
-    return false;
-  }
-  hr = rt_->CreateBitmapFromWicBitmap(scaler.Get(), nullptr, start_bitmap_.ReleaseAndGetAddressOf());
-  if (FAILED(hr)) {
-    start_bitmap_.Reset();
-    return false;
-  }
-  start_bitmap_px_ = px;
-  return true;
 }
 
 void ClockRenderer::DrawStartButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed,
@@ -164,16 +88,9 @@ void ClockRenderer::DrawStartButton(ID2D1SolidColorBrush* brush, bool dark, bool
     rt_->FillRoundedRectangle(hover, brush);
   }
 
-  const int logo_px = std::max(1, static_cast<int>(kStartLogoDip * static_cast<float>(dpi_) / 96.0f + 0.5f));
-  if (EnsureStartLogo(logo_px)) {
-    const float logo_left = hit_left + (kStartHitWidthDip - kStartLogoDip) * 0.5f;
-    const float logo_top = (height_dip - kStartLogoDip) * 0.5f;
-    rt_->DrawBitmap(start_bitmap_.Get(),
-                    D2D1::RectF(logo_left, logo_top, logo_left + kStartLogoDip, logo_top + kStartLogoDip), 1.0f,
-                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-    return;
-  }
-  DrawFallbackStartLogo(rt_.Get(), brush, dark, height_dip);
+  const float logo_left = hit_left + (kStartHitWidthDip - kStartLogoDip) * 0.5f;
+  const float logo_top = (height_dip - kStartLogoDip) * 0.5f;
+  FillWindowsLogo(rt_.Get(), brush, logo_left, logo_top, kStartLogoDip, dpi_);
 }
 
 bool ClockRenderer::EnsureTextFormat() {
@@ -261,7 +178,6 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, bool dark, const std::wstr
   }
 
   if (!rt_) {
-    ResetStartBitmap();
     const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
         D2D1_RENDER_TARGET_TYPE_DEFAULT,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
@@ -275,7 +191,6 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, bool dark, const std::wstr
   HRESULT hr = rt_->BindDC(hdc, &client);
   if (FAILED(hr)) {
     rt_.Reset();
-    ResetStartBitmap();
     return false;
   }
 
@@ -295,6 +210,7 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, bool dark, const std::wstr
   rt_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
 
   DrawStartButton(brush.Get(), dark, start_hot, start_pressed, height_dip);
+  brush->SetColor(ClockTextColor(dark));
   if (start_hit != nullptr) {
     start_hit->left = client.left + static_cast<LONG>(kStartPadLeftDip * px);
     start_hit->top = client.top;
@@ -324,6 +240,7 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, bool dark, const std::wstr
     if (MakeLayout(clock, width_dip, height_dip, layout, metrics)) {
       const float x = cursor - metrics.widthIncludingTrailingWhitespace;
       const float y = (height_dip - metrics.height) * 0.5f;
+      brush->SetColor(ClockTextColor(dark));
       rt_->DrawTextLayout(D2D1::Point2F(x, y), layout.Get(), brush.Get(),
                           D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
       cursor = x - kStatusClockGapDip;
@@ -396,7 +313,6 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, bool dark, const std::wstr
   hr = rt_->EndDraw();
   if (hr == D2DERR_RECREATE_TARGET) {
     rt_.Reset();
-    ResetStartBitmap();
     return false;
   }
   return SUCCEEDED(hr);

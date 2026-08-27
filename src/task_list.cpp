@@ -1,11 +1,13 @@
 #include "task_list.hpp"
 
+#include <appmodel.h>
 #include <dwmapi.h>
 #include <knownfolders.h>
-#include <propsys.h>
 #include <propkey.h>
+#include <propsys.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shlwapi.h>
 #include <shobjidl.h>
 #include <wrl/client.h>
 
@@ -80,6 +82,7 @@ bool SkipClass(const wchar_t* cls) {
       L"bamti.MenuBar",
       L"bamti.Dock",
       L"bamti.DockHot",
+      L"bamti.StartMenu",
       L"IME",
       L"MSCTFIME UI",
       L"tooltips_class32",
@@ -129,6 +132,9 @@ bool IsTaskWindow(HWND hwnd) {
 
   wchar_t cls[256]{};
   GetClassNameW(hwnd, cls, 256);
+  if (cls[0] != L'\0' && _wcsnicmp(cls, L"bamti.", 6) == 0) {
+    return false;
+  }
   if (SkipClass(cls)) {
     return false;
   }
@@ -146,34 +152,22 @@ bool OnCurrentDesktop(IVirtualDesktopManager* vdm, HWND hwnd) {
   return on != FALSE;
 }
 
-std::wstring WindowTitle(HWND hwnd) {
-  const int n = GetWindowTextLengthW(hwnd);
-  if (n <= 0) {
-    return {};
+bool SkipChromeExe(const std::wstring& path) {
+  const std::wstring stem = Lower(FileStem(path));
+  static const wchar_t* kSkip[] = {
+      L"bamti",
+      L"searchhost",
+      L"startmenuexperiencehost",
+      L"shellexperiencehost",
+      L"textinputhost",
+      L"lockapp",
+  };
+  for (const wchar_t* skip : kSkip) {
+    if (stem == skip) {
+      return true;
+    }
   }
-  std::wstring text(static_cast<size_t>(n) + 1, L'\0');
-  const int written = GetWindowTextW(hwnd, text.data(), n + 1);
-  if (written <= 0) {
-    return {};
-  }
-  text.resize(static_cast<size_t>(written));
-  return text;
-}
-
-std::wstring WindowAumid(HWND hwnd) {
-  Microsoft::WRL::ComPtr<IPropertyStore> store;
-  if (FAILED(SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&store))) || !store) {
-    return {};
-  }
-  PROPVARIANT value;
-  PropVariantInit(&value);
-  std::wstring aumid;
-  if (SUCCEEDED(store->GetValue(PKEY_AppUserModel_ID, &value)) && value.vt == VT_LPWSTR &&
-      value.pwszVal != nullptr && value.pwszVal[0] != L'\0') {
-    aumid = value.pwszVal;
-  }
-  PropVariantClear(&value);
-  return aumid;
+  return false;
 }
 
 std::wstring WindowExePath(HWND hwnd) {
@@ -204,7 +198,121 @@ std::wstring WindowExePath(HWND hwnd) {
 }
 
 bool IsHostExe(const std::wstring& path) {
-  return Lower(FileStem(path)) == L"applicationframehost";
+  const std::wstring stem = Lower(FileStem(path));
+  return stem == L"applicationframehost" || stem == L"wwahost" || stem == L"dllhost" ||
+         stem == L"runtimebroker";
+}
+
+std::wstring WindowPropString(HWND hwnd, const PROPERTYKEY& key) {
+  Microsoft::WRL::ComPtr<IPropertyStore> store;
+  if (FAILED(SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&store))) || !store) {
+    return {};
+  }
+  PROPVARIANT value;
+  PropVariantInit(&value);
+  std::wstring out;
+  if (SUCCEEDED(store->GetValue(key, &value)) && value.vt == VT_LPWSTR && value.pwszVal != nullptr &&
+      value.pwszVal[0] != L'\0') {
+    out = value.pwszVal;
+  }
+  PropVariantClear(&value);
+  return out;
+}
+
+std::wstring ProcessAumid(HWND hwnd) {
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid == 0) {
+    return {};
+  }
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (process == nullptr) {
+    return {};
+  }
+  UINT32 len = 0;
+  LONG rc = GetApplicationUserModelId(process, &len, nullptr);
+  std::wstring id;
+  if (rc == ERROR_INSUFFICIENT_BUFFER && len > 1) {
+    id.assign(len, L'\0');
+    rc = GetApplicationUserModelId(process, &len, id.data());
+    if (rc == ERROR_SUCCESS) {
+      id.resize(wcsnlen(id.c_str(), id.size()));
+    } else {
+      id.clear();
+    }
+  }
+  CloseHandle(process);
+  return id;
+}
+
+std::wstring WindowAumid(HWND hwnd) {
+  std::wstring aumid = WindowPropString(hwnd, PKEY_AppUserModel_ID);
+  if (aumid.empty()) {
+    aumid = ProcessAumid(hwnd);
+  }
+  return aumid;
+}
+
+std::wstring PathAumid(const std::wstring& path) {
+  if (path.empty()) {
+    return {};
+  }
+  Microsoft::WRL::ComPtr<IPropertyStore> store;
+  if (FAILED(SHGetPropertyStoreFromParsingName(path.c_str(), nullptr, GPS_DEFAULT, IID_PPV_ARGS(&store))) ||
+      !store) {
+    return {};
+  }
+  PROPVARIANT value;
+  PropVariantInit(&value);
+  std::wstring out;
+  if (SUCCEEDED(store->GetValue(PKEY_AppUserModel_ID, &value)) && value.vt == VT_LPWSTR &&
+      value.pwszVal != nullptr && value.pwszVal[0] != L'\0') {
+    out = value.pwszVal;
+  }
+  PropVariantClear(&value);
+  return out;
+}
+
+std::wstring LoadIndirect(const std::wstring& value) {
+  if (value.empty()) {
+    return {};
+  }
+  if (value[0] != L'@') {
+    return value;
+  }
+  wchar_t buf[1024]{};
+  if (SUCCEEDED(SHLoadIndirectString(value.c_str(), buf, 1024, nullptr)) && buf[0] != L'\0') {
+    return buf;
+  }
+  return {};
+}
+
+std::wstring AppsFolderDisplayName(const std::wstring& aumid) {
+  if (aumid.empty()) {
+    return {};
+  }
+  Microsoft::WRL::ComPtr<IShellItem> item;
+  if (FAILED(SHCreateItemInKnownFolder(FOLDERID_AppsFolder, 0, aumid.c_str(), IID_PPV_ARGS(&item))) || !item) {
+    item.Reset();
+    if (aumid.find(L'!') == std::wstring::npos) {
+      const std::wstring alt = aumid + L"!App";
+      SHCreateItemInKnownFolder(FOLDERID_AppsFolder, 0, alt.c_str(), IID_PPV_ARGS(&item));
+    }
+  }
+  if (!item) {
+    const std::wstring parsing = L"shell:AppsFolder\\" + aumid;
+    SHCreateItemFromParsingName(parsing.c_str(), nullptr, IID_PPV_ARGS(&item));
+  }
+  if (!item) {
+    return {};
+  }
+  PWSTR name = nullptr;
+  if (FAILED(item->GetDisplayName(SIGDN_NORMALDISPLAY, &name)) || name == nullptr) {
+    return {};
+  }
+  std::wstring out = name;
+  CoTaskMemFree(name);
+  return out;
 }
 
 std::wstring DisplayNameFor(const std::wstring& path, const std::wstring& title) {
@@ -246,6 +354,35 @@ std::wstring CanonicalPath(const std::wstring& path) {
     full = path;
   }
   return Lower(std::move(full));
+}
+
+std::wstring WindowTitle(HWND hwnd) {
+  if (hwnd == nullptr || !IsWindow(hwnd)) {
+    return {};
+  }
+  const int n = GetWindowTextLengthW(hwnd);
+  if (n <= 0) {
+    return {};
+  }
+  std::wstring text(static_cast<size_t>(n) + 1, L'\0');
+  const int written = GetWindowTextW(hwnd, text.data(), n + 1);
+  if (written <= 0) {
+    return {};
+  }
+  text.resize(static_cast<size_t>(written));
+  return text;
+}
+
+bool IsSelfExecutable(const std::wstring& path) {
+  if (path.empty()) {
+    return false;
+  }
+  wchar_t self[MAX_PATH]{};
+  const DWORD n = GetModuleFileNameW(nullptr, self, MAX_PATH);
+  if (n > 0 && n < MAX_PATH && CanonicalPath(path) == CanonicalPath(std::wstring(self, n))) {
+    return true;
+  }
+  return Lower(FileStem(path)) == L"bamti";
 }
 
 std::vector<std::wstring> LoadDockPins() {
@@ -304,6 +441,8 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
     std::wstring path;
     std::wstring aumid;
     std::wstring title;
+    std::wstring icon_resource;
+    std::wstring relaunch_name;
   };
   std::vector<Raw> windows;
   EnumWindows(
@@ -316,7 +455,12 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
         raw.hwnd = hwnd;
         raw.path = WindowExePath(hwnd);
         raw.aumid = WindowAumid(hwnd);
+        if (raw.aumid.empty() && !raw.path.empty() && !IsHostExe(raw.path)) {
+          raw.aumid = PathAumid(raw.path);
+        }
         raw.title = WindowTitle(hwnd);
+        raw.icon_resource = WindowPropString(hwnd, PKEY_AppUserModel_RelaunchIconResource);
+        raw.relaunch_name = WindowPropString(hwnd, PKEY_AppUserModel_RelaunchDisplayNameResource);
         out->push_back(std::move(raw));
         return TRUE;
       },
@@ -344,6 +488,9 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       if (filter_desktop && !OnCurrentDesktop(vdm.Get(), raw.hwnd)) {
         continue;
       }
+      if (!raw.path.empty() && (IsSelfExecutable(raw.path) || SkipChromeExe(raw.path))) {
+        continue;
+      }
       std::wstring key;
       if (!raw.aumid.empty()) {
         key = L"aumid:" + Lower(raw.aumid);
@@ -361,11 +508,25 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       if (app.hwnd == nullptr) {
         app.hwnd = raw.hwnd;
       }
+      if (app.aumid.empty()) {
+        app.aumid = raw.aumid;
+      }
+      if (app.icon_resource.empty()) {
+        app.icon_resource = raw.icon_resource;
+      }
       if (app.exe_path.empty() && !raw.path.empty() && !IsHostExe(raw.path)) {
         app.exe_path = raw.path;
       }
       if (app.display_name.empty()) {
-        app.display_name = DisplayNameFor(app.exe_path.empty() ? raw.path : app.exe_path, raw.title);
+        if (!raw.aumid.empty()) {
+          app.display_name = AppsFolderDisplayName(raw.aumid);
+        }
+        if (app.display_name.empty() && !raw.relaunch_name.empty()) {
+          app.display_name = LoadIndirect(raw.relaunch_name);
+        }
+        if (app.display_name.empty()) {
+          app.display_name = DisplayNameFor(app.exe_path.empty() ? raw.path : app.exe_path, raw.title);
+        }
       }
     }
   };
@@ -379,6 +540,9 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
   std::vector<std::wstring> used_keys;
 
   for (const auto& pin : pinned_paths) {
+    if (IsSelfExecutable(pin)) {
+      continue;
+    }
     const std::wstring canon = CanonicalPath(pin);
     DockApp* found = nullptr;
     for (auto& [key, app] : groups) {
@@ -397,9 +561,17 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       used_keys.push_back(found->key);
     } else {
       DockApp app;
-      app.key = L"path:" + canon;
       app.exe_path = pin;
-      app.display_name = DisplayNameFor(pin, {});
+      app.aumid = PathAumid(pin);
+      if (!app.aumid.empty()) {
+        app.key = L"aumid:" + Lower(app.aumid);
+        app.display_name = AppsFolderDisplayName(app.aumid);
+      } else {
+        app.key = L"path:" + canon;
+      }
+      if (app.display_name.empty()) {
+        app.display_name = DisplayNameFor(pin, {});
+      }
       app.pinned = true;
       app.can_pin = true;
       used_keys.push_back(app.key);

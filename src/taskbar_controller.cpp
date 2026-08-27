@@ -4,8 +4,10 @@
 #include <shlobj.h>
 #include <shellapi.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cwchar>
+#include <utility>
 #include <vector>
 
 namespace bamti {
@@ -13,6 +15,7 @@ namespace {
 
 constexpr wchar_t kPrimaryClass[] = L"Shell_TrayWnd";
 constexpr wchar_t kSecondaryClass[] = L"Shell_SecondaryTrayWnd";
+constexpr LONG kParkY = 32000;
 
 void EnumTrays(const auto& fn) {
   if (HWND primary = FindWindowW(kPrimaryClass, nullptr)) {
@@ -22,6 +25,32 @@ void EnumTrays(const auto& fn) {
   while ((secondary = FindWindowExW(nullptr, secondary, kSecondaryClass, nullptr)) != nullptr) {
     fn(secondary);
   }
+}
+
+std::vector<std::pair<HWND, RECT>>& TrayBackup() {
+  static std::vector<std::pair<HWND, RECT>> saved;
+  return saved;
+}
+
+void RememberTray(HWND hwnd, const RECT& rc) {
+  auto& saved = TrayBackup();
+  for (auto& item : saved) {
+    if (item.first == hwnd) {
+      item.second = rc;
+      return;
+    }
+  }
+  saved.push_back({hwnd, rc});
+}
+
+bool LookupTray(HWND hwnd, RECT& rc) {
+  for (const auto& item : TrayBackup()) {
+    if (item.first == hwnd) {
+      rc = item.second;
+      return true;
+    }
+  }
+  return false;
 }
 
 std::wstring JoinPath(const std::wstring& dir, const wchar_t* file) {
@@ -120,7 +149,14 @@ bool TaskbarController::HideTrayWindows() {
   bool still_visible = false;
   EnumTrays([&](HWND hwnd) {
     any = true;
+    RECT rc{};
+    GetWindowRect(hwnd, &rc);
+    if (rc.top < kParkY / 2) {
+      RememberTray(hwnd, rc);
+    }
     ShowWindow(hwnd, SW_HIDE);
+    SetWindowPos(hwnd, nullptr, rc.left, kParkY, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
     if (IsWindowVisible(hwnd)) {
       still_visible = true;
     }
@@ -129,7 +165,22 @@ bool TaskbarController::HideTrayWindows() {
 }
 
 void TaskbarController::ShowTrayWindows() {
-  EnumTrays([](HWND hwnd) { ShowWindow(hwnd, SW_SHOWNA); });
+  EnumTrays([](HWND hwnd) {
+    RECT rc{};
+    if (LookupTray(hwnd, rc)) {
+      SetWindowPos(hwnd, nullptr, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+                   SWP_NOZORDER | SWP_NOACTIVATE);
+    } else if (GetWindowRect(hwnd, &rc) != FALSE && rc.top >= kParkY / 2) {
+      MONITORINFO info{};
+      info.cbSize = sizeof(info);
+      if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &info) != FALSE) {
+        const int height = (std::max)(40, static_cast<int>(rc.bottom - rc.top));
+        SetWindowPos(hwnd, nullptr, info.rcMonitor.left, info.rcMonitor.bottom - height,
+                     info.rcMonitor.right - info.rcMonitor.left, height, SWP_NOZORDER | SWP_NOACTIVATE);
+      }
+    }
+    ShowWindow(hwnd, SW_SHOWNA);
+  });
 }
 
 bool TaskbarController::Hide() {
@@ -202,6 +253,23 @@ void TaskbarController::EnsureHidden() {
     SHAppBarMessage(ABM_SETSTATE, &abd);
   }
   HideTrayWindows();
+}
+
+void TaskbarController::Rehide() {
+  bool need = false;
+  EnumTrays([&](HWND hwnd) {
+    if (IsWindowVisible(hwnd) != FALSE) {
+      need = true;
+      return;
+    }
+    RECT rc{};
+    if (GetWindowRect(hwnd, &rc) != FALSE && rc.top < kParkY / 2) {
+      need = true;
+    }
+  });
+  if (need) {
+    HideTrayWindows();
+  }
 }
 
 void TaskbarController::ForceRestore() {

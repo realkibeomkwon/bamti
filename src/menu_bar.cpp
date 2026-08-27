@@ -14,9 +14,69 @@ namespace bamti {
 namespace {
 
 constexpr UINT kAppBarCallback = WM_APP + 1;
+constexpr UINT kToggleStartMsg = WM_APP + 7;
 constexpr UINT_PTR kClockTimerId = 1;
 constexpr int kBarHeightDip = 32;
 constexpr UINT kExitCommand = 1;
+
+MenuBar* g_menu_bar = nullptr;
+HHOOK g_key_hook = nullptr;
+bool g_win_held = false;
+bool g_win_combo = false;
+DWORD g_win_vk = VK_LWIN;
+
+void InjectWinKey(DWORD vk, bool up) {
+  INPUT in{};
+  in.type = INPUT_KEYBOARD;
+  in.ki.wVk = static_cast<WORD>(vk);
+  if (up) {
+    in.ki.dwFlags |= KEYEVENTF_KEYUP;
+  }
+  if (vk == VK_RWIN) {
+    in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+  }
+  SendInput(1, &in, sizeof(INPUT));
+}
+
+LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
+  if (code != HC_ACTION || g_menu_bar == nullptr || g_menu_bar->hwnd() == nullptr ||
+      !g_menu_bar->win_key_enabled()) {
+    return CallNextHookEx(g_key_hook, code, wparam, lparam);
+  }
+  const auto* info = reinterpret_cast<KBDLLHOOKSTRUCT*>(lparam);
+  if (info == nullptr || (info->flags & LLKHF_INJECTED) != 0) {
+    return CallNextHookEx(g_key_hook, code, wparam, lparam);
+  }
+
+  const bool down = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
+  const bool up = wparam == WM_KEYUP || wparam == WM_SYSKEYUP;
+  const DWORD vk = info->vkCode;
+  const bool is_win = vk == VK_LWIN || vk == VK_RWIN;
+
+  if (is_win) {
+    if (down) {
+      g_win_held = true;
+      g_win_combo = false;
+      g_win_vk = vk;
+      return 1;
+    }
+    if (up) {
+      g_win_held = false;
+      if (g_win_combo) {
+        InjectWinKey(g_win_vk, true);
+      } else {
+        PostMessageW(g_menu_bar->hwnd(), kToggleStartMsg, 0, 0);
+      }
+      return 1;
+    }
+  } else if (g_win_held && down) {
+    if (!g_win_combo) {
+      g_win_combo = true;
+      InjectWinKey(g_win_vk, false);
+    }
+  }
+  return CallNextHookEx(g_key_hook, code, wparam, lparam);
+}
 
 int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
@@ -25,7 +85,9 @@ int DipToPx(int dip, UINT dpi) {
 }  // namespace
 
 MenuBar::~MenuBar() {
+  RemoveWinHook();
   status_.Stop();
+  start_menu_.Hide();
   if (hwnd_) {
     DestroyWindow(hwnd_);
     hwnd_ = nullptr;
@@ -73,6 +135,8 @@ bool MenuBar::Create(HINSTANCE instance) {
   taskbar_.Restore();
   ShowWindow(hwnd_, SW_SHOWNA);
   taskbar_.Hide();
+  start_menu_.Warmup(hwnd_, dark_);
+  InstallWinHook();
   SetTimer(hwnd_, kClockTimerId, 1000, nullptr);
   RefreshFullscreenState();
   return true;
@@ -193,6 +257,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         InvalidateRect(hwnd_, &start_rect_, FALSE);
         return 0;
       }
+      if (start_menu_.visible()) {
+        start_menu_.Hide();
+      }
       break;
     }
     case WM_CAPTURECHANGED:
@@ -252,6 +319,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         DestroyWindow(hwnd_);
       }
       return 0;
+    case kToggleStartMsg:
+      ToggleStartMenu(true);
+      return 0;
     case kAppBarCallback:
       switch (wparam) {
         case ABN_POSCHANGED:
@@ -275,6 +345,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     case WM_DESTROY:
+      RemoveWinHook();
       KillTimer(hwnd_, kClockTimerId);
       status_.Stop();
       taskbar_.Restore();
@@ -383,8 +454,8 @@ void MenuBar::Paint() {
   if (buffer != nullptr && buffer_dc != nullptr) {
     BufferedPaintClear(buffer, &client);
     const auto items = status_.Snapshot();
-    clock_.Draw(buffer_dc, client, dark_, taskbar_.warning(), items, &hits_, &start_rect_, start_hot_,
-                start_pressed_);
+        clock_.Draw(buffer_dc, client, dark_, taskbar_.warning(), items, &hits_, &start_rect_,
+                    start_hot_ || start_menu_.visible(), start_pressed_ || start_menu_.visible());
     EndBufferedPaint(buffer, TRUE);
   }
   EndPaint(hwnd_, &ps);
@@ -421,26 +492,41 @@ void MenuBar::ArmMouseLeave() {
   TrackMouseEvent(&track);
 }
 
-void MenuBar::ToggleStartMenu() {
-  HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
-  if (tray != nullptr) {
-    DWORD pid = 0;
-    GetWindowThreadProcessId(tray, &pid);
-    if (pid != 0) {
-      AllowSetForegroundWindow(pid);
-    }
-    if (PostMessageW(tray, WM_SYSCOMMAND, SC_TASKLIST, 0)) {
-      return;
-    }
+void MenuBar::ToggleStartMenu(bool from_keyboard) {
+  if (fullscreen_occluded_) {
+    return;
   }
+  RECT start = start_rect_;
+  if (start.right <= start.left) {
+    RECT client{};
+    GetClientRect(hwnd_, &client);
+    start = client;
+    start.right = start.left + DipToPx(34, Dpi());
+  }
+  MapWindowPoints(hwnd_, nullptr, reinterpret_cast<LPPOINT>(&start), 2);
+  start_menu_.Toggle(hwnd_, start, dark_, from_keyboard);
+  InvalidateRect(hwnd_, &start_rect_, FALSE);
+}
 
-  INPUT keys[2]{};
-  keys[0].type = INPUT_KEYBOARD;
-  keys[0].ki.wVk = VK_LWIN;
-  keys[1].type = INPUT_KEYBOARD;
-  keys[1].ki.wVk = VK_LWIN;
-  keys[1].ki.dwFlags = KEYEVENTF_KEYUP;
-  SendInput(2, keys, sizeof(INPUT));
+bool MenuBar::InstallWinHook() {
+  g_menu_bar = this;
+  if (g_key_hook != nullptr) {
+    return true;
+  }
+  g_key_hook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandleW(nullptr), 0);
+  return g_key_hook != nullptr;
+}
+
+void MenuBar::RemoveWinHook() {
+  if (g_key_hook != nullptr) {
+    UnhookWindowsHookEx(g_key_hook);
+    g_key_hook = nullptr;
+  }
+  if (g_menu_bar == this) {
+    g_menu_bar = nullptr;
+  }
+  g_win_held = false;
+  g_win_combo = false;
 }
 
 void MenuBar::ShowContextMenu(POINT screen) {
@@ -463,6 +549,7 @@ void MenuBar::SetFullscreenOccluded(bool occluded) {
   }
   fullscreen_occluded_ = occluded;
   if (occluded) {
+    start_menu_.Hide();
     UnregisterAppBar();
     ShowWindow(hwnd_, SW_HIDE);
   } else {

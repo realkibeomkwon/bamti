@@ -17,6 +17,7 @@ add_executable(bamti WIN32
   src/fullscreen.cpp
   src/task_list.cpp
   src/dock.cpp
+  src/start_menu.cpp
 )
 
 target_include_directories(bamti PRIVATE src)
@@ -53,6 +54,9 @@ target_link_libraries(bamti PRIVATE
   uuid
   msimg32
   windowscodecs
+  powrprof
+  imm32
+  shlwapi
 )
 
 set_property(TARGET bamti PROPERTY VS_DPI_AWARE "PerMonitor")

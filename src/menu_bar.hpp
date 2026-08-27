@@ -2,6 +2,7 @@
 
 #include "clock_renderer.hpp"
 #include "pipe_server.hpp"
+#include "start_menu.hpp"
 #include "status_item.hpp"
 #include "taskbar_controller.hpp"
 
@@ -23,6 +24,7 @@ class MenuBar {
   bool Create(HINSTANCE instance);
   HWND hwnd() const { return hwnd_; }
   bool taskbar_hidden() const { return taskbar_.hidden(); }
+  bool win_key_enabled() const { return !fullscreen_occluded_; }
 
  private:
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
@@ -41,7 +43,9 @@ class MenuBar {
   bool HitStart(POINT client) const;
   void UpdateStartChrome(POINT client);
   void ArmMouseLeave();
-  static void ToggleStartMenu();
+  void ToggleStartMenu(bool from_keyboard = false);
+  bool InstallWinHook();
+  void RemoveWinHook();
   UINT Dpi() const;
   int BarHeightPx() const;
 
@@ -56,6 +60,7 @@ class MenuBar {
   ClockRenderer clock_;
   PipeServer status_;
   TaskbarController taskbar_;
+  StartMenu start_menu_;
   std::vector<StatusHit> hits_;
   std::wstring tooltip_text_;
 };

@@ -2,6 +2,7 @@
 
 #include "dwm.hpp"
 #include "fullscreen.hpp"
+#include "taskbar_controller.hpp"
 #include "theme.hpp"
 
 #include <commctrl.h>
@@ -9,7 +10,9 @@
 #include <d2d1.h>
 #include <d2d1helper.h>
 #include <dwmapi.h>
+#include <knownfolders.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <uxtheme.h>
 #include <wincodec.h>
@@ -19,7 +22,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <numeric>
 #include <vector>
 
 namespace bamti {
@@ -29,6 +34,8 @@ constexpr int kIconDip = 36;
 constexpr int kSlotDip = 52;
 constexpr int kHeightDip = 64;
 constexpr int kPadXDip = 18;
+constexpr int kGroupGapDip = 12;
+constexpr int kDragSlopDip = 6;
 constexpr int kMarginBottomDip = 8;
 constexpr int kHotDip = 8;
 // macOS Dock is ~20pt at the default bar height (~64pt). DWM ROUND/ROUNDSMALL cannot
@@ -41,6 +48,7 @@ constexpr UINT kTasksChangedMsg = WM_APP + 20;
 constexpr UINT kPinCommand = 1;
 constexpr UINT kUnpinCommand = 2;
 constexpr UINT kCloseCommand = 3;
+constexpr UINT kWindowCommandBase = 100;
 
 HWND g_notify = nullptr;
 std::atomic<bool> g_rebuild_posted{false};
@@ -409,6 +417,114 @@ HBITMAP BitmapFromShellItem(const std::wstring& path, int request_px) {
   return bmp;
 }
 
+HBITMAP BitmapFromShellItemObject(IShellItem* item, int request_px) {
+  if (item == nullptr) {
+    return nullptr;
+  }
+  Microsoft::WRL::ComPtr<IShellItemImageFactory> factory;
+  if (FAILED(item->QueryInterface(IID_PPV_ARGS(&factory))) || !factory) {
+    return nullptr;
+  }
+  HBITMAP bmp = nullptr;
+  const SIZE size{request_px, request_px};
+  if (FAILED(factory->GetImage(size, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, &bmp))) {
+    return nullptr;
+  }
+  return bmp;
+}
+
+Microsoft::WRL::ComPtr<IShellItem> ShellItemFromAumid(const std::wstring& aumid) {
+  Microsoft::WRL::ComPtr<IShellItem> item;
+  if (aumid.empty()) {
+    return item;
+  }
+  if (SUCCEEDED(SHCreateItemInKnownFolder(FOLDERID_AppsFolder, 0, aumid.c_str(), IID_PPV_ARGS(&item))) && item) {
+    return item;
+  }
+  item.Reset();
+  if (aumid.find(L'!') == std::wstring::npos) {
+    const std::wstring alt = aumid + L"!App";
+    if (SUCCEEDED(SHCreateItemInKnownFolder(FOLDERID_AppsFolder, 0, alt.c_str(), IID_PPV_ARGS(&item))) && item) {
+      return item;
+    }
+    item.Reset();
+  }
+  const std::wstring parsing = L"shell:AppsFolder\\" + aumid;
+  SHCreateItemFromParsingName(parsing.c_str(), nullptr, IID_PPV_ARGS(&item));
+  return item;
+}
+
+HBITMAP BitmapFromAumid(const std::wstring& aumid, int request_px) {
+  Microsoft::WRL::ComPtr<IShellItem> item = ShellItemFromAumid(aumid);
+  if (!item) {
+    return nullptr;
+  }
+  return BitmapFromShellItemObject(item.Get(), request_px);
+}
+
+bool PathImpliesGenericIcon(const std::wstring& path) {
+  if (path.empty()) {
+    return false;
+  }
+  std::wstring lower = path;
+  CharLowerBuffW(lower.data(), static_cast<DWORD>(lower.size()));
+  if (lower.find(L"\\windowsapps\\") != std::wstring::npos ||
+      lower.find(L"\\systemapps\\") != std::wstring::npos) {
+    return true;
+  }
+  const size_t slash = lower.find_last_of(L"\\/");
+  std::wstring name = slash == std::wstring::npos ? lower : lower.substr(slash + 1);
+  const size_t dot = name.find_last_of(L'.');
+  if (dot != std::wstring::npos) {
+    name.resize(dot);
+  }
+  return name == L"applicationframehost" || name == L"wwahost" || name == L"dllhost" || name == L"runtimebroker" ||
+         name == L"openwith";
+}
+
+HBITMAP BitmapFromIconResource(const std::wstring& resource, int px) {
+  if (resource.empty()) {
+    return nullptr;
+  }
+  std::wstring spec(32768, L'\0');
+  DWORD n = ExpandEnvironmentStringsW(resource.c_str(), spec.data(), static_cast<DWORD>(spec.size()));
+  if (n == 0 || n > spec.size()) {
+    spec = resource;
+  } else {
+    spec.resize(n - 1);
+  }
+
+  int index = 0;
+  bool has_index = false;
+  std::wstring path = spec;
+  const size_t comma = spec.find_last_of(L',');
+  if (comma != std::wstring::npos && comma > 0 && comma + 1 < spec.size()) {
+    const wchar_t* suffix = spec.c_str() + comma + 1;
+    wchar_t* end = nullptr;
+    const long parsed = wcstol(suffix, &end, 10);
+    if (end != suffix && (end == nullptr || *end == L'\0')) {
+      index = static_cast<int>(parsed);
+      has_index = true;
+      path = spec.substr(0, comma);
+    }
+  }
+
+  if (HBITMAP shell = BitmapFromShellItem(path, 256)) {
+    if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
+      return ready;
+    }
+  }
+  HICON icon = nullptr;
+  const UINT got =
+      PrivateExtractIconsW(path.c_str(), has_index ? index : 0, 256, 256, &icon, nullptr, 1, LR_DEFAULTCOLOR);
+  if (got != 0 && icon != nullptr) {
+    HBITMAP ready = BitmapFromIcon(icon, px);
+    DestroyIcon(icon);
+    return ready;
+  }
+  return nullptr;
+}
+
 HBITMAP BitmapFromJumboList(const std::wstring& path) {
   SHFILEINFOW info{};
   if (SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info), SHGFI_SYSICONINDEX) == 0) {
@@ -460,18 +576,26 @@ HICON QueryWindowIcon(HWND hwnd) {
   if (hwnd == nullptr) {
     return nullptr;
   }
-  auto as_icon = [](LRESULT value) { return reinterpret_cast<HICON>(value); };
-  HICON icon = as_icon(SendMessageW(hwnd, WM_GETICON, ICON_BIG, 0));
-  if (icon == nullptr) {
-    icon = as_icon(SendMessageW(hwnd, WM_GETICON, ICON_SMALL2, 0));
+  auto send = [hwnd](WPARAM which) -> HICON {
+    DWORD_PTR result = 0;
+    if (SendMessageTimeoutW(hwnd, WM_GETICON, which, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &result) == 0) {
+      return nullptr;
+    }
+    return reinterpret_cast<HICON>(result);
+  };
+  if (HICON icon = send(ICON_BIG)) {
+    return icon;
   }
-  if (icon == nullptr) {
-    icon = as_icon(GetClassLongPtrW(hwnd, GCLP_HICON));
+  if (HICON icon = send(ICON_SMALL2)) {
+    return icon;
   }
-  if (icon == nullptr) {
-    icon = as_icon(GetClassLongPtrW(hwnd, GCLP_HICONSM));
+  if (HICON icon = send(ICON_SMALL)) {
+    return icon;
   }
-  return icon;
+  if (HICON icon = reinterpret_cast<HICON>(GetClassLongPtrW(hwnd, GCLP_HICON))) {
+    return icon;
+  }
+  return reinterpret_cast<HICON>(GetClassLongPtrW(hwnd, GCLP_HICONSM));
 }
 
 }  // namespace
@@ -526,6 +650,7 @@ bool Dock::Create(HINSTANCE instance) {
 
   dark_ = ShellUsesDarkMode();
   pins_ = LoadDockPins();
+  SanitizePins();
 
   hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, kDockClass, L"bamti dock", WS_POPUP, 0, 0, 0,
                           0, nullptr, nullptr, instance, this);
@@ -625,7 +750,14 @@ LRESULT CALLBACK Dock::HotProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
   return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
-void CALLBACK Dock::WinEventProc(HWINEVENTHOOK, DWORD, HWND, LONG object, LONG, DWORD, DWORD) {
+void CALLBACK Dock::WinEventProc(HWINEVENTHOOK, DWORD, HWND hwnd, LONG object, LONG, DWORD, DWORD) {
+  if (hwnd != nullptr) {
+    wchar_t cls[64]{};
+    if (GetClassNameW(hwnd, cls, 64) > 0 &&
+        (lstrcmpiW(cls, L"Shell_TrayWnd") == 0 || lstrcmpiW(cls, L"Shell_SecondaryTrayWnd") == 0)) {
+      TaskbarController::Rehide();
+    }
+  }
   if (object != OBJID_WINDOW) {
     return;
   }
@@ -663,13 +795,18 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       } else if (wparam == kHideTimerId) {
         hide_armed_ = false;
         KillTimer(hwnd_, kHideTimerId);
-        if (!PointerOverUi() && !menu_open_) {
+        if (!PointerOverUi() && !Busy()) {
           HidePill();
         }
       }
       return 0;
     case kTasksChangedMsg:
       g_rebuild_posted = false;
+      TaskbarController::Rehide();
+      if (Busy()) {
+        pending_rebuild_ = true;
+        return 0;
+      }
       Rebuild();
       return 0;
     case WM_DPICHANGED:
@@ -688,16 +825,28 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     }
-    case WM_MOUSEMOVE:
+    case WM_MOUSEMOVE: {
       CancelHideTimer();
       ArmMouseLeave();
+      const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      if (pressed_ >= 0) {
+        BeginDragIfNeeded(pt);
+        if (dragging_) {
+          UpdateDrag(pt);
+        }
+      }
       return 0;
+    }
     case WM_MOUSELEAVE:
       StartHideTimer();
       return 0;
     case WM_LBUTTONDOWN: {
       const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       pressed_ = HitTest(pt);
+      dragging_ = false;
+      drag_index_ = -1;
+      drop_index_ = -1;
+      drag_origin_ = pt;
       if (pressed_ >= 0) {
         SetCapture(hwnd_);
         RenderLayered();
@@ -706,10 +855,17 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     }
     case WM_LBUTTONUP: {
       const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      const bool was_dragging = dragging_;
+      if (was_dragging) {
+        EndDrag(true);
+        return 0;
+      }
       const int index = HitTest(pt);
       const int pressed = pressed_;
       pressed_ = -1;
-      ReleaseCapture();
+      if (GetCapture() == hwnd_) {
+        ReleaseCapture();
+      }
       RenderLayered();
       if (index >= 0 && index == pressed && index < static_cast<int>(items_.size())) {
         const DockApp& app = items_[static_cast<size_t>(index)];
@@ -721,6 +877,13 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     }
+    case WM_CAPTURECHANGED:
+      if (dragging_ && reinterpret_cast<HWND>(lparam) != hwnd_) {
+        EndDrag(false);
+      } else if (!dragging_) {
+        pressed_ = -1;
+      }
+      return 0;
     case WM_RBUTTONUP: {
       const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       const int index = HitTest(pt);
@@ -731,43 +894,8 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     }
-    case WM_COMMAND: {
-      if (context_index_ < 0 || context_index_ >= static_cast<int>(items_.size())) {
-        return 0;
-      }
-      DockApp& app = items_[static_cast<size_t>(context_index_)];
-      switch (LOWORD(wparam)) {
-        case kPinCommand:
-          if (app.can_pin && !app.exe_path.empty()) {
-            const std::wstring canon = CanonicalPath(app.exe_path);
-            const bool exists =
-                std::any_of(pins_.begin(), pins_.end(),
-                            [&](const std::wstring& path) { return CanonicalPath(path) == canon; });
-            if (!exists) {
-              pins_.push_back(app.exe_path);
-              SaveDockPins(pins_);
-            }
-            Rebuild();
-          }
-          break;
-        case kUnpinCommand: {
-          const std::wstring canon = CanonicalPath(app.exe_path);
-          pins_.erase(std::remove_if(pins_.begin(), pins_.end(),
-                                     [&](const std::wstring& path) { return CanonicalPath(path) == canon; }),
-                      pins_.end());
-          SaveDockPins(pins_);
-          Rebuild();
-          break;
-        }
-        case kCloseCommand:
-          CloseHwnds(app.windows);
-          break;
-        default:
-          break;
-      }
-      context_index_ = -1;
+    case WM_COMMAND:
       return 0;
-    }
     case WM_NOTIFY: {
       auto* header = reinterpret_cast<NMHDR*>(lparam);
       if (header->code == TTN_GETDISPINFOW) {
@@ -799,6 +927,11 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
 }
 
 void Dock::Rebuild() {
+  if (Busy()) {
+    pending_rebuild_ = true;
+    return;
+  }
+  pending_rebuild_ = false;
   items_ = CollectDockApps(pins_);
   EnsureIcons();
   if (shown_) {
@@ -843,7 +976,26 @@ void Dock::EnsureIcons() {
 }
 
 HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
-  if (!app.exe_path.empty()) {
+  const bool identity = !app.aumid.empty() || PathImpliesGenericIcon(app.exe_path);
+
+  if (!app.aumid.empty()) {
+    if (HBITMAP shell = BitmapFromAumid(app.aumid, 256)) {
+      if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
+        return ready;
+      }
+    }
+  }
+  if (!app.icon_resource.empty()) {
+    if (HBITMAP ready = BitmapFromIconResource(app.icon_resource, px)) {
+      return ready;
+    }
+  }
+  if (identity && app.hwnd != nullptr) {
+    if (HBITMAP ready = BitmapFromIcon(QueryWindowIcon(app.hwnd), px)) {
+      return ready;
+    }
+  }
+  if (!app.exe_path.empty() && !PathImpliesGenericIcon(app.exe_path)) {
     if (HBITMAP shell = BitmapFromShellItem(app.exe_path, 256)) {
       if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
         return ready;
@@ -865,7 +1017,19 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
       }
     }
   }
-  return BitmapFromIcon(QueryWindowIcon(app.hwnd), px);
+  if (app.hwnd != nullptr) {
+    if (HBITMAP ready = BitmapFromIcon(QueryWindowIcon(app.hwnd), px)) {
+      return ready;
+    }
+  }
+  if (!app.exe_path.empty()) {
+    if (HBITMAP shell = BitmapFromShellItem(app.exe_path, 256)) {
+      if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
+        return ready;
+      }
+    }
+  }
+  return nullptr;
 }
 
 void Dock::Layout() {
@@ -877,7 +1041,9 @@ void Dock::Layout() {
   const int pad = Dip(kPadXDip);
   const int height = Dip(kHeightDip);
   const int count = static_cast<int>(items_.size());
-  const int width = pad * 2 + (count > 0 ? count * slot : slot);
+  const int pinned = PinnedCount();
+  const int gap = (pinned > 0 && pinned < count) ? Dip(kGroupGapDip) : 0;
+  const int width = pad * 2 + (count > 0 ? count * slot : slot) + gap;
   const int x = info.rcMonitor.left + (info.rcMonitor.right - info.rcMonitor.left - width) / 2;
   const int y = info.rcMonitor.bottom - Dip(kMarginBottomDip) - height;
   SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
@@ -885,7 +1051,7 @@ void Dock::Layout() {
   slots_.assign(static_cast<size_t>(count), RECT{});
   for (int i = 0; i < count; ++i) {
     RECT slot_rect{};
-    slot_rect.left = pad + i * slot;
+    slot_rect.left = pad + i * slot + (i >= pinned ? gap : 0);
     slot_rect.top = 0;
     slot_rect.right = slot_rect.left + slot;
     slot_rect.bottom = height;
@@ -989,11 +1155,14 @@ void Dock::RenderLayered() {
   }
 
   const int icon_px = Dip(kIconDip);
-  for (size_t i = 0; i < items_.size() && i < slots_.size(); ++i) {
-    const RECT& slot = slots_[i];
+  const auto order = DisplayOrder();
+  const int pinned = PinnedCount();
+  for (size_t slot_i = 0; slot_i < order.size() && slot_i < slots_.size(); ++slot_i) {
+    const size_t i = order[slot_i];
+    const RECT& slot = slots_[slot_i];
     const float x = static_cast<float>(slot.left + (slot.right - slot.left - icon_px) / 2);
     float y = static_cast<float>((height - icon_px) / 2 - Dip(4));
-    if (static_cast<int>(i) == pressed_) {
+    if (!dragging_ && static_cast<int>(i) == pressed_) {
       y += static_cast<float>(Dip(1));
     }
     if (i < icons_.size() && icons_[i] != nullptr && wic != nullptr) {
@@ -1002,9 +1171,8 @@ void Dock::RenderLayered() {
                                                  wic_bmp.GetAddressOf()))) {
         Microsoft::WRL::ComPtr<ID2D1Bitmap> d2d_bmp;
         if (SUCCEEDED(rt->CreateBitmapFromWicBitmap(wic_bmp.Get(), d2d_bmp.GetAddressOf()))) {
-          const float opacity = items_[i].running ? 1.0f : 0.65f;
           rt->DrawBitmap(d2d_bmp.Get(), D2D1::RectF(x, y, x + static_cast<float>(icon_px), y + static_cast<float>(icon_px)),
-                         opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                         1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
         }
       }
     }
@@ -1016,6 +1184,15 @@ void Dock::RenderLayered() {
       const D2D1_ROUNDED_RECT dot{D2D1::RectF(dx, dy, dx + dot_w, dy + dot_h), dot_h * 0.5f, dot_h * 0.5f};
       rt->FillRoundedRectangle(dot, indicator.Get());
     }
+  }
+
+  if (stroke && pinned > 0 && pinned < static_cast<int>(slots_.size())) {
+    const RECT& left = slots_[static_cast<size_t>(pinned - 1)];
+    const RECT& right = slots_[static_cast<size_t>(pinned)];
+    const float mid = (static_cast<float>(left.right) + static_cast<float>(right.left)) * 0.5f;
+    const float top = static_cast<float>(Dip(18));
+    const float bottom = static_cast<float>(height - Dip(18));
+    rt->DrawLine(D2D1::Point2F(mid, top), D2D1::Point2F(mid, bottom), stroke.Get(), 1.0f);
   }
 
   rt->EndDraw();
@@ -1038,6 +1215,7 @@ void Dock::ShowPill() {
   if (fullscreen_occluded_ || items_.empty()) {
     return;
   }
+  TaskbarController::Rehide();
   CancelHideTimer();
   if (!shown_) {
     shown_ = true;
@@ -1050,6 +1228,9 @@ void Dock::ShowPill() {
 
 void Dock::HidePill() {
   CancelHideTimer();
+  if (dragging_) {
+    EndDrag(false);
+  }
   pressed_ = -1;
   if (!shown_) {
     return;
@@ -1059,7 +1240,7 @@ void Dock::HidePill() {
 }
 
 void Dock::StartHideTimer() {
-  if (!shown_ || menu_open_ || hide_armed_) {
+  if (!shown_ || Busy() || hide_armed_) {
     return;
   }
   hide_armed_ = true;
@@ -1087,6 +1268,7 @@ void Dock::ArmMouseLeave() {
 
 void Dock::PollPointer() {
   RefreshFullscreen();
+  TaskbarController::Rehide();
   if (fullscreen_occluded_) {
     return;
   }
@@ -1095,7 +1277,7 @@ void Dock::PollPointer() {
     if (PointerOverHotEdge() || shown_) {
       ShowPill();
     }
-  } else if (shown_ && !menu_open_) {
+  } else if (shown_ && !Busy()) {
     StartHideTimer();
   }
 }
@@ -1130,24 +1312,209 @@ void Dock::ShowContextMenu(POINT screen, int index) {
   CancelHideTimer();
   context_index_ = index;
   const DockApp& app = items_[static_cast<size_t>(index)];
+  std::vector<HWND> window_cmds;
+  window_cmds.reserve(app.windows.size());
+  for (HWND hwnd : app.windows) {
+    if (hwnd == nullptr || !IsWindow(hwnd)) {
+      continue;
+    }
+    std::wstring title = WindowTitle(hwnd);
+    if (title.empty()) {
+      title = app.display_name.empty() ? std::wstring(L"(제목 없음)") : app.display_name;
+    }
+    if (title.size() > 48) {
+      title.resize(47);
+      title.push_back(L'\u2026');
+    }
+    const UINT id = kWindowCommandBase + static_cast<UINT>(window_cmds.size());
+    AppendMenuW(menu, MF_STRING, id, title.c_str());
+    window_cmds.push_back(hwnd);
+  }
+  if (!window_cmds.empty() && (app.pinned || app.can_pin || app.running)) {
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  }
   if (app.pinned) {
     AppendMenuW(menu, MF_STRING, kUnpinCommand, L"고정 해제");
-  } else if (app.can_pin) {
+  } else if (app.can_pin && !IsSelfExecutable(app.exe_path)) {
     AppendMenuW(menu, MF_STRING, kPinCommand, L"독에 고정");
   }
   if (app.running) {
-    if (GetMenuItemCount(menu) > 0) {
+    if (GetMenuItemCount(menu) > 0 &&
+        (app.pinned || (app.can_pin && !IsSelfExecutable(app.exe_path)))) {
       AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     }
     AppendMenuW(menu, MF_STRING, kCloseCommand, L"닫기");
   }
+
+  UINT cmd = 0;
   if (GetMenuItemCount(menu) > 0) {
-    TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, screen.x, screen.y, hwnd_, nullptr);
+    cmd = TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN | TPM_RETURNCMD, screen.x, screen.y,
+                           hwnd_, nullptr);
   }
   DestroyMenu(menu);
   menu_open_ = false;
+  context_index_ = -1;
+
+  if (cmd >= kWindowCommandBase) {
+    const size_t window_index = static_cast<size_t>(cmd - kWindowCommandBase);
+    if (window_index < window_cmds.size()) {
+      ActivateHwnd(window_cmds[window_index]);
+    }
+  } else if (cmd == kPinCommand) {
+    if (app.can_pin && !app.exe_path.empty() && !IsSelfExecutable(app.exe_path)) {
+      const std::wstring canon = CanonicalPath(app.exe_path);
+      const bool exists = std::any_of(pins_.begin(), pins_.end(),
+                                      [&](const std::wstring& path) { return CanonicalPath(path) == canon; });
+      if (!exists) {
+        pins_.push_back(app.exe_path);
+        SaveDockPins(pins_);
+      }
+      Rebuild();
+    }
+  } else if (cmd == kUnpinCommand) {
+    const std::wstring canon = CanonicalPath(app.exe_path);
+    pins_.erase(std::remove_if(pins_.begin(), pins_.end(),
+                               [&](const std::wstring& path) { return CanonicalPath(path) == canon; }),
+                pins_.end());
+    SaveDockPins(pins_);
+    Rebuild();
+  } else if (cmd == kCloseCommand) {
+    CloseHwnds(app.windows);
+  }
+
+  if (pending_rebuild_ && !Busy()) {
+    Rebuild();
+  }
   if (!PointerOverUi()) {
     StartHideTimer();
+  }
+}
+
+void Dock::SanitizePins() {
+  const auto before = pins_.size();
+  pins_.erase(std::remove_if(pins_.begin(), pins_.end(),
+                             [](const std::wstring& path) { return IsSelfExecutable(path); }),
+              pins_.end());
+  if (pins_.size() != before) {
+    SaveDockPins(pins_);
+  }
+}
+
+bool Dock::Busy() const {
+  return menu_open_ || dragging_;
+}
+
+int Dock::PinnedCount() const {
+  int n = 0;
+  for (const auto& app : items_) {
+    if (!app.pinned) {
+      break;
+    }
+    ++n;
+  }
+  return n;
+}
+
+int Dock::DropIndexAt(POINT client) const {
+  const int pinned = PinnedCount();
+  if (pinned <= 0) {
+    return -1;
+  }
+  int best = 0;
+  int best_dist = INT_MAX;
+  for (int i = 0; i < pinned && i < static_cast<int>(slots_.size()); ++i) {
+    const RECT& slot = slots_[static_cast<size_t>(i)];
+    const int cx = slot.left + (slot.right - slot.left) / 2;
+    const int dist = client.x > cx ? client.x - cx : cx - client.x;
+    if (dist < best_dist) {
+      best_dist = dist;
+      best = i;
+    }
+  }
+  return best;
+}
+
+std::vector<size_t> Dock::DisplayOrder() const {
+  std::vector<size_t> order(items_.size());
+  std::iota(order.begin(), order.end(), 0);
+  if (!dragging_ || drag_index_ < 0 || drop_index_ < 0) {
+    return order;
+  }
+  const int pinned = PinnedCount();
+  if (drag_index_ >= pinned || drop_index_ >= pinned) {
+    return order;
+  }
+  const int from = drag_index_;
+  const int to = drop_index_;
+  if (from == to) {
+    return order;
+  }
+  if (to < from) {
+    std::rotate(order.begin() + to, order.begin() + from, order.begin() + from + 1);
+  } else {
+    std::rotate(order.begin() + from, order.begin() + from + 1, order.begin() + to + 1);
+  }
+  return order;
+}
+
+void Dock::BeginDragIfNeeded(POINT client) {
+  if (dragging_ || pressed_ < 0 || pressed_ >= static_cast<int>(items_.size())) {
+    return;
+  }
+  if (!items_[static_cast<size_t>(pressed_)].pinned) {
+    return;
+  }
+  const int slop = Dip(kDragSlopDip);
+  const int dx = client.x - drag_origin_.x;
+  const int dy = client.y - drag_origin_.y;
+  if (dx * dx + dy * dy < slop * slop) {
+    return;
+  }
+  dragging_ = true;
+  drag_index_ = pressed_;
+  drop_index_ = pressed_;
+  if (tooltip_ != nullptr) {
+    SendMessageW(tooltip_, TTM_POP, 0, 0);
+  }
+}
+
+void Dock::UpdateDrag(POINT client) {
+  if (!dragging_) {
+    return;
+  }
+  const int next = DropIndexAt(client);
+  if (next < 0 || next == drop_index_) {
+    return;
+  }
+  drop_index_ = next;
+  RenderLayered();
+}
+
+void Dock::EndDrag(bool commit) {
+  const bool was_dragging = dragging_;
+  const int from = drag_index_;
+  const int to = drop_index_;
+  dragging_ = false;
+  drag_index_ = -1;
+  drop_index_ = -1;
+  pressed_ = -1;
+  if (GetCapture() == hwnd_) {
+    ReleaseCapture();
+  }
+  if (was_dragging && commit && from >= 0 && to >= 0 && from != to) {
+    const int pinned = static_cast<int>(pins_.size());
+    if (from < pinned && to < pinned) {
+      const std::wstring moved = pins_[static_cast<size_t>(from)];
+      pins_.erase(pins_.begin() + from);
+      pins_.insert(pins_.begin() + to, moved);
+      SaveDockPins(pins_);
+      pending_rebuild_ = true;
+    }
+  }
+  if (pending_rebuild_) {
+    Rebuild();
+  } else if (shown_) {
+    RenderLayered();
   }
 }
 
@@ -1161,6 +1528,9 @@ int Dock::HitTest(POINT client) const {
 }
 
 bool Dock::PointerOverUi() const {
+  if (Busy()) {
+    return true;
+  }
   POINT pt{};
   GetCursorPos(&pt);
   if (shown_ && hwnd_ != nullptr) {
