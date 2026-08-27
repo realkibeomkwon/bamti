@@ -40,6 +40,18 @@ target_compile_options(bamti PRIVATE
   /permissive-
   /EHsc
   /sdl
+  $<$<CONFIG:Release>:/O2>
+  $<$<CONFIG:Release>:/Oi>
+  $<$<CONFIG:Release>:/Gy>
+  $<$<CONFIG:Release>:/Gw>
+  $<$<CONFIG:Release>:/GL>
+)
+
+target_link_options(bamti PRIVATE
+  $<$<CONFIG:Release>:/LTCG>
+  $<$<CONFIG:Release>:/OPT:REF>
+  $<$<CONFIG:Release>:/OPT:ICF>
+  /DELAYLOAD:powrprof.dll
 )
 
 target_link_libraries(bamti PRIVATE
@@ -61,6 +73,7 @@ target_link_libraries(bamti PRIVATE
   powrprof
   imm32
   shlwapi
+  delayimp
 )
 
 set_property(TARGET bamti PROPERTY VS_DPI_AWARE "PerMonitor")
