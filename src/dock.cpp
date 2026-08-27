@@ -1143,7 +1143,6 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       return 0;
     case WM_DPICHANGED:
     case WM_DISPLAYCHANGE:
-      ResetIconCache();
       EnsureIcons();
       Layout();
       LayoutHot();
@@ -1331,24 +1330,30 @@ void Dock::ResetIconCache() {
 
 void Dock::EnsureIcons() {
   const int px = Dip(kIconDip);
-  std::map<std::wstring, HBITMAP> keep;
   icons_.assign(items_.size(), nullptr);
+  std::map<std::wstring, bool> live;
   for (size_t i = 0; i < items_.size(); ++i) {
-    const std::wstring key = items_[i].key + L"#" + std::to_wstring(px);
+    live[items_[i].key] = true;
+    const std::wstring key = items_[i].key + L"|" + std::to_wstring(px);
     auto it = icon_cache_.find(key);
     if (it == icon_cache_.end() || it->second == nullptr) {
       icon_cache_[key] = LoadIconBitmap(items_[i], px);
       it = icon_cache_.find(key);
     }
     icons_[i] = it->second;
-    keep[key] = it->second;
   }
-  for (auto& [key, bmp] : icon_cache_) {
-    if (keep.find(key) == keep.end() && bmp != nullptr) {
-      DeleteObject(bmp);
+  for (auto it = icon_cache_.begin(); it != icon_cache_.end();) {
+    const size_t bar = it->first.rfind(L'|');
+    const std::wstring app_key = bar == std::wstring::npos ? it->first : it->first.substr(0, bar);
+    if (live.find(app_key) == live.end()) {
+      if (it->second != nullptr) {
+        DeleteObject(it->second);
+      }
+      it = icon_cache_.erase(it);
+    } else {
+      ++it;
     }
   }
-  icon_cache_.swap(keep);
 }
 
 HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
