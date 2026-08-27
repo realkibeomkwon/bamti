@@ -15,6 +15,23 @@ namespace {
 constexpr UINT_PTR kPopupGuardTimer = 1;
 constexpr UINT kPopupGuardMs = 50;
 
+const wchar_t* MouseMsgName(UINT msg) {
+  switch (msg) {
+    case WM_LBUTTONDOWN:
+      return L"lbuttondown";
+    case WM_RBUTTONDOWN:
+      return L"rbuttondown";
+    case WM_LBUTTONUP:
+      return L"lbuttonup";
+    case WM_RBUTTONUP:
+      return L"rbuttonup";
+    case WM_MOUSEMOVE:
+      return L"mousemove";
+    default:
+      return L"mouse";
+  }
+}
+
 const wchar_t* ReasonName(PopupSurface::DismissReason reason) {
   switch (reason) {
     case PopupSurface::DismissReason::kInvoke:
@@ -225,6 +242,8 @@ bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode)
   // that opened this popup as an outside click.
   mouse_down_ = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 ||
                 (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
+  press_inside_ = false;
+  saw_mousemove_ = false;
   ApplyChrome();
   // Hidden windows do not receive WM_PAINT from UpdateWindow, so show first and
   // paint immediately afterwards. A one-frame flash beats a second of black.
@@ -263,6 +282,7 @@ void PopupSurface::Dismiss(int invoke_index, DismissReason reason) {
   Log(L"popup", L"dismiss reason=%s index=%d", ReasonName(reason), invoke_index);
   open_ = false;
   hot_ = -1;
+  press_inside_ = false;
   if (hwnd_ != nullptr && GetCapture() == hwnd_) {
     ReleaseCapture();
   }
@@ -338,19 +358,53 @@ void PopupSurface::OnGuardTimer() {
   }
   win_down_ = win;
 
-  // Capture on a WS_EX_NOACTIVATE window only delivers messages while the
-  // cursor is over the popup. Poll button state for outside clicks instead.
+  // WS_EX_NOACTIVATE windows do not receive mouse messages, even over the
+  // popup itself. Drive click and hover from the same poll that already works.
+  POINT cursor{};
+  RECT window{};
+  const bool got_cursor = GetCursorPos(&cursor) != FALSE && GetWindowRect(hwnd_, &window) != FALSE;
+  const bool inside = got_cursor && PtInRect(&window, cursor);
+
   const bool mouse = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 ||
                      (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
   if (mouse && !mouse_down_) {
-    POINT cursor{};
-    RECT window{};
-    if (GetCursorPos(&cursor) && GetWindowRect(hwnd_, &window) && !PtInRect(&window, cursor)) {
+    if (got_cursor && !inside) {
       Dismiss(-1, DismissReason::kOutsidePoll);
       return;
     }
+    if (inside) {
+      press_inside_ = true;
+    }
+  } else if (!mouse && mouse_down_) {
+    if (press_inside_ && inside && content_ != nullptr) {
+      POINT client = cursor;
+      ScreenToClient(hwnd_, &client);
+      const int row = content_->HitTest(client, Dpi());
+      if (row >= 0) {
+        Log(L"popup", L"poll invoke row=%d", row);
+        press_inside_ = false;
+        mouse_down_ = false;
+        Dismiss(row, DismissReason::kInvoke);
+        return;
+      }
+    }
+    press_inside_ = false;
   }
   mouse_down_ = mouse;
+
+  if (content_ != nullptr) {
+    int hot = -1;
+    if (inside) {
+      POINT client = cursor;
+      ScreenToClient(hwnd_, &client);
+      hot = content_->HitTest(client, Dpi());
+    }
+    if (hot != hot_) {
+      hot_ = hot;
+      InvalidateRect(hwnd_, nullptr, FALSE);
+      UpdateWindow(hwnd_);
+    }
+  }
 
   const HWND fg = GetForegroundWindow();
   if (fg != last_fg_ && fg != nullptr && fg != hwnd_ && !SameProcess(fg)) {
@@ -473,7 +527,12 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       RECT client{};
       GetClientRect(hwnd_, &client);
-      const int hot = PtInRect(&client, pt) ? content_->HitTest(pt, Dpi()) : -1;
+      const int inside = PtInRect(&client, pt) ? 1 : 0;
+      if (!saw_mousemove_) {
+        saw_mousemove_ = true;
+        Log(L"popup", L"msg=%s pt=%d,%d inside=%d", MouseMsgName(msg), pt.x, pt.y, inside);
+      }
+      const int hot = inside ? content_->HitTest(pt, Dpi()) : -1;
       if (hot != hot_) {
         hot_ = hot;
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -484,26 +543,32 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN:
     case WM_RBUTTONDOWN:
     case WM_MBUTTONDOWN: {
-      if (!open_) {
-        return 0;
-      }
       const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       RECT client{};
       GetClientRect(hwnd_, &client);
-      if (!PtInRect(&client, pt)) {
+      const int inside = PtInRect(&client, pt) ? 1 : 0;
+      if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN) {
+        Log(L"popup", L"msg=%s pt=%d,%d inside=%d", MouseMsgName(msg), pt.x, pt.y, inside);
+      }
+      if (!open_) {
+        return 0;
+      }
+      if (!inside) {
         Dismiss(-1, DismissReason::kOutsideClick);
       }
       return 0;
     }
     case WM_LBUTTONUP:
     case WM_RBUTTONUP: {
-      if (!open_ || content_ == nullptr) {
-        return 0;
-      }
       const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       RECT client{};
       GetClientRect(hwnd_, &client);
-      const int index = PtInRect(&client, pt) ? content_->HitTest(pt, Dpi()) : -1;
+      const int inside = PtInRect(&client, pt) ? 1 : 0;
+      Log(L"popup", L"msg=%s pt=%d,%d inside=%d", MouseMsgName(msg), pt.x, pt.y, inside);
+      if (!open_ || content_ == nullptr) {
+        return 0;
+      }
+      const int index = inside ? content_->HitTest(pt, Dpi()) : -1;
       Dismiss(index, index >= 0 ? DismissReason::kInvoke : DismissReason::kOutsideClick);
       return 0;
     }

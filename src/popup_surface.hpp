@@ -78,6 +78,8 @@ class PopupSurface {
   bool esc_down_ = false;
   bool win_down_ = false;
   bool mouse_down_ = false;
+  bool press_inside_ = false;
+  bool saw_mousemove_ = false;
   bool dark_ = true;
   int hot_ = -1;
   Anchor mode_ = Anchor::AboveAt;
