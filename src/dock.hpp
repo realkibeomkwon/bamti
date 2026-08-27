@@ -61,6 +61,8 @@ class Dock {
   void ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND>& window_cmds);
   void ScheduleRebuild();
   void ArmMouseLeave();
+  void ArmHotMouseLeave();
+  void UpdateIdleTimer();
   void SetOverlaysTopmost(bool topmost);
   void SanitizePins();
   void BeginDragIfNeeded(POINT client);

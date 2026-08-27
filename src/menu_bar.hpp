@@ -9,6 +9,7 @@
 
 #include <windows.h>
 
+#include <string>
 #include <vector>
 
 namespace bamti {
@@ -59,6 +60,8 @@ class MenuBar {
   bool start_hot_ = false;
   bool start_pressed_ = false;
   RECT start_rect_{};
+  RECT clock_rect_{};
+  std::wstring last_clock_text_;
   ClockRenderer clock_;
   PipeServer status_;
   TaskbarController taskbar_;

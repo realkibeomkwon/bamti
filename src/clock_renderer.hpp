@@ -17,12 +17,12 @@ class ClockRenderer {
   void SetDpi(UINT dpi);
   bool Draw(HDC hdc, const RECT& client, bool dark, const std::wstring& left_label,
             const std::vector<StatusItem>& items, std::vector<StatusHit>* hits, RECT* start_hit,
-            bool start_hot, bool start_pressed);
+            bool start_hot, bool start_pressed, RECT* clock_hit = nullptr);
+  std::wstring CurrentTimeText() const;
 
  private:
   bool EnsureTextFormat();
   void DrawStartButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed, float height_dip);
-  std::wstring CurrentTimeText() const;
   bool MakeLayout(const std::wstring& text, float width_dip, float height_dip,
                   Microsoft::WRL::ComPtr<IDWriteTextLayout>& layout, DWRITE_TEXT_METRICS& metrics);
 

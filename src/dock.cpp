@@ -56,9 +56,11 @@ constexpr UINT_PTR kPollTimerId = 2;
 constexpr UINT_PTR kRebuildTimerId = 3;
 constexpr UINT_PTR kTrayWatchTimerId = 4;
 constexpr UINT kTrayWatchMs = 5000;
+constexpr UINT kIdlePollMs = 500;
 constexpr UINT kTasksChangedMsg = WM_APP + 20;
 constexpr UINT kMenuCommandMsg = WM_APP + 21;
 constexpr UINT kTrayChangedMsg = WM_APP + 22;
+constexpr UINT kFullscreenMsg = WM_APP + 23;
 constexpr UINT kPinCommand = 1;
 constexpr UINT kUnpinCommand = 2;
 constexpr UINT kQuitCommand = 3;
@@ -856,6 +858,7 @@ Dock::~Dock() {
   }
   ResetIconCache();
   TaskbarController::UnwatchTray();
+  StopFullscreenWatch(hwnd_);
   popup_.Destroy();
   if (hwnd_ != nullptr) {
     DestroyWindow(hwnd_);
@@ -933,8 +936,8 @@ bool Dock::Create(HINSTANCE instance) {
   }
   TaskbarController::WatchTray(TrayWinEventProc);
   SetTimer(hwnd_, kTrayWatchTimerId, kTrayWatchMs, nullptr);
+  StartFullscreenWatch(hwnd_, kFullscreenMsg);
 
-  SetTimer(hwnd_, kPollTimerId, 50, nullptr);
   menu_content_ = std::make_unique<DockMenuContent>();
   if (!popup_.Create(instance, hwnd_)) {
     Log(L"dock", L"popup create failed err=%lu", GetLastError());
@@ -1037,6 +1040,12 @@ LRESULT Dock::HandleHot(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_NCMOUSEMOVE:
       if (!fullscreen_occluded_) {
         ShowPill();
+        ArmHotMouseLeave();
+      }
+      return 0;
+    case WM_MOUSELEAVE:
+      if (!PointerOverUi()) {
+        StartHideTimer();
       }
       return 0;
     case WM_LBUTTONDOWN:
@@ -1100,7 +1109,11 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         RaiseOverlays();
       }
       return 0;
+    case kFullscreenMsg:
+      RefreshFullscreen();
+      return 0;
     case kPopupClosedMsg:
+      UpdateIdleTimer();
       if (pending_rebuild_) {
         ScheduleRebuild();
       }
@@ -1233,6 +1246,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kRebuildTimerId);
       KillTimer(hwnd_, kTrayWatchTimerId);
       TaskbarController::UnwatchTray();
+      StopFullscreenWatch(hwnd_);
       popup_.Destroy();
       if (g_notify == hwnd_) {
         g_notify = nullptr;
@@ -1558,6 +1572,7 @@ void Dock::ShowPill() {
     Layout();
     ShowWindow(hwnd_, SW_SHOWNA);
     RaiseOverlays();
+    UpdateIdleTimer();
   }
   ArmMouseLeave();
 }
@@ -1572,10 +1587,12 @@ void Dock::HidePill() {
   }
   pressed_ = -1;
   if (!shown_) {
+    UpdateIdleTimer();
     return;
   }
   shown_ = false;
   ShowWindow(hwnd_, SW_HIDE);
+  UpdateIdleTimer();
 }
 
 void Dock::StartHideTimer() {
@@ -1605,18 +1622,33 @@ void Dock::ArmMouseLeave() {
   TrackMouseEvent(&track);
 }
 
-void Dock::PollPointer() {
-  if (popup_.IsOpen()) {
-    RefreshFullscreen();
-    if (TaskbarController::Rehide()) {
-      RaiseOverlays();
-    }
-    CancelHideTimer();
+void Dock::ArmHotMouseLeave() {
+  if (hot_hwnd_ == nullptr) {
     return;
   }
+  TRACKMOUSEEVENT track{};
+  track.cbSize = sizeof(track);
+  track.dwFlags = TME_LEAVE;
+  track.hwndTrack = hot_hwnd_;
+  TrackMouseEvent(&track);
+}
+
+void Dock::UpdateIdleTimer() {
+  if (hwnd_ == nullptr) {
+    return;
+  }
+  if (shown_ || popup_.IsOpen()) {
+    SetTimer(hwnd_, kPollTimerId, kIdlePollMs, nullptr);
+  } else {
+    KillTimer(hwnd_, kPollTimerId);
+  }
+}
+
+void Dock::PollPointer() {
   RefreshFullscreen();
-  if (TaskbarController::Rehide()) {
-    RaiseOverlays();
+  if (popup_.IsOpen()) {
+    CancelHideTimer();
+    return;
   }
   if (fullscreen_occluded_) {
     return;
@@ -1699,6 +1731,7 @@ void Dock::OpenDockMenu(POINT screen, int index) {
   }
   Log(L"dock", L"menu hwnd=%p rows=%zu %ums", popup_.hwnd(), menu_content_->size(),
       static_cast<unsigned>(GetTickCount64() - started));
+  UpdateIdleTimer();
 }
 
 void Dock::ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND>& window_cmds) {

@@ -169,7 +169,7 @@ bool ClockRenderer::MakeLayout(const std::wstring& text, float width_dip, float 
 
 bool ClockRenderer::Draw(HDC hdc, const RECT& client, bool dark, const std::wstring& left_label,
                          const std::vector<StatusItem>& items, std::vector<StatusHit>* hits, RECT* start_hit,
-                         bool start_hot, bool start_pressed) {
+                         bool start_hot, bool start_pressed, RECT* clock_hit) {
   if (!d2d_ || !dwrite_ || !hdc) {
     return false;
   }
@@ -234,6 +234,9 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, bool dark, const std::wstr
 
   const std::wstring clock = CurrentTimeText();
   float cursor = width_dip - kPadRightDip;
+  if (clock_hit != nullptr) {
+    *clock_hit = RECT{};
+  }
   if (!clock.empty()) {
     Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
     DWRITE_TEXT_METRICS metrics{};
@@ -243,6 +246,12 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, bool dark, const std::wstr
       brush->SetColor(ClockTextColor(dark));
       rt_->DrawTextLayout(D2D1::Point2F(x, y), layout.Get(), brush.Get(),
                           D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+      if (clock_hit != nullptr) {
+        clock_hit->left = client.left + static_cast<LONG>(x * px);
+        clock_hit->top = client.top;
+        clock_hit->right = client.left + static_cast<LONG>((x + metrics.widthIncludingTrailingWhitespace) * px);
+        clock_hit->bottom = client.bottom;
+      }
       cursor = x - kStatusClockGapDip;
     }
   }

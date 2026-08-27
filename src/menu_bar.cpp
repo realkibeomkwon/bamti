@@ -2,6 +2,7 @@
 
 #include "dwm.hpp"
 #include "fullscreen.hpp"
+#include "log.hpp"
 #include "theme.hpp"
 
 #include <commctrl.h>
@@ -16,9 +17,8 @@ namespace {
 constexpr UINT kAppBarCallback = WM_APP + 1;
 constexpr UINT kToggleStartMsg = WM_APP + 7;
 constexpr UINT kToggleSpotlightMsg = WM_APP + 8;
+constexpr UINT kFullscreenWatchMsg = WM_APP + 9;
 constexpr UINT_PTR kClockTimerId = 1;
-constexpr UINT_PTR kFullscreenTimerId = 2;
-constexpr UINT kFullscreenPollMs = 100;
 constexpr int kBarHeightDip = 32;
 constexpr UINT kExitCommand = 1;
 
@@ -158,11 +158,12 @@ bool MenuBar::Create(HINSTANCE instance) {
   taskbar_.Restore();
   ShowWindow(hwnd_, SW_SHOWNA);
   taskbar_.Hide();
+  Log(L"bar", L"ready hwnd=%p taskbar_hidden=%d", hwnd_, taskbar_.hidden() ? 1 : 0);
   start_menu_.Warmup(hwnd_, dark_);
   spotlight_.Warmup(hwnd_, dark_);
   InstallWinHook();
   SetTimer(hwnd_, kClockTimerId, 1000, nullptr);
-  SetTimer(hwnd_, kFullscreenTimerId, kFullscreenPollMs, nullptr);
+  StartFullscreenWatch(hwnd_, kFullscreenWatchMsg);
   RefreshFullscreenState();
   return true;
 }
@@ -212,10 +213,19 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (wparam == kClockTimerId) {
         status_.DropStale();
         taskbar_.EnsureHidden();
-        InvalidateRect(hwnd_, nullptr, FALSE);
-      } else if (wparam == kFullscreenTimerId) {
-        RefreshFullscreenState();
+        const std::wstring clock = clock_.CurrentTimeText();
+        if (clock != last_clock_text_) {
+          last_clock_text_ = clock;
+          if (clock_rect_.right > clock_rect_.left) {
+            InvalidateRect(hwnd_, &clock_rect_, FALSE);
+          } else {
+            InvalidateRect(hwnd_, nullptr, FALSE);
+          }
+        }
       }
+      return 0;
+    case kFullscreenWatchMsg:
+      RefreshFullscreenState();
       return 0;
     case kStatusChangedMsg:
       InvalidateRect(hwnd_, nullptr, FALSE);
@@ -371,7 +381,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_ENDSESSION:
       if (wparam) {
         KillTimer(hwnd_, kClockTimerId);
-        KillTimer(hwnd_, kFullscreenTimerId);
+        StopFullscreenWatch(hwnd_);
         status_.Stop();
         taskbar_.Restore();
         UnregisterAppBar();
@@ -380,7 +390,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_DESTROY:
       RemoveWinHook();
       KillTimer(hwnd_, kClockTimerId);
-      KillTimer(hwnd_, kFullscreenTimerId);
+      StopFullscreenWatch(hwnd_);
       status_.Stop();
       taskbar_.Restore();
       UnregisterAppBar();
@@ -489,7 +499,7 @@ void MenuBar::Paint() {
     BufferedPaintClear(buffer, &client);
     const auto items = status_.Snapshot();
         clock_.Draw(buffer_dc, client, dark_, taskbar_.warning(), items, &hits_, &start_rect_,
-                    start_hot_ || start_menu_.visible(), start_pressed_ || start_menu_.visible());
+                    start_hot_ || start_menu_.visible(), start_pressed_ || start_menu_.visible(), &clock_rect_);
     EndBufferedPaint(buffer, TRUE);
   }
   EndPaint(hwnd_, &ps);
