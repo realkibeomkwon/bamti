@@ -15,6 +15,7 @@ namespace {
 
 constexpr UINT kAppBarCallback = WM_APP + 1;
 constexpr UINT kToggleStartMsg = WM_APP + 7;
+constexpr UINT kToggleSpotlightMsg = WM_APP + 8;
 constexpr UINT_PTR kClockTimerId = 1;
 constexpr UINT_PTR kFullscreenTimerId = 2;
 constexpr UINT kFullscreenPollMs = 100;
@@ -25,6 +26,8 @@ MenuBar* g_menu_bar = nullptr;
 HHOOK g_key_hook = nullptr;
 bool g_win_held = false;
 bool g_win_combo = false;
+bool g_win_injected = false;
+bool g_swallow_space = false;
 DWORD g_win_vk = VK_LWIN;
 
 void InjectWinKey(DWORD vk, bool up) {
@@ -59,21 +62,38 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
     if (down) {
       g_win_held = true;
       g_win_combo = false;
+      g_win_injected = false;
       g_win_vk = vk;
       return 1;
     }
     if (up) {
       g_win_held = false;
       if (g_win_combo) {
-        InjectWinKey(g_win_vk, true);
+        if (g_win_injected) {
+          InjectWinKey(g_win_vk, true);
+        }
       } else {
         PostMessageW(g_menu_bar->hwnd(), kToggleStartMsg, 0, 0);
       }
+      g_win_injected = false;
       return 1;
     }
+  } else if (vk == VK_SPACE && up && g_swallow_space) {
+    g_swallow_space = false;
+    return 1;
   } else if (g_win_held && down) {
+    const bool extra_mod = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 ||
+                           (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 ||
+                           (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    if (vk == VK_SPACE && !extra_mod) {
+      g_win_combo = true;
+      g_swallow_space = true;
+      PostMessageW(g_menu_bar->hwnd(), kToggleSpotlightMsg, 0, 0);
+      return 1;
+    }
     if (!g_win_combo) {
       g_win_combo = true;
+      g_win_injected = true;
       InjectWinKey(g_win_vk, false);
     }
   }
@@ -90,6 +110,7 @@ MenuBar::~MenuBar() {
   RemoveWinHook();
   status_.Stop();
   start_menu_.Hide();
+  spotlight_.Hide();
   if (hwnd_) {
     DestroyWindow(hwnd_);
     hwnd_ = nullptr;
@@ -138,6 +159,7 @@ bool MenuBar::Create(HINSTANCE instance) {
   ShowWindow(hwnd_, SW_SHOWNA);
   taskbar_.Hide();
   start_menu_.Warmup(hwnd_, dark_);
+  spotlight_.Warmup(hwnd_, dark_);
   InstallWinHook();
   SetTimer(hwnd_, kClockTimerId, 1000, nullptr);
   SetTimer(hwnd_, kFullscreenTimerId, kFullscreenPollMs, nullptr);
@@ -326,6 +348,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case kToggleStartMsg:
       ToggleStartMenu(true);
       return 0;
+    case kToggleSpotlightMsg:
+      ToggleSpotlight();
+      return 0;
     case kAppBarCallback:
       switch (wparam) {
         case ABN_POSCHANGED:
@@ -505,6 +530,9 @@ void MenuBar::ToggleStartMenu(bool from_keyboard) {
   if (fullscreen_occluded_) {
     return;
   }
+  if (spotlight_.visible()) {
+    spotlight_.Hide();
+  }
   RECT start = start_rect_;
   if (start.right <= start.left) {
     RECT client{};
@@ -515,6 +543,17 @@ void MenuBar::ToggleStartMenu(bool from_keyboard) {
   MapWindowPoints(hwnd_, nullptr, reinterpret_cast<LPPOINT>(&start), 2);
   start_menu_.Toggle(hwnd_, start, dark_, from_keyboard);
   InvalidateRect(hwnd_, &start_rect_, FALSE);
+}
+
+void MenuBar::ToggleSpotlight() {
+  if (fullscreen_occluded_) {
+    return;
+  }
+  if (start_menu_.visible()) {
+    start_menu_.Hide();
+    InvalidateRect(hwnd_, &start_rect_, FALSE);
+  }
+  spotlight_.Toggle(hwnd_, dark_);
 }
 
 bool MenuBar::InstallWinHook() {
@@ -536,6 +575,8 @@ void MenuBar::RemoveWinHook() {
   }
   g_win_held = false;
   g_win_combo = false;
+  g_win_injected = false;
+  g_swallow_space = false;
 }
 
 void MenuBar::ShowContextMenu(POINT screen) {
@@ -559,6 +600,7 @@ void MenuBar::SetFullscreenOccluded(bool occluded) {
   fullscreen_occluded_ = occluded;
   if (occluded) {
     start_menu_.Hide();
+    spotlight_.Hide();
     UnregisterAppBar();
     ShowWindow(hwnd_, SW_HIDE);
   } else {

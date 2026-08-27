@@ -18,6 +18,7 @@ add_executable(bamti WIN32
   src/task_list.cpp
   src/dock.cpp
   src/start_menu.cpp
+  src/spotlight.cpp
 )
 
 target_include_directories(bamti PRIVATE src)

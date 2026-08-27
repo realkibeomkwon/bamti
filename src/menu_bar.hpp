@@ -2,6 +2,7 @@
 
 #include "clock_renderer.hpp"
 #include "pipe_server.hpp"
+#include "spotlight.hpp"
 #include "start_menu.hpp"
 #include "status_item.hpp"
 #include "taskbar_controller.hpp"
@@ -44,6 +45,7 @@ class MenuBar {
   void UpdateStartChrome(POINT client);
   void ArmMouseLeave();
   void ToggleStartMenu(bool from_keyboard = false);
+  void ToggleSpotlight();
   bool InstallWinHook();
   void RemoveWinHook();
   UINT Dpi() const;
@@ -61,6 +63,7 @@ class MenuBar {
   PipeServer status_;
   TaskbarController taskbar_;
   StartMenu start_menu_;
+  Spotlight spotlight_;
   std::vector<StatusHit> hits_;
   std::wstring tooltip_text_;
 };

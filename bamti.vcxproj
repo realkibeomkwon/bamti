@@ -89,6 +89,7 @@
     <ClCompile Include="src\task_list.cpp" />
     <ClCompile Include="src\dock.cpp" />
     <ClCompile Include="src\start_menu.cpp" />
+    <ClCompile Include="src\spotlight.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\host.hpp" />
@@ -103,6 +104,7 @@
     <ClInclude Include="src\task_list.hpp" />
     <ClInclude Include="src\dock.hpp" />
     <ClInclude Include="src\start_menu.hpp" />
+    <ClInclude Include="src\spotlight.hpp" />
     <ClInclude Include="src\json_line.hpp" />
     <None Include="src\bamti.manifest" />
   </ItemGroup>
