@@ -12,6 +12,7 @@ struct DockApp {
   std::wstring aumid;
   std::wstring icon_resource;
   std::wstring display_name;
+  std::wstring relaunch_command;
   HWND hwnd = nullptr;
   std::vector<HWND> windows;
   bool running = false;
@@ -26,7 +27,11 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
 
 bool ActivateHwnd(HWND hwnd);
 bool LaunchExe(const std::wstring& path);
+bool LaunchDockApp(const DockApp& app);
 void CloseHwnds(const std::vector<HWND>& windows);
+
+std::wstring DockPinId(const DockApp& app);
+bool SameDockPin(const std::wstring& a, const std::wstring& b);
 
 std::wstring CanonicalPath(const std::wstring& path);
 std::wstring WindowTitle(HWND hwnd);

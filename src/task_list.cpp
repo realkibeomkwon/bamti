@@ -15,11 +15,13 @@
 #include <cstdio>
 #include <cwchar>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace bamti {
 namespace {
 
 constexpr wchar_t kPinFile[] = L"dock-pins.txt";
+constexpr wchar_t kAumidPinPrefix[] = L"aumid:";
 
 bool EqualsIgnoreCase(const std::wstring& a, const std::wstring& b) {
   return lstrcmpiW(a.c_str(), b.c_str()) == 0;
@@ -201,6 +203,140 @@ bool IsHostExe(const std::wstring& path) {
   const std::wstring stem = Lower(FileStem(path));
   return stem == L"applicationframehost" || stem == L"wwahost" || stem == L"dllhost" ||
          stem == L"runtimebroker";
+}
+
+bool IsBrowserHostExe(const std::wstring& path) {
+  const std::wstring stem = Lower(FileStem(path));
+  return stem == L"msedge" || stem == L"chrome" || stem == L"chromium" || stem == L"brave" ||
+         stem == L"firefox" || stem == L"msedgewebview2" || stem == L"iexplore";
+}
+
+bool LooksLikeHostedWebApp(const std::wstring& aumid) {
+  const std::wstring id = Lower(aumid);
+  if (id.find(L"://") != std::wstring::npos || id.find(L"!http") != std::wstring::npos) {
+    return true;
+  }
+  return id.rfind(L"chrome.app.", 0) == 0 || id.rfind(L"chrome._crx_", 0) == 0 ||
+         id.rfind(L"chromium.", 0) == 0 || id.rfind(L"brave.", 0) == 0 || id.rfind(L"msedge-", 0) == 0;
+}
+
+std::wstring PinPrimary(const std::wstring& pin) {
+  const size_t tab = pin.find(L'\t');
+  return tab == std::wstring::npos ? pin : pin.substr(0, tab);
+}
+
+std::wstring PinExtra(const std::wstring& pin) {
+  const size_t tab = pin.find(L'\t');
+  if (tab == std::wstring::npos || tab + 1 >= pin.size()) {
+    return {};
+  }
+  return pin.substr(tab + 1);
+}
+
+bool IsAumidPin(const std::wstring& pin) {
+  const std::wstring primary = PinPrimary(pin);
+  return primary.rfind(kAumidPinPrefix, 0) == 0 && primary.size() > wcslen(kAumidPinPrefix);
+}
+
+std::wstring AumidFromPin(const std::wstring& pin) {
+  const std::wstring primary = PinPrimary(pin);
+  if (primary.rfind(kAumidPinPrefix, 0) != 0 || primary.size() <= wcslen(kAumidPinPrefix)) {
+    return {};
+  }
+  return primary.substr(wcslen(kAumidPinPrefix));
+}
+
+std::wstring AumidFallbackName(const std::wstring& aumid) {
+  const size_t bang = aumid.find(L'!');
+  if (bang == std::wstring::npos || bang + 1 >= aumid.size()) {
+    return aumid;
+  }
+  std::wstring tail = aumid.substr(bang + 1);
+  if (tail.rfind(L"https://", 0) == 0) {
+    tail.erase(0, 8);
+  } else if (tail.rfind(L"http://", 0) == 0) {
+    tail.erase(0, 7);
+  }
+  while (!tail.empty() && tail.back() == L'/') {
+    tail.pop_back();
+  }
+  return tail.empty() ? aumid : tail;
+}
+
+bool CanPinApp(const DockApp& app) {
+  if (IsSelfExecutable(app.exe_path)) {
+    return false;
+  }
+  if (!app.aumid.empty()) {
+    return true;
+  }
+  return !app.exe_path.empty() && !IsHostExe(app.exe_path);
+}
+
+Microsoft::WRL::ComPtr<IShellItem> ShellItemFromAumid(const std::wstring& aumid) {
+  Microsoft::WRL::ComPtr<IShellItem> item;
+  if (aumid.empty()) {
+    return item;
+  }
+  if (SUCCEEDED(SHCreateItemInKnownFolder(FOLDERID_AppsFolder, 0, aumid.c_str(), IID_PPV_ARGS(&item))) && item) {
+    return item;
+  }
+  item.Reset();
+  if (aumid.find(L'!') == std::wstring::npos) {
+    const std::wstring alt = aumid + L"!App";
+    if (SUCCEEDED(SHCreateItemInKnownFolder(FOLDERID_AppsFolder, 0, alt.c_str(), IID_PPV_ARGS(&item))) &&
+        item) {
+      return item;
+    }
+    item.Reset();
+  }
+  const std::wstring parsing = L"shell:AppsFolder\\" + aumid;
+  SHCreateItemFromParsingName(parsing.c_str(), nullptr, IID_PPV_ARGS(&item));
+  return item;
+}
+
+bool LaunchShellItem(IShellItem* item) {
+  if (item == nullptr) {
+    return false;
+  }
+  PIDLIST_ABSOLUTE pidl = nullptr;
+  if (FAILED(SHGetIDListFromObject(item, &pidl)) || pidl == nullptr) {
+    return false;
+  }
+  SHELLEXECUTEINFOW info{};
+  info.cbSize = sizeof(info);
+  info.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_IDLIST;
+  info.lpIDList = pidl;
+  info.nShow = SW_SHOWNORMAL;
+  const bool ok = ShellExecuteExW(&info) != FALSE;
+  CoTaskMemFree(pidl);
+  return ok;
+}
+
+bool LaunchAumid(const std::wstring& aumid) {
+  if (aumid.empty()) {
+    return false;
+  }
+  if (LaunchShellItem(ShellItemFromAumid(aumid).Get())) {
+    return true;
+  }
+  Microsoft::WRL::ComPtr<IApplicationActivationManager> activator;
+  if (FAILED(CoCreateInstance(CLSID_ApplicationActivationManager, nullptr, CLSCTX_INPROC_SERVER,
+                              IID_PPV_ARGS(&activator))) ||
+      !activator) {
+    return false;
+  }
+  DWORD pid = 0;
+  if (SUCCEEDED(activator->ActivateApplication(aumid.c_str(), nullptr, AO_NONE, &pid))) {
+    return true;
+  }
+  if (aumid.find(L'!') == std::wstring::npos) {
+    const std::wstring alt = aumid + L"!App";
+    if (SUCCEEDED(activator->ActivateApplication(alt.c_str(), nullptr, AO_NONE, &pid))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::wstring WindowPropString(HWND hwnd, const PROPERTYKEY& key) {
@@ -385,6 +521,30 @@ bool IsSelfExecutable(const std::wstring& path) {
   return Lower(FileStem(path)) == L"bamti";
 }
 
+std::wstring DockPinId(const DockApp& app) {
+  if (!app.aumid.empty()) {
+    return std::wstring(kAumidPinPrefix) + app.aumid;
+  }
+  return app.exe_path;
+}
+
+bool SameDockPin(const std::wstring& a, const std::wstring& b) {
+  if (a.empty() || b.empty()) {
+    return false;
+  }
+  const bool a_aumid = IsAumidPin(a);
+  const bool b_aumid = IsAumidPin(b);
+  if (a_aumid && b_aumid) {
+    return EqualsIgnoreCase(AumidFromPin(a), AumidFromPin(b));
+  }
+  if (a_aumid || b_aumid) {
+    const std::wstring a_id = Lower(a_aumid ? AumidFromPin(a) : PathAumid(a));
+    const std::wstring b_id = Lower(b_aumid ? AumidFromPin(b) : PathAumid(b));
+    return !a_id.empty() && a_id == b_id;
+  }
+  return CanonicalPath(a) == CanonicalPath(b);
+}
+
 std::vector<std::wstring> LoadDockPins() {
   std::vector<std::wstring> pins;
   const std::wstring path = PinPath();
@@ -395,8 +555,8 @@ std::vector<std::wstring> LoadDockPins() {
   if (_wfopen_s(&file, path.c_str(), L"r, ccs=UTF-8") != 0 || file == nullptr) {
     return pins;
   }
-  wchar_t line[1024]{};
-  while (fgetws(line, 1024, file) != nullptr) {
+  wchar_t line[4096]{};
+  while (fgetws(line, 4096, file) != nullptr) {
     std::wstring text = line;
     while (!text.empty() && (text.back() == L'\n' || text.back() == L'\r')) {
       text.pop_back();
@@ -443,6 +603,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
     std::wstring title;
     std::wstring icon_resource;
     std::wstring relaunch_name;
+    std::wstring relaunch_command;
   };
   std::vector<Raw> windows;
   EnumWindows(
@@ -461,6 +622,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
         raw.title = WindowTitle(hwnd);
         raw.icon_resource = WindowPropString(hwnd, PKEY_AppUserModel_RelaunchIconResource);
         raw.relaunch_name = WindowPropString(hwnd, PKEY_AppUserModel_RelaunchDisplayNameResource);
+        raw.relaunch_command = WindowPropString(hwnd, PKEY_AppUserModel_RelaunchCommand);
         out->push_back(std::move(raw));
         return TRUE;
       },
@@ -514,6 +676,9 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       if (app.icon_resource.empty()) {
         app.icon_resource = raw.icon_resource;
       }
+      if (app.relaunch_command.empty()) {
+        app.relaunch_command = raw.relaunch_command;
+      }
       if (app.exe_path.empty() && !raw.path.empty() && !IsHostExe(raw.path)) {
         app.exe_path = raw.path;
       }
@@ -539,26 +704,76 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
   std::vector<DockApp> result;
   std::vector<std::wstring> used_keys;
 
+  auto already_used = [&](const std::wstring& key) {
+    return std::find(used_keys.begin(), used_keys.end(), key) != used_keys.end();
+  };
+
+  std::unordered_set<std::wstring> aumid_pins;
   for (const auto& pin : pinned_paths) {
-    if (IsSelfExecutable(pin)) {
-      continue;
+    if (IsAumidPin(pin)) {
+      aumid_pins.insert(Lower(AumidFromPin(pin)));
     }
-    const std::wstring canon = CanonicalPath(pin);
-    DockApp* found = nullptr;
-    for (auto& [key, app] : groups) {
-      if (!app.exe_path.empty() && CanonicalPath(app.exe_path) == canon) {
-        found = &app;
-        break;
+  }
+
+  auto find_by_aumid = [&](const std::wstring& aumid) -> DockApp* {
+    const std::wstring want = Lower(aumid);
+    for (const auto& key : order) {
+      DockApp& app = groups[key];
+      if (already_used(app.key)) {
+        continue;
+      }
+      if (!app.aumid.empty() && Lower(app.aumid) == want) {
+        return &app;
       }
     }
+    return nullptr;
+  };
+
+  auto find_by_path = [&](const std::wstring& path) -> DockApp* {
+    const std::wstring canon = CanonicalPath(path);
+    for (const auto& key : order) {
+      DockApp& app = groups[key];
+      if (already_used(app.key) || app.exe_path.empty() || CanonicalPath(app.exe_path) != canon) {
+        continue;
+      }
+      if (!app.aumid.empty() &&
+          (aumid_pins.count(Lower(app.aumid)) != 0 || LooksLikeHostedWebApp(app.aumid))) {
+        continue;
+      }
+      return &app;
+    }
+    return nullptr;
+  };
+
+  for (const auto& pin : pinned_paths) {
+    if (!IsAumidPin(pin) && IsSelfExecutable(pin)) {
+      continue;
+    }
+    DockApp* found = IsAumidPin(pin) ? find_by_aumid(AumidFromPin(pin)) : find_by_path(pin);
     if (found != nullptr) {
       found->pinned = true;
       found->can_pin = true;
-      if (found->exe_path.empty()) {
+      if (!IsAumidPin(pin) && found->exe_path.empty()) {
         found->exe_path = pin;
+      }
+      if (found->relaunch_command.empty()) {
+        found->relaunch_command = PinExtra(pin);
       }
       result.push_back(*found);
       used_keys.push_back(found->key);
+    } else if (IsAumidPin(pin)) {
+      DockApp app;
+      app.aumid = AumidFromPin(pin);
+      app.key = L"aumid:" + Lower(app.aumid);
+      app.display_name = AppsFolderDisplayName(app.aumid);
+      if (app.display_name.empty()) {
+        app.display_name = AumidFallbackName(app.aumid);
+      }
+      app.relaunch_command = PinExtra(pin);
+      app.pinned = true;
+      app.can_pin = true;
+      used_keys.push_back(app.key);
+      result.push_back(std::move(app));
     } else {
       DockApp app;
       app.exe_path = pin;
@@ -567,7 +782,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
         app.key = L"aumid:" + Lower(app.aumid);
         app.display_name = AppsFolderDisplayName(app.aumid);
       } else {
-        app.key = L"path:" + canon;
+        app.key = L"path:" + CanonicalPath(pin);
       }
       if (app.display_name.empty()) {
         app.display_name = DisplayNameFor(pin, {});
@@ -584,7 +799,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       continue;
     }
     DockApp& app = groups[key];
-    app.can_pin = !app.exe_path.empty() && !IsHostExe(app.exe_path);
+    app.can_pin = CanPinApp(app);
     result.push_back(app);
   }
 
@@ -615,6 +830,21 @@ bool ActivateHwnd(HWND hwnd) {
   return ok != FALSE;
 }
 
+bool LaunchCommandLine(std::wstring command) {
+  if (command.empty()) {
+    return false;
+  }
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi) == FALSE) {
+    return false;
+  }
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  return true;
+}
+
 bool LaunchExe(const std::wstring& path) {
   if (path.empty()) {
     return false;
@@ -626,6 +856,19 @@ bool LaunchExe(const std::wstring& path) {
   info.lpFile = path.c_str();
   info.nShow = SW_SHOWNORMAL;
   return ShellExecuteExW(&info) != FALSE;
+}
+
+bool LaunchDockApp(const DockApp& app) {
+  if (!app.aumid.empty() && LaunchAumid(app.aumid)) {
+    return true;
+  }
+  if (LaunchCommandLine(app.relaunch_command)) {
+    return true;
+  }
+  if (!app.exe_path.empty() && !IsHostExe(app.exe_path) && !IsBrowserHostExe(app.exe_path)) {
+    return LaunchExe(app.exe_path);
+  }
+  return false;
 }
 
 void CloseHwnds(const std::vector<HWND>& windows) {

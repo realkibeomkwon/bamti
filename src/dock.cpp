@@ -872,7 +872,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         if (app.running && app.hwnd != nullptr) {
           ActivateHwnd(app.hwnd);
         } else {
-          LaunchExe(app.exe_path);
+          LaunchDockApp(app);
         }
       }
       return 0;
@@ -1361,20 +1361,25 @@ void Dock::ShowContextMenu(POINT screen, int index) {
       ActivateHwnd(window_cmds[window_index]);
     }
   } else if (cmd == kPinCommand) {
-    if (app.can_pin && !app.exe_path.empty() && !IsSelfExecutable(app.exe_path)) {
-      const std::wstring canon = CanonicalPath(app.exe_path);
-      const bool exists = std::any_of(pins_.begin(), pins_.end(),
-                                      [&](const std::wstring& path) { return CanonicalPath(path) == canon; });
+    const std::wstring id = DockPinId(app);
+    if (app.can_pin && !id.empty()) {
+      std::wstring stored = id;
+      if (!app.relaunch_command.empty()) {
+        stored.push_back(L'\t');
+        stored += app.relaunch_command;
+      }
+      const bool exists =
+          std::any_of(pins_.begin(), pins_.end(), [&](const std::wstring& pin) { return SameDockPin(pin, id); });
       if (!exists) {
-        pins_.push_back(app.exe_path);
+        pins_.push_back(std::move(stored));
         SaveDockPins(pins_);
       }
       Rebuild();
     }
   } else if (cmd == kUnpinCommand) {
-    const std::wstring canon = CanonicalPath(app.exe_path);
+    const std::wstring id = DockPinId(app);
     pins_.erase(std::remove_if(pins_.begin(), pins_.end(),
-                               [&](const std::wstring& path) { return CanonicalPath(path) == canon; }),
+                               [&](const std::wstring& pin) { return SameDockPin(pin, id); }),
                 pins_.end());
     SaveDockPins(pins_);
     Rebuild();
