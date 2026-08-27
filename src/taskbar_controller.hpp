@@ -15,7 +15,7 @@ class TaskbarController {
   bool Hide();
   void Restore();
   void EnsureHidden();
-  static void Rehide();
+  static bool Rehide();
   static void ForceRestore();
 
   bool hidden() const { return hidden_; }

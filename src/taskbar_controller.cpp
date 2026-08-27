@@ -255,7 +255,7 @@ void TaskbarController::EnsureHidden() {
   HideTrayWindows();
 }
 
-void TaskbarController::Rehide() {
+bool TaskbarController::Rehide() {
   bool need = false;
   EnumTrays([&](HWND hwnd) {
     if (IsWindowVisible(hwnd) != FALSE) {
@@ -270,6 +270,7 @@ void TaskbarController::Rehide() {
   if (need) {
     HideTrayWindows();
   }
+  return need;
 }
 
 void TaskbarController::ForceRestore() {

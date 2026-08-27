@@ -16,6 +16,8 @@ namespace {
 constexpr UINT kAppBarCallback = WM_APP + 1;
 constexpr UINT kToggleStartMsg = WM_APP + 7;
 constexpr UINT_PTR kClockTimerId = 1;
+constexpr UINT_PTR kFullscreenTimerId = 2;
+constexpr UINT kFullscreenPollMs = 100;
 constexpr int kBarHeightDip = 32;
 constexpr UINT kExitCommand = 1;
 
@@ -138,6 +140,7 @@ bool MenuBar::Create(HINSTANCE instance) {
   start_menu_.Warmup(hwnd_, dark_);
   InstallWinHook();
   SetTimer(hwnd_, kClockTimerId, 1000, nullptr);
+  SetTimer(hwnd_, kFullscreenTimerId, kFullscreenPollMs, nullptr);
   RefreshFullscreenState();
   return true;
 }
@@ -186,9 +189,10 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_TIMER:
       if (wparam == kClockTimerId) {
         status_.DropStale();
-        RefreshFullscreenState();
         taskbar_.EnsureHidden();
         InvalidateRect(hwnd_, nullptr, FALSE);
+      } else if (wparam == kFullscreenTimerId) {
+        RefreshFullscreenState();
       }
       return 0;
     case kStatusChangedMsg:
@@ -328,6 +332,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           Layout();
           break;
         case ABN_FULLSCREENAPP:
+          // Explorer fires this when windows minimize or lose activation. Hiding
+          // the AppBar on lparam=TRUE without a check unregisters it and the bar
+          // flickers back on the next poll.
           RefreshFullscreenState();
           break;
         default:
@@ -339,6 +346,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_ENDSESSION:
       if (wparam) {
         KillTimer(hwnd_, kClockTimerId);
+        KillTimer(hwnd_, kFullscreenTimerId);
         status_.Stop();
         taskbar_.Restore();
         UnregisterAppBar();
@@ -347,6 +355,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_DESTROY:
       RemoveWinHook();
       KillTimer(hwnd_, kClockTimerId);
+      KillTimer(hwnd_, kFullscreenTimerId);
       status_.Stop();
       taskbar_.Restore();
       UnregisterAppBar();

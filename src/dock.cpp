@@ -48,6 +48,7 @@ constexpr UINT kTasksChangedMsg = WM_APP + 20;
 constexpr UINT kPinCommand = 1;
 constexpr UINT kUnpinCommand = 2;
 constexpr UINT kCloseCommand = 3;
+constexpr UINT kNewWindowCommand = 4;
 constexpr UINT kWindowCommandBase = 100;
 
 HWND g_notify = nullptr;
@@ -838,7 +839,11 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       return 0;
     }
     case WM_MOUSELEAVE:
-      StartHideTimer();
+      if (!PointerOverUi()) {
+        StartHideTimer();
+      } else {
+        ArmMouseLeave();
+      }
       return 0;
     case WM_LBUTTONDOWN: {
       const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
@@ -1046,7 +1051,11 @@ void Dock::Layout() {
   const int width = pad * 2 + (count > 0 ? count * slot : slot) + gap;
   const int x = info.rcMonitor.left + (info.rcMonitor.right - info.rcMonitor.left - width) / 2;
   const int y = info.rcMonitor.bottom - Dip(kMarginBottomDip) - height;
-  SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+  RECT current{};
+  GetWindowRect(hwnd_, &current);
+  if (current.left != x || current.top != y || current.right != x + width || current.bottom != y + height) {
+    SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+  }
 
   slots_.assign(static_cast<size_t>(count), RECT{});
   for (int i = 0; i < count; ++i) {
@@ -1221,7 +1230,7 @@ void Dock::ShowPill() {
     shown_ = true;
     Layout();
     ShowWindow(hwnd_, SW_SHOWNA);
-    SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    RaiseOverlays();
   }
   ArmMouseLeave();
 }
@@ -1268,7 +1277,9 @@ void Dock::ArmMouseLeave() {
 
 void Dock::PollPointer() {
   RefreshFullscreen();
-  TaskbarController::Rehide();
+  if (TaskbarController::Rehide()) {
+    RaiseOverlays();
+  }
   if (fullscreen_occluded_) {
     return;
   }
@@ -1297,6 +1308,20 @@ void Dock::SetFullscreenOccluded(bool occluded) {
   } else {
     LayoutHot();
     ShowWindow(hot_hwnd_, SW_SHOWNA);
+    RaiseOverlays();
+  }
+}
+
+void Dock::RaiseOverlays() {
+  if (fullscreen_occluded_) {
+    return;
+  }
+  const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+  if (hot_hwnd_ != nullptr) {
+    SetWindowPos(hot_hwnd_, HWND_TOPMOST, 0, 0, 0, 0, flags);
+  }
+  if (shown_ && hwnd_ != nullptr) {
+    SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, flags);
   }
 }
 
@@ -1330,19 +1355,17 @@ void Dock::ShowContextMenu(POINT screen, int index) {
     AppendMenuW(menu, MF_STRING, id, title.c_str());
     window_cmds.push_back(hwnd);
   }
-  if (!window_cmds.empty() && (app.pinned || app.can_pin || app.running)) {
+  if (!window_cmds.empty()) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   }
+  AppendMenuW(menu, MF_STRING, kNewWindowCommand, L"새 창");
   if (app.pinned) {
     AppendMenuW(menu, MF_STRING, kUnpinCommand, L"고정 해제");
   } else if (app.can_pin && !IsSelfExecutable(app.exe_path)) {
     AppendMenuW(menu, MF_STRING, kPinCommand, L"독에 고정");
   }
   if (app.running) {
-    if (GetMenuItemCount(menu) > 0 &&
-        (app.pinned || (app.can_pin && !IsSelfExecutable(app.exe_path)))) {
-      AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCloseCommand, L"닫기");
   }
 
@@ -1360,6 +1383,8 @@ void Dock::ShowContextMenu(POINT screen, int index) {
     if (window_index < window_cmds.size()) {
       ActivateHwnd(window_cmds[window_index]);
     }
+  } else if (cmd == kNewWindowCommand) {
+    LaunchDockApp(app);
   } else if (cmd == kPinCommand) {
     const std::wstring id = DockPinId(app);
     if (app.can_pin && !id.empty()) {
@@ -1551,6 +1576,12 @@ bool Dock::PointerOverUi() const {
 bool Dock::PointerOverHotEdge() const {
   POINT pt{};
   GetCursorPos(&pt);
+  if (hot_hwnd_ != nullptr) {
+    RECT hot_rc{};
+    if (GetWindowRect(hot_hwnd_, &hot_rc) && PtInRect(&hot_rc, pt)) {
+      return true;
+    }
+  }
   const MONITORINFO info = PrimaryMonitorInfo();
   const int hot = DipToPx(kHotDip, Dpi());
   RECT edge{info.rcMonitor.left, info.rcMonitor.bottom - hot, info.rcMonitor.right, info.rcMonitor.bottom};

@@ -48,6 +48,7 @@ class Dock {
   void PollPointer();
   void RefreshFullscreen();
   void SetFullscreenOccluded(bool occluded);
+  void RaiseOverlays();
   void ShowContextMenu(POINT screen, int index);
   void ArmMouseLeave();
   void SanitizePins();

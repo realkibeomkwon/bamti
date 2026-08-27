@@ -8,23 +8,52 @@
 namespace bamti {
 namespace {
 
-bool RectNearlyEqual(const RECT& a, const RECT& b) {
-  return std::abs(a.left - b.left) <= 2 && std::abs(a.top - b.top) <= 2 &&
-         std::abs(a.right - b.right) <= 2 && std::abs(a.bottom - b.bottom) <= 2;
+bool RectCovers(const RECT& window, const RECT& monitor, int slop) {
+  return window.left <= monitor.left + slop && window.top <= monitor.top + slop &&
+         window.right >= monitor.right - slop && window.bottom >= monitor.bottom - slop;
 }
 
-bool IsShellOverlayClass(HWND hwnd) {
+int FrameSlopPx(HWND hwnd) {
+  UINT dpi = GetDpiForWindow(hwnd);
+  if (dpi == 0) {
+    dpi = 96;
+  }
+  const int frame = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi);
+  const int pad = GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+  const int slop = frame + pad;
+  return slop < 8 ? 8 : slop;
+}
+
+bool IsShellForegroundClass(HWND hwnd) {
   wchar_t cls[256]{};
   GetClassNameW(hwnd, cls, 256);
-  return lstrcmpiW(cls, L"Windows.UI.Core.CoreWindow") == 0 ||
-         lstrcmpiW(cls, L"Xaml_WindowedPopupClass") == 0 ||
-         lstrcmpiW(cls, L"ForegroundStaging") == 0;
+  if (cls[0] != L'\0' && _wcsnicmp(cls, L"bamti.", 6) == 0) {
+    return true;
+  }
+  static const wchar_t* kSkip[] = {
+      L"Progman",
+      L"WorkerW",
+      L"Shell_TrayWnd",
+      L"Shell_SecondaryTrayWnd",
+      L"NotifyIconOverflowWindow",
+      L"ForegroundStaging",
+      L"Windows.UI.Core.CoreWindow",
+      L"Xaml_WindowedPopupClass",
+  };
+  for (const wchar_t* skip : kSkip) {
+    if (lstrcmpiW(cls, skip) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool HasCaptionFrame(LONG style) {
+  return (style & WS_CAPTION) == WS_CAPTION;
 }
 
 }  // namespace
 
-// Maximized apps (Windows Terminal included) are not fullscreen. They often
-// ignore the work area and cover the monitor; overlays stay TOPMOST instead.
 bool IsTrueFullscreen(HWND self) {
   QUERY_USER_NOTIFICATION_STATE state{};
   if (SUCCEEDED(SHQueryUserNotificationState(&state)) && state == QUNS_RUNNING_D3D_FULL_SCREEN) {
@@ -45,7 +74,10 @@ bool IsTrueFullscreen(HWND self) {
     return false;
   }
 
-  if (IsShellOverlayClass(fg)) {
+  if (!IsWindowVisible(fg) || IsIconic(fg)) {
+    return false;
+  }
+  if (IsShellForegroundClass(fg)) {
     return false;
   }
 
@@ -55,13 +87,7 @@ bool IsTrueFullscreen(HWND self) {
   }
 
   const LONG style = GetWindowLongW(fg, GWL_STYLE);
-  if ((style & WS_MAXIMIZE) != 0) {
-    return false;
-  }
-
-  WINDOWPLACEMENT place{};
-  place.length = sizeof(place);
-  if (GetWindowPlacement(fg, &place) && place.showCmd == SW_SHOWMAXIMIZED) {
+  if ((style & WS_MINIMIZE) != 0) {
     return false;
   }
 
@@ -71,10 +97,11 @@ bool IsTrueFullscreen(HWND self) {
   }
   MONITORINFO mi{};
   mi.cbSize = sizeof(mi);
-  if (!GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mi)) {
+  const HMONITOR monitor = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+  if (!GetMonitorInfoW(monitor, &mi)) {
     return false;
   }
-  if (!RectNearlyEqual(wr, mi.rcMonitor)) {
+  if (!RectCovers(wr, mi.rcMonitor, FrameSlopPx(fg))) {
     return false;
   }
 
@@ -83,9 +110,10 @@ bool IsTrueFullscreen(HWND self) {
     return false;
   }
 
-  const bool captioned = (style & WS_CAPTION) == WS_CAPTION;
-  const bool overlapped = (style & WS_OVERLAPPEDWINDOW) == WS_OVERLAPPEDWINDOW;
-  return !captioned && !overlapped;
+  // Captioned maximized windows that ignore the work area (Windows Terminal) keep
+  // the overlay. Chrome HTML5 fullscreen strips WS_CAPTION but often keeps
+  // WS_MAXIMIZE when the browser was already maximized.
+  return !HasCaptionFrame(style);
 }
 
 }  // namespace bamti

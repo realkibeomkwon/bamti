@@ -205,19 +205,14 @@ bool IsHostExe(const std::wstring& path) {
          stem == L"runtimebroker";
 }
 
-bool IsBrowserHostExe(const std::wstring& path) {
-  const std::wstring stem = Lower(FileStem(path));
-  return stem == L"msedge" || stem == L"chrome" || stem == L"chromium" || stem == L"brave" ||
-         stem == L"firefox" || stem == L"msedgewebview2" || stem == L"iexplore";
-}
-
 bool LooksLikeHostedWebApp(const std::wstring& aumid) {
   const std::wstring id = Lower(aumid);
   if (id.find(L"://") != std::wstring::npos || id.find(L"!http") != std::wstring::npos) {
     return true;
   }
   return id.rfind(L"chrome.app.", 0) == 0 || id.rfind(L"chrome._crx_", 0) == 0 ||
-         id.rfind(L"chromium.", 0) == 0 || id.rfind(L"brave.", 0) == 0 || id.rfind(L"msedge-", 0) == 0;
+         id.rfind(L"chromium.app.", 0) == 0 || id.rfind(L"chromium._crx_", 0) == 0 ||
+         id.rfind(L"brave.app.", 0) == 0 || id.rfind(L"msedge-", 0) == 0;
 }
 
 std::wstring PinPrimary(const std::wstring& pin) {
@@ -295,6 +290,19 @@ Microsoft::WRL::ComPtr<IShellItem> ShellItemFromAumid(const std::wstring& aumid)
   return item;
 }
 
+std::wstring FilePathFromShellItem(IShellItem* item) {
+  if (item == nullptr) {
+    return {};
+  }
+  PWSTR path = nullptr;
+  if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) || path == nullptr) {
+    return {};
+  }
+  std::wstring out = path;
+  CoTaskMemFree(path);
+  return out;
+}
+
 bool LaunchShellItem(IShellItem* item) {
   if (item == nullptr) {
     return false;
@@ -321,19 +329,24 @@ bool LaunchAumid(const std::wstring& aumid) {
     return true;
   }
   Microsoft::WRL::ComPtr<IApplicationActivationManager> activator;
-  if (FAILED(CoCreateInstance(CLSID_ApplicationActivationManager, nullptr, CLSCTX_INPROC_SERVER,
-                              IID_PPV_ARGS(&activator))) ||
-      !activator) {
-    return false;
-  }
-  DWORD pid = 0;
-  if (SUCCEEDED(activator->ActivateApplication(aumid.c_str(), nullptr, AO_NONE, &pid))) {
-    return true;
-  }
-  if (aumid.find(L'!') == std::wstring::npos) {
-    const std::wstring alt = aumid + L"!App";
-    if (SUCCEEDED(activator->ActivateApplication(alt.c_str(), nullptr, AO_NONE, &pid))) {
+  if (SUCCEEDED(CoCreateInstance(CLSID_ApplicationActivationManager, nullptr, CLSCTX_INPROC_SERVER,
+                                 IID_PPV_ARGS(&activator))) &&
+      activator) {
+    DWORD pid = 0;
+    if (SUCCEEDED(activator->ActivateApplication(aumid.c_str(), nullptr, AO_NONE, &pid))) {
       return true;
+    }
+    if (aumid.find(L'!') == std::wstring::npos) {
+      const std::wstring alt = aumid + L"!App";
+      if (SUCCEEDED(activator->ActivateApplication(alt.c_str(), nullptr, AO_NONE, &pid))) {
+        return true;
+      }
+    }
+  }
+  if (!LooksLikeHostedWebApp(aumid)) {
+    const std::wstring path = FilePathFromShellItem(ShellItemFromAumid(aumid).Get());
+    if (!path.empty() && !IsHostExe(path)) {
+      return LaunchExe(path);
     }
   }
   return false;
@@ -522,10 +535,17 @@ bool IsSelfExecutable(const std::wstring& path) {
 }
 
 std::wstring DockPinId(const DockApp& app) {
+  if (!app.aumid.empty() &&
+      (LooksLikeHostedWebApp(app.aumid) || app.exe_path.empty() || IsHostExe(app.exe_path))) {
+    return std::wstring(kAumidPinPrefix) + app.aumid;
+  }
+  if (!app.exe_path.empty()) {
+    return app.exe_path;
+  }
   if (!app.aumid.empty()) {
     return std::wstring(kAumidPinPrefix) + app.aumid;
   }
-  return app.exe_path;
+  return {};
 }
 
 bool SameDockPin(const std::wstring& a, const std::wstring& b) {
@@ -770,6 +790,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
         app.display_name = AumidFallbackName(app.aumid);
       }
       app.relaunch_command = PinExtra(pin);
+      app.exe_path = FilePathFromShellItem(ShellItemFromAumid(app.aumid).Get());
       app.pinned = true;
       app.can_pin = true;
       used_keys.push_back(app.key);
@@ -859,14 +880,24 @@ bool LaunchExe(const std::wstring& path) {
 }
 
 bool LaunchDockApp(const DockApp& app) {
-  if (!app.aumid.empty() && LaunchAumid(app.aumid)) {
+  const bool hosted_web = LooksLikeHostedWebApp(app.aumid);
+  if (hosted_web) {
+    if (!app.aumid.empty() && LaunchAumid(app.aumid)) {
+      return true;
+    }
+    return LaunchCommandLine(app.relaunch_command);
+  }
+  if (!app.aumid.empty() && (app.exe_path.empty() || IsHostExe(app.exe_path)) && LaunchAumid(app.aumid)) {
     return true;
   }
   if (LaunchCommandLine(app.relaunch_command)) {
     return true;
   }
-  if (!app.exe_path.empty() && !IsHostExe(app.exe_path) && !IsBrowserHostExe(app.exe_path)) {
+  if (!app.exe_path.empty() && !IsHostExe(app.exe_path)) {
     return LaunchExe(app.exe_path);
+  }
+  if (!app.aumid.empty()) {
+    return LaunchAumid(app.aumid);
   }
   return false;
 }
