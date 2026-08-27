@@ -1,0 +1,15 @@
+/build/
+/out/
+/.vs/
+/CMakeFiles/
+/CMakeCache.txt
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+x64/
+Debug/
+Release/
+ipch/
