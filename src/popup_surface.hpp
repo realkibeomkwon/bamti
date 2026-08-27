@@ -19,6 +19,7 @@ class PopupContent {
   virtual void Render(ID2D1RenderTarget* target, UINT dpi, int hot_index) = 0;
   virtual int HitTest(POINT client, UINT dpi) const = 0;
   virtual void Invoke(int index) = 0;
+  virtual int RowCount() const { return 0; }
 };
 
 float PopupTextWidth(UINT dpi, const std::wstring& text);
@@ -28,6 +29,19 @@ void DrawPopupText(ID2D1RenderTarget* target, UINT dpi, const std::wstring& text
 class PopupSurface {
  public:
   enum class Anchor { AboveAt, BelowAt };
+
+  enum class DismissReason {
+    kInvoke,
+    kOutsideClick,
+    kOutsidePoll,
+    kCaptureLost,
+    kCaptureGone,
+    kEscape,
+    kWinKey,
+    kForeground,
+    kReopen,
+    kExplicit,
+  };
 
   PopupSurface() = default;
   PopupSurface(const PopupSurface&) = delete;
@@ -47,7 +61,7 @@ class PopupSurface {
  private:
   static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
   LRESULT Handle(UINT msg, WPARAM wp, LPARAM lp);
-  void Dismiss(int invoke_index);
+  void Dismiss(int invoke_index, DismissReason reason);
   void EnsureRenderTarget();
   void Render();
   void Place(SIZE size, POINT anchor_screen, Anchor mode);
@@ -63,6 +77,7 @@ class PopupSurface {
   bool open_ = false;
   bool esc_down_ = false;
   bool win_down_ = false;
+  bool mouse_down_ = false;
   bool dark_ = true;
   int hot_ = -1;
   Anchor mode_ = Anchor::AboveAt;

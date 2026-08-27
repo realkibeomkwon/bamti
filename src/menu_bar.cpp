@@ -144,6 +144,8 @@ class StatusPanelContent : public PopupContent {
     action_hits_.clear();
   }
 
+  int RowCount() const override { return static_cast<int>(action_hits_.size()); }
+
   SIZE Measure(UINT dpi) override {
     action_hits_.clear();
     const StatusPanel* panel = item_.panel ? &*item_.panel : nullptr;

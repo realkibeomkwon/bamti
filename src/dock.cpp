@@ -737,6 +737,7 @@ class DockMenuContent : public PopupContent {
 
   bool empty() const { return rows_.empty(); }
   size_t size() const { return rows_.size(); }
+  int RowCount() const override { return static_cast<int>(rows_.size()); }
 
   SIZE Measure(UINT dpi) override {
     const int pad = DipToPx(kMenuPadDip, dpi);

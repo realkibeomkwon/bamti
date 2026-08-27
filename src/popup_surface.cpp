@@ -1,6 +1,7 @@
 #include "popup_surface.hpp"
 
 #include "dwm.hpp"
+#include "log.hpp"
 #include "theme.hpp"
 
 #include <dwmapi.h>
@@ -12,7 +13,34 @@ namespace bamti {
 namespace {
 
 constexpr UINT_PTR kPopupGuardTimer = 1;
-constexpr UINT kPopupGuardMs = 200;
+constexpr UINT kPopupGuardMs = 50;
+
+const wchar_t* ReasonName(PopupSurface::DismissReason reason) {
+  switch (reason) {
+    case PopupSurface::DismissReason::kInvoke:
+      return L"invoke";
+    case PopupSurface::DismissReason::kOutsideClick:
+      return L"outside-click";
+    case PopupSurface::DismissReason::kOutsidePoll:
+      return L"outside-poll";
+    case PopupSurface::DismissReason::kCaptureLost:
+      return L"capture-lost";
+    case PopupSurface::DismissReason::kCaptureGone:
+      return L"capture-gone";
+    case PopupSurface::DismissReason::kEscape:
+      return L"escape";
+    case PopupSurface::DismissReason::kWinKey:
+      return L"win";
+    case PopupSurface::DismissReason::kForeground:
+      return L"foreground";
+    case PopupSurface::DismissReason::kReopen:
+      return L"reopen";
+    case PopupSurface::DismissReason::kExplicit:
+      return L"explicit";
+    default:
+      return L"unknown";
+  }
+}
 
 IDWriteFactory* WriteFactory() {
   static Microsoft::WRL::ComPtr<IDWriteFactory> factory;
@@ -147,11 +175,19 @@ bool PopupSurface::Create(HINSTANCE instance, HWND owner) {
     return false;
   }
   ApplyChrome();
+  // Build the render target now, while the window is still hidden. Creating it
+  // lazily inside the first WM_PAINT stalls the first menu by the full device
+  // setup cost. A later Open() only resizes what this call already made.
+  const ULONGLONG started = GetTickCount64();
+  SetWindowPos(hwnd_, nullptr, 0, 0, 8, 8, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+  EnsureRenderTarget();
+  Log(L"popup", L"render target warm=%d %ums", target_ ? 1 : 0,
+      static_cast<unsigned>(GetTickCount64() - started));
   return true;
 }
 
 void PopupSurface::Destroy() {
-  Dismiss(-1);
+  Dismiss(-1, DismissReason::kExplicit);
   HWND w = hwnd_;
   hwnd_ = nullptr;
   owner_ = nullptr;
@@ -164,10 +200,11 @@ void PopupSurface::Destroy() {
 }
 
 bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode) {
+  const ULONGLONG started = GetTickCount64();
   if (hwnd_ == nullptr || content == nullptr) {
     return false;
   }
-  Dismiss(-1);
+  Dismiss(-1, DismissReason::kReopen);
   content_ = content;
   mode_ = mode;
   anchor_ = anchor_screen;
@@ -179,23 +216,30 @@ bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode)
   }
 
   Place(size, anchor_screen, mode);
-  target_.Reset();
-  fill_.Reset();
   hot_ = -1;
   open_ = true;
   last_fg_ = GetForegroundWindow();
   esc_down_ = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
   win_down_ = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+  // Seed from the live button state so the guard timer does not read the press
+  // that opened this popup as an outside click.
+  mouse_down_ = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 ||
+                (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
   ApplyChrome();
+  // Hidden windows do not receive WM_PAINT from UpdateWindow, so show first and
+  // paint immediately afterwards. A one-frame flash beats a second of black.
   SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  InvalidateRect(hwnd_, nullptr, FALSE);
+  UpdateWindow(hwnd_);
   SetCapture(hwnd_);
   ArmGuardTimer();
-  InvalidateRect(hwnd_, nullptr, FALSE);
+  Log(L"popup", L"open rows=%d shown %ums", content_->RowCount(),
+      static_cast<unsigned>(GetTickCount64() - started));
   return true;
 }
 
 void PopupSurface::Close() {
-  Dismiss(-1);
+  Dismiss(-1, DismissReason::kExplicit);
 }
 
 void PopupSurface::SetDark(bool dark) {
@@ -212,10 +256,11 @@ void PopupSurface::SetDark(bool dark) {
   }
 }
 
-void PopupSurface::Dismiss(int invoke_index) {
+void PopupSurface::Dismiss(int invoke_index, DismissReason reason) {
   if (!open_) {
     return;
   }
+  Log(L"popup", L"dismiss reason=%s index=%d", ReasonName(reason), invoke_index);
   open_ = false;
   hot_ = -1;
   if (hwnd_ != nullptr && GetCapture() == hwnd_) {
@@ -276,30 +321,40 @@ void PopupSurface::ArmGuardTimer() {
 }
 
 void PopupSurface::OnGuardTimer() {
-  if (!open_) {
-    return;
-  }
-  if (hwnd_ == nullptr || GetCapture() != hwnd_) {
-    Dismiss(-1);
+  if (!open_ || hwnd_ == nullptr) {
     return;
   }
   const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
   if (esc && !esc_down_) {
-    Dismiss(-1);
+    Dismiss(-1, DismissReason::kEscape);
     return;
   }
   esc_down_ = esc;
 
   const bool win = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
   if (win && !win_down_) {
-    Dismiss(-1);
+    Dismiss(-1, DismissReason::kWinKey);
     return;
   }
   win_down_ = win;
 
+  // Capture on a WS_EX_NOACTIVATE window only delivers messages while the
+  // cursor is over the popup. Poll button state for outside clicks instead.
+  const bool mouse = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 ||
+                     (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
+  if (mouse && !mouse_down_) {
+    POINT cursor{};
+    RECT window{};
+    if (GetCursorPos(&cursor) && GetWindowRect(hwnd_, &window) && !PtInRect(&window, cursor)) {
+      Dismiss(-1, DismissReason::kOutsidePoll);
+      return;
+    }
+  }
+  mouse_down_ = mouse;
+
   const HWND fg = GetForegroundWindow();
   if (fg != last_fg_ && fg != nullptr && fg != hwnd_ && !SameProcess(fg)) {
-    Dismiss(-1);
+    Dismiss(-1, DismissReason::kForeground);
     return;
   }
   last_fg_ = fg;
@@ -321,6 +376,11 @@ void PopupSurface::EnsureRenderTarget() {
     if (pixels.width == width && pixels.height == height) {
       return;
     }
+    // Resize keeps the device. Recreating it here costs hundreds of milliseconds
+    // and would run on every open, because each menu has its own size.
+    if (SUCCEEDED(target_->Resize(D2D1::SizeU(width, height)))) {
+      return;
+    }
     target_.Reset();
     fill_.Reset();
   }
@@ -329,7 +389,10 @@ void PopupSurface::EnsureRenderTarget() {
       96.0f);
   const D2D1_HWND_RENDER_TARGET_PROPERTIES hwnd_props =
       D2D1::HwndRenderTargetProperties(hwnd_, D2D1::SizeU(width, height), D2D1_PRESENT_OPTIONS_NONE);
+  const ULONGLONG started = GetTickCount64();
   d2d_->CreateHwndRenderTarget(props, hwnd_props, target_.ReleaseAndGetAddressOf());
+  Log(L"popup", L"create render target %ux%u ok=%d %ums", width, height, target_ ? 1 : 0,
+      static_cast<unsigned>(GetTickCount64() - started));
 }
 
 void PopupSurface::Render() {
@@ -414,6 +477,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       if (hot != hot_) {
         hot_ = hot;
         InvalidateRect(hwnd_, nullptr, FALSE);
+        UpdateWindow(hwnd_);
       }
       return 0;
     }
@@ -427,7 +491,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       RECT client{};
       GetClientRect(hwnd_, &client);
       if (!PtInRect(&client, pt)) {
-        Dismiss(-1);
+        Dismiss(-1, DismissReason::kOutsideClick);
       }
       return 0;
     }
@@ -439,12 +503,13 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       RECT client{};
       GetClientRect(hwnd_, &client);
-      Dismiss(PtInRect(&client, pt) ? content_->HitTest(pt, Dpi()) : -1);
+      const int index = PtInRect(&client, pt) ? content_->HitTest(pt, Dpi()) : -1;
+      Dismiss(index, index >= 0 ? DismissReason::kInvoke : DismissReason::kOutsideClick);
       return 0;
     }
     case WM_CAPTURECHANGED:
       if (open_ && reinterpret_cast<HWND>(lp) != hwnd_) {
-        Dismiss(-1);
+        Dismiss(-1, DismissReason::kCaptureLost);
       }
       return 0;
     case WM_MOUSEACTIVATE:
