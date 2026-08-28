@@ -15,16 +15,6 @@ constexpr float kStartHitWidthDip = 34.0f;
 constexpr size_t kLayoutCacheMax = 64;
 constexpr wchar_t kOverflowGlyph[] = L"\u2039";  // ‹
 
-std::wstring StatusBarText(const StatusItem& item) {
-  if (item.icon_glyph.empty()) {
-    return item.text;
-  }
-  if (item.text.empty()) {
-    return item.icon_glyph;
-  }
-  return item.icon_glyph + L" " + item.text;
-}
-
 }  // namespace
 
 bool BarLayout::Initialize() {

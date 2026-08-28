@@ -125,36 +125,56 @@ std::optional<StatusPanel> ParsePanel(std::string_view raw) {
   }
   if (const auto gauges = json::GetRaw(raw, "gauges")) {
     json::ForEachArray(*gauges, [&](std::string_view one) {
-      if (panel.gauges.size() >= kStatusGaugeMax) {
+      size_t gauges = 0;
+      for (const StatusRow& row : panel.rows) {
+        if (row.type == RowType::kGauge) {
+          ++gauges;
+        }
+      }
+      if (gauges >= kStatusGaugeMax || panel.rows.size() >= kStatusRowMax) {
         return true;
       }
-      StatusGauge gauge;
+      StatusRow row;
+      row.type = RowType::kGauge;
       if (const auto label = json::GetString(one, "label")) {
-        gauge.label = TruncateWide(Utf8ToWide(*label), kStatusPanelTextMaxChars);
+        row.label = TruncateWide(Utf8ToWide(*label), kStatusPanelTextMaxChars);
       }
       if (const auto value = json::GetDouble(one, "value")) {
-        gauge.value = ClampUnit(*value);
+        row.value = ClampUnit(*value);
       }
       if (const auto detail = json::GetString(one, "detail")) {
-        gauge.detail = TruncateWide(Utf8ToWide(*detail), kStatusPanelTextMaxChars);
+        row.detail = TruncateWide(Utf8ToWide(*detail), kStatusPanelTextMaxChars);
       }
       if (const auto note = json::GetString(one, "note")) {
-        gauge.note = TruncateWide(Utf8ToWide(*note), kStatusPanelTextMaxChars);
+        row.note = TruncateWide(Utf8ToWide(*note), kStatusPanelTextMaxChars);
       }
-      panel.gauges.push_back(std::move(gauge));
+      panel.rows.push_back(std::move(row));
       return true;
     });
   }
+  std::vector<std::wstring> actions;
   for (const auto& action : json::GetStringArray(raw, "actions")) {
-    if (panel.actions.size() >= kStatusActionMax) {
+    if (actions.size() >= kStatusActionMax) {
       break;
     }
     const std::wstring wide = TruncateWide(Utf8ToWide(action), kStatusPanelTextMaxChars);
     if (!wide.empty()) {
-      panel.actions.push_back(wide);
+      actions.push_back(wide);
     }
   }
-  if (panel.title.empty() && panel.gauges.empty() && panel.actions.empty()) {
+  if (!actions.empty() && panel.rows.size() < kStatusRowMax) {
+    StatusRow sep;
+    sep.type = RowType::kSeparator;
+    panel.rows.push_back(std::move(sep));
+    for (size_t i = 0; i < actions.size() && panel.rows.size() < kStatusRowMax; ++i) {
+      StatusRow button;
+      button.type = RowType::kButton;
+      button.row_id = std::to_string(i);
+      button.label = actions[i];
+      panel.rows.push_back(std::move(button));
+    }
+  }
+  if (panel.title.empty() && panel.rows.empty()) {
     return std::nullopt;
   }
   return panel;
@@ -506,6 +526,7 @@ void PipeServer::HandleLine(Client* client, std::string_view line) {
     }
     StatusItem item;
     item.id = *id;
+    item.source = "pipe";
     item.text = TruncateLabel(Utf8ToWide(*text));
     if (item.text.empty() && !text->empty()) {
       return;
@@ -513,10 +534,16 @@ void PipeServer::HandleLine(Client* client, std::string_view line) {
     if (const auto tip = json::GetString(line, "tooltip")) {
       item.tooltip = Utf8ToWide(*tip);
     }
-    if (const auto glyph = json::GetString(line, "icon_glyph")) {
-      item.icon_glyph = TruncateWide(Utf8ToWide(*glyph), 8);
+    std::wstring glyph;
+    if (const auto g = json::GetString(line, "icon_glyph")) {
+      glyph = TruncateWide(Utf8ToWide(*g), kStatusGlyphMaxChars);
     } else if (const auto icon = json::GetString(line, "icon")) {
-      item.icon_glyph = TruncateWide(Utf8ToWide(*icon), 8);
+      glyph = TruncateWide(Utf8ToWide(*icon), kStatusGlyphMaxChars);
+    }
+    if (!glyph.empty()) {
+      item.icon.kind = IconKind::kGlyph;
+      item.icon.glyph = std::move(glyph);
+      item.icon.cache_key = HashStatusIcon(item.icon);
     }
     if (const auto accent = json::GetUint32(line, "accent")) {
       item.accent = *accent;
@@ -528,7 +555,9 @@ void PipeServer::HandleLine(Client* client, std::string_view line) {
       item.panel = ParsePanel(*panel);
     }
     std::lock_guard lock(mu_);
-    items_[item.id] = Record{item, client->id};
+    auto it = items_.find(item.id);
+    item.revision = (it == items_.end()) ? 1 : it->second.item.revision + 1;
+    items_[item.id] = Record{std::move(item), client->id};
     changed = true;
   }
   if (changed) {

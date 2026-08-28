@@ -187,14 +187,15 @@ class StatusPanelContent : public PopupContent {
     consider(panel->title);
     consider(panel->subtitle);
     consider(panel->updated_text);
-    for (const StatusGauge& gauge : panel->gauges) {
-      const int label = static_cast<int>(PopupTextWidth(dpi, gauge.label) + 0.5f);
-      const int detail = static_cast<int>(PopupTextWidth(dpi, gauge.detail) + 0.5f);
-      inner = (std::max)(inner, label + DipToPx(12, dpi) + detail);
-      consider(gauge.note);
-    }
-    for (const std::wstring& action : panel->actions) {
-      consider(action);
+    for (const StatusRow& row : panel->rows) {
+      if (row.type == RowType::kGauge) {
+        const int label = static_cast<int>(PopupTextWidth(dpi, row.label) + 0.5f);
+        const int detail = static_cast<int>(PopupTextWidth(dpi, row.detail) + 0.5f);
+        inner = (std::max)(inner, label + DipToPx(12, dpi) + detail);
+        consider(row.note);
+      } else if (row.type == RowType::kButton) {
+        consider(row.label);
+      }
     }
 
     int width = inner + pad * 2;
@@ -211,24 +212,21 @@ class StatusPanelContent : public PopupContent {
     if (!panel->updated_text.empty()) {
       y += DipToPx(kPanelSubDip, dpi);
     }
-    for (const StatusGauge& gauge : panel->gauges) {
-      y += DipToPx(kPanelGaugeLabelDip, dpi);
-      y += DipToPx(kPanelGaugeBarDip, dpi);
-      if (!gauge.note.empty()) {
-        y += DipToPx(kPanelGaugeNoteDip, dpi);
-      }
-      y += DipToPx(kPanelGaugeGapDip, dpi);
-    }
-    if (!panel->actions.empty()) {
-      if (!panel->gauges.empty() || !panel->title.empty() || !panel->subtitle.empty() ||
-          !panel->updated_text.empty()) {
+    for (const StatusRow& row : panel->rows) {
+      if (row.type == RowType::kGauge) {
+        y += DipToPx(kPanelGaugeLabelDip, dpi);
+        y += DipToPx(kPanelGaugeBarDip, dpi);
+        if (!row.note.empty()) {
+          y += DipToPx(kPanelGaugeNoteDip, dpi);
+        }
+        y += DipToPx(kPanelGaugeGapDip, dpi);
+      } else if (row.type == RowType::kSeparator) {
         y += DipToPx(kPanelSepDip, dpi);
-      }
-      const int row = DipToPx(kPanelActionDip, dpi);
-      for (int i = 0; i < static_cast<int>(panel->actions.size()); ++i) {
-        RECT rc{pad, y, width - pad, y + row};
+      } else if (row.type == RowType::kButton) {
+        const int h = DipToPx(kPanelActionDip, dpi);
+        RECT rc{pad, y, width - pad, y + h};
         action_hits_.push_back(rc);
-        y += row;
+        y += h;
       }
     }
     y += pad;
@@ -285,53 +283,46 @@ class StatusPanelContent : public PopupContent {
     const int bar_h = DipToPx(kPanelGaugeBarDip, dpi);
     const int note_h = DipToPx(kPanelGaugeNoteDip, dpi);
     const int gap = DipToPx(kPanelGaugeGapDip, dpi);
-    for (const StatusGauge& gauge : panel.gauges) {
+    int button_i = 0;
+    for (const StatusRow& row : panel.rows) {
       const float left = static_cast<float>(pad);
       const float right = static_cast<float>(width - pad);
-      DrawPopupText(target, dpi, gauge.label,
-                    D2D1::RectF(left, static_cast<float>(y), right * 0.55f, static_cast<float>(y + label_h)),
-                    text.Get());
-      DrawPopupText(target, dpi, gauge.detail,
-                    D2D1::RectF(right * 0.55f, static_cast<float>(y), right, static_cast<float>(y + label_h)),
-                    muted.Get());
-      y += label_h;
-      const float bar_top = static_cast<float>(y);
-      const float bar_bottom = bar_top + static_cast<float>(bar_h);
-      target->FillRectangle(D2D1::RectF(left, bar_top, right, bar_bottom), track.Get());
-      const float filled = left + (right - left) * gauge.value;
-      if (filled > left) {
-        target->FillRectangle(D2D1::RectF(left, bar_top, filled, bar_bottom), fill.Get());
-      }
-      y += bar_h;
-      if (!gauge.note.empty()) {
-        DrawPopupText(target, dpi, gauge.note,
-                      D2D1::RectF(left, static_cast<float>(y), right, static_cast<float>(y + note_h)),
-                      fill.Get());
-        y += note_h;
-      }
-      y += gap;
-    }
-
-    if (!panel.actions.empty()) {
-      if (!panel.gauges.empty() || !panel.title.empty() || !panel.subtitle.empty() ||
-          !panel.updated_text.empty()) {
-        const float mid = static_cast<float>(y + DipToPx(kPanelSepDip, dpi) / 2) + 0.5f;
-        target->DrawLine(D2D1::Point2F(static_cast<float>(pad), mid),
-                         D2D1::Point2F(static_cast<float>(width - pad), mid), line.Get(), 1.0f);
-        y += DipToPx(kPanelSepDip, dpi);
-      }
-      const int row = DipToPx(kPanelActionDip, dpi);
-      for (int i = 0; i < static_cast<int>(panel.actions.size()); ++i) {
-        const float top = static_cast<float>(y);
-        const float bottom = top + static_cast<float>(row);
-        if (i == hot_index) {
-          target->FillRectangle(
-              D2D1::RectF(static_cast<float>(pad), top, static_cast<float>(width - pad), bottom), hover.Get());
-        }
-        DrawPopupText(target, dpi, panel.actions[static_cast<size_t>(i)],
-                      D2D1::RectF(static_cast<float>(pad), top, static_cast<float>(width - pad), bottom),
+      if (row.type == RowType::kGauge) {
+        DrawPopupText(target, dpi, row.label,
+                      D2D1::RectF(left, static_cast<float>(y), right * 0.55f, static_cast<float>(y + label_h)),
                       text.Get());
-        y += row;
+        DrawPopupText(target, dpi, row.detail,
+                      D2D1::RectF(right * 0.55f, static_cast<float>(y), right, static_cast<float>(y + label_h)),
+                      muted.Get());
+        y += label_h;
+        const float bar_top = static_cast<float>(y);
+        const float bar_bottom = bar_top + static_cast<float>(bar_h);
+        target->FillRectangle(D2D1::RectF(left, bar_top, right, bar_bottom), track.Get());
+        const float filled = left + (right - left) * row.value;
+        if (filled > left) {
+          target->FillRectangle(D2D1::RectF(left, bar_top, filled, bar_bottom), fill.Get());
+        }
+        y += bar_h;
+        if (!row.note.empty()) {
+          DrawPopupText(target, dpi, row.note,
+                        D2D1::RectF(left, static_cast<float>(y), right, static_cast<float>(y + note_h)), fill.Get());
+          y += note_h;
+        }
+        y += gap;
+      } else if (row.type == RowType::kSeparator) {
+        const float mid = static_cast<float>(y + DipToPx(kPanelSepDip, dpi) / 2) + 0.5f;
+        target->DrawLine(D2D1::Point2F(left, mid), D2D1::Point2F(right, mid), line.Get(), 1.0f);
+        y += DipToPx(kPanelSepDip, dpi);
+      } else if (row.type == RowType::kButton) {
+        const int row_h = DipToPx(kPanelActionDip, dpi);
+        const float top = static_cast<float>(y);
+        const float bottom = top + static_cast<float>(row_h);
+        if (button_i == hot_index) {
+          target->FillRectangle(D2D1::RectF(left, top, right, bottom), hover.Get());
+        }
+        DrawPopupText(target, dpi, row.label, D2D1::RectF(left, top, right, bottom), text.Get());
+        y += row_h;
+        ++button_i;
       }
     }
   }
@@ -350,11 +341,16 @@ class StatusPanelContent : public PopupContent {
     if (owner_ == nullptr || !item_.panel) {
       return;
     }
-    const auto& actions = item_.panel->actions;
-    if (index < 0 || index >= static_cast<int>(actions.size())) {
+    std::vector<std::wstring> buttons;
+    for (const StatusRow& row : item_.panel->rows) {
+      if (row.type == RowType::kButton) {
+        buttons.push_back(row.label);
+      }
+    }
+    if (index < 0 || index >= static_cast<int>(buttons.size())) {
       return;
     }
-    owner_->status_.SendClick(item_.id, WideToUtf8(actions[static_cast<size_t>(index)]));
+    owner_->status_.SendClick(item_.id, WideToUtf8(buttons[static_cast<size_t>(index)]));
   }
 
  private:
@@ -364,13 +360,7 @@ class StatusPanelContent : public PopupContent {
 };
 
 std::wstring OverflowLabel(const StatusItem& item) {
-  if (item.icon_glyph.empty()) {
-    return item.text;
-  }
-  if (item.text.empty()) {
-    return item.icon_glyph;
-  }
-  return item.icon_glyph + L" " + item.text;
+  return StatusBarText(item);
 }
 
 class OverflowContent : public PopupContent {
