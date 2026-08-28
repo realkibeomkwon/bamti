@@ -459,9 +459,15 @@ struct WindowCacheEntry {
 constexpr size_t kWindowCacheMax = 512;
 std::unordered_map<HWND, WindowCacheEntry> g_window_cache;
 
-const WindowCacheEntry& CachedWindow(HWND hwnd) {
+const WindowCacheEntry& CachedWindow(HWND hwnd, bool* from_cache) {
   if (const auto it = g_window_cache.find(hwnd); it != g_window_cache.end()) {
+    if (from_cache != nullptr) {
+      *from_cache = true;
+    }
     return it->second;
+  }
+  if (from_cache != nullptr) {
+    *from_cache = false;
   }
   if (g_window_cache.size() >= kWindowCacheMax) {
     g_window_cache.clear();
@@ -471,6 +477,11 @@ const WindowCacheEntry& CachedWindow(HWND hwnd) {
   entry.props = ReadWindowProps(hwnd);
   if (entry.props.aumid.empty() && !entry.path.empty() && !IsHostExe(entry.path)) {
     entry.props.aumid = PathAumid(entry.path);
+  }
+  if (entry.path.empty()) {
+    static WindowCacheEntry uncached;
+    uncached = std::move(entry);
+    return uncached;
   }
   return g_window_cache.emplace(hwnd, std::move(entry)).first->second;
 }
@@ -681,6 +692,13 @@ bool SameDockPin(const std::wstring& a, const std::wstring& b) {
   return CanonicalPath(a) == CanonicalPath(b);
 }
 
+std::wstring DockPinCompareForm(const std::wstring& pin) {
+  if (IsAumidPin(pin)) {
+    return Lower(AumidFromPin(pin));
+  }
+  return CanonicalPath(pin);
+}
+
 std::vector<std::wstring> LoadDockPins() {
   std::vector<std::wstring> pins;
   const std::wstring path = DockPinsPath();
@@ -746,6 +764,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
     std::wstring icon_resource;
     std::wstring relaunch_name;
     std::wstring relaunch_command;
+    bool path_cached = false;
   };
   std::vector<Raw> windows;
   EnumWindows(
@@ -754,7 +773,8 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
           return TRUE;
         }
         auto* out = reinterpret_cast<std::vector<Raw>*>(lp);
-        const WindowCacheEntry& cached = CachedWindow(hwnd);
+        bool path_cached = false;
+        const WindowCacheEntry& cached = CachedWindow(hwnd, &path_cached);
         Raw raw{};
         raw.hwnd = hwnd;
         raw.path = cached.path;
@@ -762,6 +782,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
         raw.icon_resource = cached.props.icon_resource;
         raw.relaunch_name = cached.props.relaunch_name;
         raw.relaunch_command = cached.props.relaunch_command;
+        raw.path_cached = path_cached;
         raw.title = WindowTitle(hwnd);
         if (SkipGhostWindow(hwnd, raw.path, raw.aumid, raw.title)) {
           return TRUE;
@@ -774,6 +795,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
 
   std::unordered_map<std::wstring, DockApp> groups;
   std::vector<std::wstring> order;
+  std::unordered_map<std::wstring, int> path_cached_flag;
 
   auto take = [&](const std::wstring& key) -> DockApp& {
     auto it = groups.find(key);
@@ -790,6 +812,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
   auto ingest = [&](bool filter_desktop) {
     groups.clear();
     order.clear();
+    path_cached_flag.clear();
     for (const auto& raw : windows) {
       if (filter_desktop && !OnCurrentDesktop(vdm, raw.hwnd)) {
         continue;
@@ -825,6 +848,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       }
       if (app.exe_path.empty() && !raw.path.empty() && !IsHostExe(raw.path)) {
         app.exe_path = raw.path;
+        path_cached_flag[key] = raw.path_cached ? 1 : 0;
       }
       if (app.display_name.empty()) {
         if (!raw.aumid.empty()) {
@@ -939,12 +963,24 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
     }
   }
 
+  int miss_logs = 0;
   for (const auto& key : order) {
     if (std::find(used_keys.begin(), used_keys.end(), key) != used_keys.end()) {
       continue;
     }
     DockApp& app = groups[key];
     app.can_pin = CanPinApp(app);
+    if (miss_logs < 3) {
+      const std::wstring pin_key = DockPinId(app);
+      const std::wstring canon = CanonicalPath(app.exe_path);
+      int cached = 0;
+      if (const auto it = path_cached_flag.find(app.key); it != path_cached_flag.end()) {
+        cached = it->second;
+      }
+      Log(L"dock", L"pin miss key=%s path=%s canon=%s cached=%d", pin_key.c_str(), app.exe_path.c_str(),
+          canon.c_str(), cached);
+      ++miss_logs;
+    }
     result.push_back(app);
   }
 

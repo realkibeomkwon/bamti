@@ -1341,6 +1341,23 @@ void Dock::Rebuild() {
   force_collect_ = false;
   last_window_fp_ = fp;
   std::vector<DockApp> next = CollectDockApps(pins_);
+  bool pin_miss = false;
+  for (const auto& app : next) {
+    if (app.running && !app.pinned) {
+      pin_miss = true;
+      break;
+    }
+  }
+  if (pin_miss) {
+    std::wstring list;
+    for (size_t i = 0; i < pins_.size(); ++i) {
+      if (i != 0) {
+        list += L" ";
+      }
+      list += DockPinCompareForm(pins_[i]);
+    }
+    Log(L"dock", L"pins %s", list.c_str());
+  }
   const std::wstring snap = CollectSnap(next);
   if (snap == last_collect_snap_ && !items_.empty()) {
     Log(L"perf", L"rebuild skip items=%zu %ums", items_.size(),
