@@ -128,6 +128,33 @@ std::wstring CollectSnap(const std::vector<DockApp>& apps) {
   return snap;
 }
 
+std::wstring JoinItemNames(const std::vector<DockApp>& apps) {
+  std::wstring joined;
+  const size_t n = (std::min)(apps.size(), static_cast<size_t>(8));
+  for (size_t i = 0; i < n; ++i) {
+    if (i != 0) {
+      joined += L">";
+    }
+    joined += apps[i].display_name;
+  }
+  return joined;
+}
+
+template <typename T>
+void RotatePinnedRange(std::vector<T>& vec, int from, int to) {
+  if (from < 0 || to < 0 || from == to) {
+    return;
+  }
+  if (from >= static_cast<int>(vec.size()) || to >= static_cast<int>(vec.size())) {
+    return;
+  }
+  if (to < from) {
+    std::rotate(vec.begin() + to, vec.begin() + from, vec.begin() + from + 1);
+  } else {
+    std::rotate(vec.begin() + from, vec.begin() + from + 1, vec.begin() + to + 1);
+  }
+}
+
 HMONITOR PrimaryMonitor() {
   HMONITOR found = nullptr;
   EnumDisplayMonitors(
@@ -1389,6 +1416,7 @@ void Dock::Rebuild() {
   if (snap == last_collect_snap_ && !items_.empty()) {
     Log(L"perf", L"rebuild skip items=%zu %ums", items_.size(),
         static_cast<unsigned>(GetTickCount64() - started));
+    Log(L"dock", L"order after-rebuild %s", JoinItemNames(next).c_str());
     return;
   }
   last_collect_snap_ = snap;
@@ -1409,6 +1437,7 @@ void Dock::Rebuild() {
   }
   Log(L"perf", L"rebuild items=%zu pins=%zu shown=%d %ums", items_.size(), pins_.size(), shown_ ? 1 : 0,
       static_cast<unsigned>(GetTickCount64() - started));
+  Log(L"dock", L"order after-rebuild %s", JoinItemNames(items_).c_str());
   if (shown_) {
     if (items_.empty()) {
       HidePill();
@@ -2146,14 +2175,18 @@ void Dock::EndDrag(bool commit) {
       const std::wstring moved = pins_[static_cast<size_t>(from)];
       pins_.erase(pins_.begin() + from);
       pins_.insert(pins_.begin() + to, moved);
+      RotatePinnedRange(items_, from, to);
+      RotatePinnedRange(icons_, from, to);
       SaveDockPins(pins_);
       pending_rebuild_ = true;
       force_collect_ = true;
+      Log(L"dock", L"order after-drop %s", JoinItemNames(items_).c_str());
     }
   }
   if (pending_rebuild_) {
     ScheduleRebuild();
-  } else if (shown_) {
+  }
+  if (shown_) {
     RenderLayered();
   }
 }
