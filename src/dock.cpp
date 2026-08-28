@@ -92,20 +92,6 @@ UINT g_popup_closed_count = 0;
 ULONGLONG g_popup_closed_window = 0;
 UINT g_menu_cmd_count = 0;
 ULONGLONG g_menu_cmd_window = 0;
-UINT g_render_split_logs = 0;
-int g_render_split_n = -1;
-constexpr UINT kRenderSplitLogMax = 8;
-
-double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
-  static LARGE_INTEGER freq{};
-  if (freq.QuadPart == 0) {
-    QueryPerformanceFrequency(&freq);
-  }
-  if (freq.QuadPart == 0) {
-    return 0.0;
-  }
-  return (end.QuadPart - start.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
-}
 
 const wchar_t* MenuCmdName(UINT cmd) {
   if (cmd >= kWindowCommandBase) {
@@ -1347,6 +1333,7 @@ Dock::~Dock() {
     g_notify = nullptr;
   }
   ResetIconCache();
+  ReleaseLayeredTarget();
   TaskbarController::UnwatchTray();
   StopFullscreenWatch(hwnd_);
   submenu_.Destroy();
@@ -1892,7 +1879,74 @@ void Dock::Rebuild() {
   InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void Dock::ResetD2dIcons() {
+  d2d_icons_.clear();
+}
+
+void Dock::ReleaseLayeredTarget() {
+  ResetD2dIcons();
+  layered_rt_.Reset();
+  if (layered_mem_ != nullptr && layered_old_ != nullptr) {
+    SelectObject(layered_mem_, layered_old_);
+    layered_old_ = nullptr;
+  }
+  if (layered_dib_ != nullptr) {
+    DeleteObject(layered_dib_);
+    layered_dib_ = nullptr;
+  }
+  if (layered_mem_ != nullptr) {
+    DeleteDC(layered_mem_);
+    layered_mem_ = nullptr;
+  }
+  layered_w_ = 0;
+  layered_h_ = 0;
+}
+
+bool Dock::EnsureLayeredTarget(int width, int height) {
+  if (width <= 0 || height <= 0) {
+    return false;
+  }
+  if (layered_rt_ && layered_dib_ != nullptr && layered_mem_ != nullptr && layered_w_ == width &&
+      layered_h_ == height) {
+    return true;
+  }
+  ReleaseLayeredTarget();
+  ID2D1Factory* d2d = D2dFactory();
+  if (d2d == nullptr) {
+    return false;
+  }
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = width;
+  bmi.bmiHeader.biHeight = -height;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  void* bits = nullptr;
+  layered_mem_ = CreateCompatibleDC(nullptr);
+  if (layered_mem_ == nullptr) {
+    return false;
+  }
+  layered_dib_ = CreateDIBSection(layered_mem_, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  if (layered_dib_ == nullptr) {
+    ReleaseLayeredTarget();
+    return false;
+  }
+  layered_old_ = SelectObject(layered_mem_, layered_dib_);
+  const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+      D2D1_RENDER_TARGET_TYPE_DEFAULT,
+      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+  if (FAILED(d2d->CreateDCRenderTarget(&props, layered_rt_.ReleaseAndGetAddressOf()))) {
+    ReleaseLayeredTarget();
+    return false;
+  }
+  layered_w_ = width;
+  layered_h_ = height;
+  return true;
+}
+
 void Dock::ResetIconCache() {
+  ResetD2dIcons();
   for (auto& [key, bmp] : icon_cache_) {
     if (bmp != nullptr) {
       DeleteObject(bmp);
@@ -1910,6 +1964,7 @@ void Dock::EnsureIcons() {
     const std::wstring key = items_[i].key + L"|" + std::to_wstring(px);
     auto it = icon_cache_.find(key);
     if (it == icon_cache_.end() || it->second == nullptr) {
+      d2d_icons_.erase(key);
       icon_cache_[key] = LoadIconBitmap(items_[i], px);
       it = icon_cache_.find(key);
     }
@@ -1922,6 +1977,7 @@ void Dock::EnsureIcons() {
       if (it->second != nullptr) {
         DeleteObject(it->second);
       }
+      d2d_icons_.erase(it->first);
       it = icon_cache_.erase(it);
     } else {
       ++it;
@@ -2059,50 +2115,22 @@ void Dock::RenderLayered() {
     return;
   }
 
-  ID2D1Factory* d2d = D2dFactory();
   IWICImagingFactory* wic = WicFactory();
-  if (d2d == nullptr) {
+
+  if (!EnsureLayeredTarget(width, height)) {
     return;
   }
-
-  LARGE_INTEGER t0{};
-  LARGE_INTEGER t1{};
-  LARGE_INTEGER t2{};
-  LARGE_INTEGER t3{};
-  LARGE_INTEGER t4{};
-  QueryPerformanceCounter(&t0);
-
-  BITMAPINFO bmi{};
-  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-  bmi.bmiHeader.biWidth = width;
-  bmi.bmiHeader.biHeight = -height;
-  bmi.bmiHeader.biPlanes = 1;
-  bmi.bmiHeader.biBitCount = 32;
-  bmi.bmiHeader.biCompression = BI_RGB;
-  void* bits = nullptr;
-  const HBITMAP dib = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-  if (dib == nullptr) {
-    return;
+  if (FAILED(layered_rt_->BindDC(layered_mem_, &client))) {
+    ReleaseLayeredTarget();
+    if (!EnsureLayeredTarget(width, height) || FAILED(layered_rt_->BindDC(layered_mem_, &client))) {
+      return;
+    }
   }
-  const HDC mem = CreateCompatibleDC(nullptr);
-  const HGDIOBJ old = SelectObject(mem, dib);
-
-  Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> rt;
-  const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-      D2D1_RENDER_TARGET_TYPE_DEFAULT,
-      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
-  if (FAILED(d2d->CreateDCRenderTarget(&props, rt.GetAddressOf())) ||
-      FAILED(rt->BindDC(mem, &client))) {
-    SelectObject(mem, old);
-    DeleteDC(mem);
-    DeleteObject(dib);
-    return;
-  }
+  ID2D1DCRenderTarget* rt = layered_rt_.Get();
 
   rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
   rt->BeginDraw();
   rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-  QueryPerformanceCounter(&t1);
 
   const float radius = static_cast<float>(Dip(kCornerRadiusDip));
   const D2D1_ROUNDED_RECT rounded{
@@ -2122,22 +2150,29 @@ void Dock::RenderLayered() {
   if (stroke) {
     rt->DrawRoundedRectangle(rounded, stroke.Get(), 1.0f);
   }
-  QueryPerformanceCounter(&t2);
 
   const int icon_px = Dip(kIconDip);
   const auto order = DisplayOrder();
   const int pinned = PinnedCount();
   auto draw_icon = [&](size_t i, float x, float y, float alpha) {
-    if (i >= icons_.size() || icons_[i] == nullptr || wic == nullptr) {
+    if (i >= icons_.size() || icons_[i] == nullptr || i >= items_.size()) {
       return;
     }
-    Microsoft::WRL::ComPtr<IWICBitmap> wic_bmp;
-    if (FAILED(wic->CreateBitmapFromHBITMAP(icons_[i], nullptr, WICBitmapUsePremultipliedAlpha,
-                                            wic_bmp.GetAddressOf()))) {
-      return;
-    }
+    const std::wstring key = items_[i].key + L"|" + std::to_wstring(icon_px);
     Microsoft::WRL::ComPtr<ID2D1Bitmap> d2d_bmp;
-    if (FAILED(rt->CreateBitmapFromWicBitmap(wic_bmp.Get(), d2d_bmp.GetAddressOf()))) {
+    if (const auto it = d2d_icons_.find(key); it != d2d_icons_.end() && it->second) {
+      d2d_bmp = it->second;
+    } else if (wic != nullptr) {
+      Microsoft::WRL::ComPtr<IWICBitmap> wic_bmp;
+      if (FAILED(wic->CreateBitmapFromHBITMAP(icons_[i], nullptr, WICBitmapUsePremultipliedAlpha,
+                                              wic_bmp.GetAddressOf()))) {
+        return;
+      }
+      if (FAILED(rt->CreateBitmapFromWicBitmap(wic_bmp.Get(), d2d_bmp.GetAddressOf())) || !d2d_bmp) {
+        return;
+      }
+      d2d_icons_[key] = d2d_bmp;
+    } else {
       return;
     }
     rt->DrawBitmap(d2d_bmp.Get(), D2D1::RectF(x, y, x + static_cast<float>(icon_px), y + static_cast<float>(icon_px)),
@@ -2179,10 +2214,8 @@ void Dock::RenderLayered() {
     const float bottom = static_cast<float>(height - Dip(18));
     rt->DrawLine(D2D1::Point2F(mid, top), D2D1::Point2F(mid, bottom), stroke.Get(), 1.0f);
   }
-  QueryPerformanceCounter(&t3);
 
   rt->EndDraw();
-  rt.Reset();
 
   BLENDFUNCTION blend{};
   blend.BlendOp = AC_SRC_OVER;
@@ -2190,23 +2223,7 @@ void Dock::RenderLayered() {
   blend.AlphaFormat = AC_SRC_ALPHA;
   POINT src{0, 0};
   SIZE size{width, height};
-  UpdateLayeredWindow(hwnd_, nullptr, nullptr, &size, mem, &src, 0, &blend, ULW_ALPHA);
-
-  SelectObject(mem, old);
-  DeleteDC(mem);
-  DeleteObject(dib);
-  QueryPerformanceCounter(&t4);
-
-  const int n = static_cast<int>(order.size());
-  if (n != g_render_split_n) {
-    g_render_split_n = n;
-    g_render_split_logs = 0;
-  }
-  if (g_render_split_logs < kRenderSplitLogMax) {
-    ++g_render_split_logs;
-    Log(L"perf", L"render split n=%d prep=%.1f bg=%.1f icon=%.1f present=%.1f total=%.1fms", n, QpcMs(t0, t1),
-        QpcMs(t1, t2), QpcMs(t2, t3), QpcMs(t3, t4), QpcMs(t0, t4));
-  }
+  UpdateLayeredWindow(hwnd_, nullptr, nullptr, &size, layered_mem_, &src, 0, &blend, ULW_ALPHA);
 }
 
 void Dock::ShowPill() {

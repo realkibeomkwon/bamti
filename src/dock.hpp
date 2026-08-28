@@ -3,7 +3,9 @@
 #include "popup_surface.hpp"
 #include "task_list.hpp"
 
+#include <d2d1.h>
 #include <windows.h>
+#include <wrl/client.h>
 
 #include <map>
 #include <memory>
@@ -51,6 +53,9 @@ class Dock {
   void Rebuild();
   void ResetIconCache();
   void EnsureIcons();
+  void ReleaseLayeredTarget();
+  bool EnsureLayeredTarget(int width, int height);
+  void ResetD2dIcons();
   void ShowPill();
   void HidePill();
   void StartHideTimer();
@@ -109,6 +114,13 @@ class Dock {
   std::vector<RECT> slots_;
   std::vector<HBITMAP> icons_;
   std::map<std::wstring, HBITMAP> icon_cache_;
+  std::map<std::wstring, Microsoft::WRL::ComPtr<ID2D1Bitmap>> d2d_icons_;
+  Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> layered_rt_;
+  HBITMAP layered_dib_ = nullptr;
+  HDC layered_mem_ = nullptr;
+  HGDIOBJ layered_old_ = nullptr;
+  int layered_w_ = 0;
+  int layered_h_ = 0;
   std::wstring tooltip_text_;
   std::vector<HWINEVENTHOOK> hooks_;
   PopupSurface popup_;
