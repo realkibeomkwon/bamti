@@ -569,6 +569,10 @@ void PipeServer::DropStale() {
     std::lock_guard lock(mu_);
     for (auto& client : clients_) {
       if (client && client->alive.load() && now - client->last_tick.load() > kHeartbeatMs) {
+        const ULONGLONG idle = now - client->last_tick.load();
+        Log(L"pipe", L"drop-stale id=%llu idle=%llums live=%zu stored=%zu",
+            static_cast<unsigned long long>(client->id), static_cast<unsigned long long>(idle), CountLiveLocked(),
+            clients_.size());
         CloseClientPipe(client.get());
         closed = true;
       }
@@ -657,9 +661,15 @@ HANDLE PipeServer::CreateListenPipe() {
   if (pipe != INVALID_HANDLE_VALUE) {
     return pipe;
   }
+  const DWORD first = GetLastError();
+  Log(L"pipe", L"listen create remote-reject failed err=%u", first);
   mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT;
-  return CreateNamedPipeW(kStatusPipeName, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, mode, kMaxPipeInstances,
+  pipe = CreateNamedPipeW(kStatusPipeName, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, mode, kMaxPipeInstances,
                           kPipeBuffer, kPipeBuffer, 50, &sa);
+  if (pipe == INVALID_HANDLE_VALUE) {
+    Log(L"pipe", L"listen create failed err=%u", GetLastError());
+  }
+  return pipe;
 }
 
 void PipeServer::ListenLoop() {
@@ -674,6 +684,7 @@ void PipeServer::ListenLoop() {
     {
       std::lock_guard lock(mu_);
       listen_pipe_ = pipe;
+      Log(L"pipe", L"listen armed handle=%p live=%zu stored=%zu", pipe, CountLiveLocked(), clients_.size());
     }
 
     OVERLAPPED ov{};
@@ -700,6 +711,7 @@ void PipeServer::ListenLoop() {
       }
       DWORD unused = 0;
       if (!GetOverlappedResult(pipe, &ov, &unused, FALSE)) {
+        Log(L"pipe", L"listen overlapped failed err=%u", GetLastError());
         CloseHandle(ov.hEvent);
         CloseHandle(pipe);
         std::lock_guard lock(mu_);
@@ -709,6 +721,7 @@ void PipeServer::ListenLoop() {
         continue;
       }
     } else if (err != ERROR_SUCCESS && err != ERROR_PIPE_CONNECTED) {
+      Log(L"pipe", L"listen connect failed err=%u", err);
       CloseHandle(ov.hEvent);
       CloseHandle(pipe);
       std::lock_guard lock(mu_);
@@ -738,6 +751,8 @@ void PipeServer::ListenLoop() {
       client->id = next_id_++;
       raw = client.get();
       clients_.push_back(std::move(client));
+      Log(L"pipe", L"accept id=%llu live=%zu stored=%zu", static_cast<unsigned long long>(raw->id), CountLiveLocked(),
+          clients_.size());
     }
     raw->thread = std::thread([this, raw] { ClientLoop(raw); });
   }
@@ -839,6 +854,11 @@ void PipeServer::ClientLoop(Client* client) {
     if (sink_ != nullptr) {
       sink_->Remove(id);
     }
+  }
+  {
+    std::lock_guard lock(mu_);
+    Log(L"pipe", L"disconnect id=%llu dropped=%zu live=%zu stored=%zu", static_cast<unsigned long long>(owner),
+        drop.size(), CountLiveLocked(), clients_.size());
   }
 }
 
@@ -1037,6 +1057,16 @@ void PipeServer::PublishRemove(const std::string& id, uint64_t owner) {
   if (sink_ != nullptr) {
     sink_->Remove(id);
   }
+}
+
+size_t PipeServer::CountLiveLocked() const {
+  size_t n = 0;
+  for (const auto& client : clients_) {
+    if (client && client->alive.load()) {
+      ++n;
+    }
+  }
+  return n;
 }
 
 void PipeServer::CloseClientPipe(Client* client) {

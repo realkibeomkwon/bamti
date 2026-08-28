@@ -913,9 +913,17 @@ void MenuBar::OnToggleTimeout() {
   }
   toggle_armed_ = false;
   auto item = status_.Get(pending_toggle_.id);
-  if (!item || item->revision != pending_toggle_.revision) {
+  if (!item) {
+    Log(L"status", L"toggle timeout missing id=%S", pending_toggle_.id.c_str());
     return;
   }
+  if (item->revision != pending_toggle_.revision) {
+    Log(L"status", L"toggle timeout acked id=%S pending_rev=%llu now_rev=%llu", pending_toggle_.id.c_str(),
+        static_cast<unsigned long long>(pending_toggle_.revision), static_cast<unsigned long long>(item->revision));
+    return;
+  }
+  Log(L"status", L"toggle timeout revert id=%S row=%S rev=%llu", pending_toggle_.id.c_str(),
+      pending_toggle_.row_id.c_str(), static_cast<unsigned long long>(pending_toggle_.revision));
   if (item->panel) {
     for (StatusRow& row : item->panel->rows) {
       if (row.type == RowType::kToggle && row.row_id == pending_toggle_.row_id) {
