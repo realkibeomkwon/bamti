@@ -81,6 +81,7 @@
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\host.cpp" />
     <ClCompile Include="src\paths.cpp" />
+    <ClCompile Include="src\settings.cpp" />
     <ClCompile Include="src\log.cpp" />
     <ClCompile Include="src\watchdog.cpp" />
     <ClCompile Include="src\menu_bar.cpp" />
@@ -98,6 +99,7 @@
   <ItemGroup>
     <ClInclude Include="src\host.hpp" />
     <ClInclude Include="src\paths.hpp" />
+    <ClInclude Include="src\settings.hpp" />
     <ClInclude Include="src\log.hpp" />
     <ClInclude Include="src\watchdog.hpp" />
     <ClInclude Include="src\menu_bar.hpp" />
