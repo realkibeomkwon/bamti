@@ -128,22 +128,6 @@ std::wstring CollectSnap(const std::vector<DockApp>& apps) {
   return snap;
 }
 
-COLORREF Channel(float x) {
-  return static_cast<COLORREF>(std::clamp(static_cast<int>(x * 255.0f + 0.5f), 0, 255));
-}
-
-COLORREF OpaqueColor(const D2D1_COLOR_F& c) {
-  return RGB(Channel(c.r), Channel(c.g), Channel(c.b));
-}
-
-COLORREF BlendOn(COLORREF under, const D2D1_COLOR_F& over) {
-  const float a = std::clamp(over.a, 0.0f, 1.0f);
-  auto mix = [a](int dst, float src) {
-    return std::clamp(static_cast<int>(dst * (1.0f - a) + src * 255.0f * a + 0.5f), 0, 255);
-  };
-  return RGB(mix(GetRValue(under), over.r), mix(GetGValue(under), over.g), mix(GetBValue(under), over.b));
-}
-
 HMONITOR PrimaryMonitor() {
   HMONITOR found = nullptr;
   EnumDisplayMonitors(
