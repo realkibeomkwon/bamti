@@ -59,26 +59,29 @@ namespace {
 
 constexpr size_t kSettingsMaxBytes = 64 * 1024;
 
-std::string ReadFileUtf8(const std::wstring& path, bool* too_large) {
-  if (too_large != nullptr) {
-    *too_large = false;
+enum class SettingsRead { kOk, kMissing, kTooLarge, kFailed };
+
+SettingsRead ReadFileUtf8(const std::wstring& path, std::string* out) {
+  if (out != nullptr) {
+    out->clear();
   }
   const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                   FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) {
-    return {};
+    const DWORD err = GetLastError();
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+      return SettingsRead::kMissing;
+    }
+    return SettingsRead::kFailed;
   }
   LARGE_INTEGER size{};
   if (!GetFileSizeEx(file, &size) || size.QuadPart < 0) {
     CloseHandle(file);
-    return {};
+    return SettingsRead::kFailed;
   }
   if (static_cast<ULONGLONG>(size.QuadPart) > kSettingsMaxBytes) {
-    if (too_large != nullptr) {
-      *too_large = true;
-    }
     CloseHandle(file);
-    return {};
+    return SettingsRead::kTooLarge;
   }
   std::string text(static_cast<size_t>(size.QuadPart), '\0');
   DWORD read = 0;
@@ -86,14 +89,17 @@ std::string ReadFileUtf8(const std::wstring& path, bool* too_large) {
       text.empty() || ReadFile(file, text.data(), static_cast<DWORD>(text.size()), &read, nullptr);
   CloseHandle(file);
   if (!ok) {
-    return {};
+    return SettingsRead::kFailed;
   }
   text.resize(read);
   if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
       static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF) {
     text.erase(0, 3);
   }
-  return text;
+  if (out != nullptr) {
+    *out = std::move(text);
+  }
+  return SettingsRead::kOk;
 }
 
 bool WriteFileUtf8Atomic(const std::wstring& path, const std::string& text) {
@@ -167,9 +173,9 @@ WidgetSettings LoadWidgetSettings() {
   if (path.empty()) {
     return s;
   }
-  bool too_large = false;
-  const std::string text = ReadFileUtf8(path, &too_large);
-  if (too_large) {
+  std::string text;
+  const SettingsRead read = ReadFileUtf8(path, &text);
+  if (read == SettingsRead::kTooLarge) {
     static bool logged = false;
     if (!logged) {
       logged = true;
@@ -177,7 +183,15 @@ WidgetSettings LoadWidgetSettings() {
     }
     return s;
   }
-  if (text.empty()) {
+  if (read == SettingsRead::kFailed) {
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      Log(L"settings", L"failed to read settings.json; using defaults");
+    }
+    return s;
+  }
+  if (read != SettingsRead::kOk || text.empty()) {
     return s;
   }
   const auto topbar = json::GetRaw(text, "topbar");
@@ -202,16 +216,24 @@ bool SaveWidgetSettings(const WidgetSettings& s) {
     return false;
   }
 
-  bool too_large = false;
-  const std::string existing = ReadFileUtf8(path, &too_large);
+  std::string existing;
+  const SettingsRead read = ReadFileUtf8(path, &existing);
+  if (read == SettingsRead::kTooLarge) {
+    Log(L"settings", L"settings.json larger than 64KB; not overwriting");
+    return false;
+  }
+  if (read == SettingsRead::kFailed) {
+    Log(L"settings", L"failed to read settings.json; not overwriting");
+    return false;
+  }
+
   std::string extra_topbar;
   std::string extra_root;
-  const bool file_exists = GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
   bool parsed = false;
-  if (!too_large && !existing.empty()) {
+  if (read == SettingsRead::kOk && !existing.empty()) {
     parsed = json::ParsePreserve(existing, &extra_topbar, &extra_root);
   }
-  if (file_exists && !parsed && !too_large) {
+  if (read == SettingsRead::kOk && !parsed && !existing.empty()) {
     BackupInvalidSettings(path);
     extra_topbar.clear();
     extra_root.clear();
