@@ -67,6 +67,7 @@ constexpr UINT kUnpinCommand = 2;
 constexpr UINT kQuitCommand = 3;
 constexpr UINT kShowAllCommand = 4;
 constexpr UINT kHideCommand = 5;
+constexpr UINT kNewWindowCommand = 6;
 constexpr UINT kWindowCommandBase = 100;
 
 HWND g_notify = nullptr;
@@ -99,6 +100,8 @@ const wchar_t* MenuCmdName(UINT cmd) {
       return L"show-all";
     case kHideCommand:
       return L"hide";
+    case kNewWindowCommand:
+      return L"new-window";
     default:
       return L"none";
   }
@@ -702,6 +705,8 @@ class DockMenuContent : public PopupContent {
     }
 
     window_targets_.reserve(app.windows.size());
+    std::vector<DockMenuRow> window_rows;
+    window_rows.reserve(app.windows.size());
     for (HWND hwnd : app.windows) {
       if (hwnd == nullptr || !IsWindow(hwnd)) {
         continue;
@@ -715,17 +720,26 @@ class DockMenuContent : public PopupContent {
         title.push_back(L'\u2026');
       }
       const UINT id = kWindowCommandBase + static_cast<UINT>(window_targets_.size());
-      rows_.push_back({id, std::move(title), false});
+      window_rows.push_back({id, std::move(title), false});
       window_targets_.push_back(hwnd);
     }
 
     const bool has_windows = !window_targets_.empty();
     const bool can_pin = app.pinned || (app.can_pin && !IsSelfExecutable(app.exe_path));
+    const bool can_launch = (!app.aumid.empty() || !app.relaunch_command.empty() || !app.exe_path.empty()) &&
+                            !IsSelfExecutable(app.exe_path);
     auto add_sep = [&]() {
       if (!rows_.empty() && !rows_.back().separator) {
         rows_.push_back({0, L"", true});
       }
     };
+    if (can_launch) {
+      rows_.push_back({kNewWindowCommand, L"새 창", false});
+    }
+    if (has_windows) {
+      add_sep();
+      rows_.insert(rows_.end(), window_rows.begin(), window_rows.end());
+    }
     if (has_windows && can_pin) {
       add_sep();
     }
@@ -1204,9 +1218,22 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           UpdateDrag(pt);
         }
       }
+      const int hit = dragging_ ? -1 : HitTest(pt);
+      if (hit != hover_) {
+        hover_ = hit;
+        if (!dragging_) {
+          RenderLayered();
+        }
+      }
       return 0;
     }
     case WM_MOUSELEAVE:
+      if (hover_ != -1) {
+        hover_ = -1;
+        if (shown_ && !dragging_) {
+          RenderLayered();
+        }
+      }
       if (!PointerOverUi()) {
         StartHideTimer();
       }
@@ -1619,9 +1646,11 @@ void Dock::RenderLayered() {
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> fill;
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> stroke;
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> indicator;
+  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover_fill;
   rt->CreateSolidColorBrush(DockFillColor(dark_), fill.GetAddressOf());
   rt->CreateSolidColorBrush(DockStrokeColor(dark_), stroke.GetAddressOf());
   rt->CreateSolidColorBrush(DockIndicatorColor(dark_), indicator.GetAddressOf());
+  rt->CreateSolidColorBrush(MenuItemHoverFill(dark_, false), hover_fill.GetAddressOf());
   if (fill) {
     rt->FillRoundedRectangle(rounded, fill.Get());
   }
@@ -1655,6 +1684,15 @@ void Dock::RenderLayered() {
     float y = static_cast<float>((height - icon_px) / 2 - Dip(4));
     if (!dragging_ && static_cast<int>(i) == pressed_) {
       y += static_cast<float>(Dip(1));
+    }
+    if (!dragging_ && hover_ == static_cast<int>(slot_i) && hover_fill) {
+      const float inset = static_cast<float>(Dip(4));
+      const float rr = static_cast<float>(Dip(8));
+      const D2D1_ROUNDED_RECT bg{
+          D2D1::RectF(static_cast<float>(slot.left), static_cast<float>(slot.top) + inset,
+                      static_cast<float>(slot.right), static_cast<float>(slot.bottom) - inset),
+          rr, rr};
+      rt->FillRoundedRectangle(bg, hover_fill.Get());
     }
     const bool is_dragged = dragging_ && static_cast<int>(i) == drag_index_;
     draw_icon(i, x, y, is_dragged ? 0.25f : 1.0f);
@@ -1739,6 +1777,7 @@ void Dock::HidePill() {
     EndDrag(false);
   }
   pressed_ = -1;
+  hover_ = -1;
   if (!shown_) {
     UpdateIdleTimer();
     return;
@@ -1932,6 +1971,10 @@ void Dock::ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND
     force_collect_ = true;
   } else if (cmd == kQuitCommand) {
     CloseHwnds(app.windows);
+  } else if (cmd == kNewWindowCommand) {
+    if (!LaunchDockApp(app)) {
+      Log(L"dock", L"new-window failed name=%s", app.display_name.c_str());
+    }
   }
 
   if (pending_rebuild_) {
@@ -2047,6 +2090,7 @@ void Dock::BeginDragIfNeeded(POINT client) {
   drag_index_ = pressed_;
   drop_index_ = pressed_;
   drag_cursor_ = client;
+  hover_ = -1;
   last_drag_render_ = 0;
   drag_render_n_ = 0;
   drag_render_total_us_ = 0;

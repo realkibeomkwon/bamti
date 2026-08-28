@@ -91,6 +91,7 @@ class Dock {
   bool pending_rebuild_ = false;
   bool force_collect_ = false;
   int pressed_ = -1;
+  int hover_ = -1;
   int drag_index_ = -1;
   int drop_index_ = -1;
   UINT pending_menu_cmd_ = 0;
