@@ -895,7 +895,7 @@ void MenuBar::RefreshLayout() {
   const BarLayoutResult& after =
       layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), status_.Snapshot());
   QueryPerformanceCounter(&t1);
-  perf_compute_ms_ = QpcMs(t0, t1);
+  last_compute_ms_ = QpcMs(t0, t1);
 
   if (before.segments.size() != after.segments.size() || before.dpi != after.dpi ||
       EqualRect(&before.client, &after.client) == FALSE) {
@@ -916,24 +916,39 @@ void MenuBar::RefreshLayout() {
 }
 
 void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, const RECT& client) {
-  perf_compute_ms_ = compute_ms;
+  perf_compute_.Add(compute_ms);
   if (EqualRect(&dirty, &client) != FALSE) {
-    perf_full_ms_ = draw_ms;
+    perf_full_.Add(draw_ms);
   } else {
-    perf_seg_ms_ = draw_ms;
+    perf_seg_.Add(draw_ms);
   }
   ++perf_frames_;
-  if (EqualRect(&dirty, &client) == FALSE && perf_partial_logs_ < 3) {
-    ++perf_partial_logs_;
-    Log(L"perf", L"partial rcPaint=%ld,%ld,%ld,%ld client=%ld,%ld,%ld,%ld", dirty.left, dirty.top, dirty.right,
-        dirty.bottom, client.left, client.top, client.right, client.bottom);
+  if (perf_frames_ % 100 != 0) {
+    return;
   }
-  if (perf_frames_ % 100 == 0) {
-    const BarLayoutResult& last = layout_.last();
-    Log(L"perf", L"bar full=%.1fms seg=%.1fms compute=%.1fms segments=%u overflow=%u rcPaint=%ld,%ld,%ld,%ld",
-        perf_full_ms_, perf_seg_ms_, perf_compute_ms_, static_cast<unsigned>(last.segments.size()),
-        static_cast<unsigned>(last.overflow.size()), dirty.left, dirty.top, dirty.right, dirty.bottom);
-  }
+
+  const BarLayoutResult& last = layout_.last();
+  auto format_acc = [](wchar_t* out, size_t cap, const wchar_t* name, const PerfAcc& acc) {
+    if (acc.n == 0) {
+      swprintf_s(out, cap, L"%s[n=0]ms", name);
+    } else {
+      swprintf_s(out, cap, L"%s[n=%u avg=%.1f max=%.1f]ms", name, acc.n, acc.sum / static_cast<double>(acc.n),
+                 acc.maxv);
+    }
+  };
+  wchar_t full_s[64]{};
+  wchar_t seg_s[64]{};
+  wchar_t compute_s[64]{};
+  format_acc(full_s, 64, L"full", perf_full_);
+  format_acc(seg_s, 64, L"seg", perf_seg_);
+  format_acc(compute_s, 64, L"compute", perf_compute_);
+  Log(L"perf", L"bar %s %s %s segments=%u overflow=%u%s", full_s, seg_s, compute_s,
+      static_cast<unsigned>(last.segments.size()), static_cast<unsigned>(last.overflow.size()),
+      perf_cold_ ? L" cold" : L"");
+  perf_full_.Reset();
+  perf_seg_.Reset();
+  perf_compute_.Reset();
+  perf_cold_ = false;
 }
 
 void MenuBar::Paint() {
@@ -952,7 +967,7 @@ void MenuBar::Paint() {
       QueryPerformanceCounter(&t0);
       layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), status_.Snapshot());
       QueryPerformanceCounter(&t1);
-      perf_compute_ms_ = QpcMs(t0, t1);
+      last_compute_ms_ = QpcMs(t0, t1);
     }
 
     BP_PAINTPARAMS params{};
@@ -968,7 +983,7 @@ void MenuBar::Paint() {
       clock_.Draw(buffer_dc, client, dirty, dark_, layout_.last(), &layout_,
                   start_hot_ || start_menu_.visible(), start_pressed_ || start_menu_.visible());
       QueryPerformanceCounter(&t1);
-      NotePerf(perf_compute_ms_, QpcMs(t0, t1), dirty, client);
+      NotePerf(last_compute_ms_, QpcMs(t0, t1), dirty, client);
       EndBufferedPaint(buffer, TRUE);
     }
   }

@@ -78,11 +78,29 @@ class MenuBar {
   bool start_hot_ = false;
   bool start_pressed_ = false;
   bool repaint_armed_ = false;
+  struct PerfAcc {
+    unsigned n = 0;
+    double sum = 0;
+    double maxv = 0;
+    void Add(double v) {
+      ++n;
+      sum += v;
+      if (n == 1 || v > maxv) {
+        maxv = v;
+      }
+    }
+    void Reset() {
+      n = 0;
+      sum = 0;
+      maxv = 0;
+    }
+  };
   unsigned perf_frames_ = 0;
-  unsigned perf_partial_logs_ = 0;
-  double perf_full_ms_ = 0.0;
-  double perf_seg_ms_ = 0.0;
-  double perf_compute_ms_ = 0.0;
+  bool perf_cold_ = true;
+  double last_compute_ms_ = 0.0;
+  PerfAcc perf_full_;
+  PerfAcc perf_seg_;
+  PerfAcc perf_compute_;
   BarLayout layout_;
   ClockRenderer clock_;
   PipeServer status_;
