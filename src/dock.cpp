@@ -1204,8 +1204,6 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_MOUSELEAVE:
       if (!PointerOverUi()) {
         StartHideTimer();
-      } else {
-        ArmMouseLeave();
       }
       return 0;
     case WM_LBUTTONDOWN: {
