@@ -16,6 +16,7 @@ class TaskbarController {
   void Restore();
   void EnsureHidden();
   static bool Rehide();
+  static bool SuppressingTrayEvents();
   static void ForceRestore();
   static bool WatchTray(WINEVENTPROC proc);
   static void UnwatchTray();

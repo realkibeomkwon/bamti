@@ -73,6 +73,22 @@ HWND g_notify = nullptr;
 ULONGLONG g_rbutton_down_at = 0;
 std::atomic<bool> g_rebuild_posted{false};
 std::atomic<bool> g_tray_posted{false};
+UINT g_tray_msg_count = 0;
+ULONGLONG g_tray_msg_window = 0;
+UINT g_task_msg_count = 0;
+ULONGLONG g_task_msg_window = 0;
+
+void NotePostedStorm(const wchar_t* label, UINT& count, ULONGLONG& window_start) {
+  const ULONGLONG now = GetTickCount64();
+  if (window_start == 0 || now - window_start >= 1000) {
+    count = 0;
+    window_start = now;
+  }
+  ++count;
+  if (count == 11) {
+    Log(L"dock", L"%s storm %u msgs in 1s", label, count);
+  }
+}
 
 const wchar_t* MenuCmdName(UINT cmd) {
   if (cmd >= kWindowCommandBase) {
@@ -1054,6 +1070,9 @@ void CALLBACK Dock::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG obj
 }
 
 void CALLBACK Dock::TrayWinEventProc(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
+  if (TaskbarController::SuppressingTrayEvents()) {
+    return;
+  }
   if (g_notify == nullptr) {
     TaskbarController::Rehide();
     return;
@@ -1122,6 +1141,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     case kTasksChangedMsg:
+      NotePostedStorm(L"task", g_task_msg_count, g_task_msg_window);
       g_rebuild_posted = false;
       ScheduleRebuild();
       return 0;
@@ -1134,10 +1154,11 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       return 0;
     }
     case kTrayChangedMsg:
-      g_tray_posted = false;
+      NotePostedStorm(L"tray", g_tray_msg_count, g_tray_msg_window);
       if (TaskbarController::Rehide()) {
         RaiseOverlays();
       }
+      g_tray_posted = false;
       return 0;
     case kFullscreenMsg:
       RefreshFullscreen();

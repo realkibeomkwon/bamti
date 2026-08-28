@@ -18,9 +18,29 @@ constexpr wchar_t kPrimaryClass[] = L"Shell_TrayWnd";
 constexpr wchar_t kSecondaryClass[] = L"Shell_SecondaryTrayWnd";
 constexpr LONG kParkY = 32000;
 
-HWINEVENTHOOK g_tray_hook = nullptr;
+HWINEVENTHOOK g_tray_hooks[3] = {};
 HWND g_tray_hwnd = nullptr;
 WINEVENTPROC g_tray_proc = nullptr;
+int g_tray_suppress_depth = 0;
+ULONGLONG g_tray_suppress_until = 0;
+
+constexpr DWORD kTrayEvents[] = {
+    EVENT_OBJECT_SHOW,
+    EVENT_OBJECT_STATECHANGE,
+    EVENT_OBJECT_LOCATIONCHANGE,
+};
+
+struct TraySuppressGuard {
+  TraySuppressGuard() { ++g_tray_suppress_depth; }
+  ~TraySuppressGuard() {
+    if (g_tray_suppress_depth > 0) {
+      --g_tray_suppress_depth;
+    }
+    if (g_tray_suppress_depth == 0) {
+      g_tray_suppress_until = GetTickCount64() + 200;
+    }
+  }
+};
 
 void EnumTrays(const auto& fn) {
   if (HWND primary = FindWindowW(kPrimaryClass, nullptr)) {
@@ -133,6 +153,8 @@ bool TaskbarController::ApplyAutoHide() {
 }
 
 bool TaskbarController::HideTrayWindows() {
+  TraySuppressGuard suppress;
+  static_cast<void>(suppress);
   bool any = false;
   bool still_visible = false;
   EnumTrays([&](HWND hwnd) {
@@ -153,6 +175,8 @@ bool TaskbarController::HideTrayWindows() {
 }
 
 void TaskbarController::ShowTrayWindows() {
+  TraySuppressGuard suppress;
+  static_cast<void>(suppress);
   EnumTrays([](HWND hwnd) {
     RECT rc{};
     if (LookupTray(hwnd, rc)) {
@@ -266,6 +290,10 @@ bool TaskbarController::Rehide() {
   return need;
 }
 
+bool TaskbarController::SuppressingTrayEvents() {
+  return g_tray_suppress_depth > 0 || GetTickCount64() < g_tray_suppress_until;
+}
+
 void TaskbarController::ForceRestore() {
   UINT state = 0;
   const bool had_guard = ReadGuard(state);
@@ -295,15 +323,22 @@ bool TaskbarController::WatchTray(WINEVENTPROC proc) {
     return false;
   }
   g_tray_hwnd = tray;
-  g_tray_hook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_LOCATIONCHANGE, nullptr, proc, pid, tid,
-                                WINEVENT_OUTOFCONTEXT);
-  return g_tray_hook != nullptr;
+  bool all = true;
+  for (int i = 0; i < 3; ++i) {
+    g_tray_hooks[i] = SetWinEventHook(kTrayEvents[i], kTrayEvents[i], nullptr, proc, pid, tid, WINEVENT_OUTOFCONTEXT);
+    if (g_tray_hooks[i] == nullptr) {
+      all = false;
+    }
+  }
+  return all;
 }
 
 void TaskbarController::UnwatchTray() {
-  if (g_tray_hook != nullptr) {
-    UnhookWinEvent(g_tray_hook);
-    g_tray_hook = nullptr;
+  for (HWINEVENTHOOK& hook : g_tray_hooks) {
+    if (hook != nullptr) {
+      UnhookWinEvent(hook);
+      hook = nullptr;
+    }
   }
   g_tray_hwnd = nullptr;
 }
