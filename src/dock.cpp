@@ -1193,6 +1193,11 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       CancelHideTimer();
       ArmMouseLeave();
       const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      if (pressed_ >= 0 && drag_move_logs_ < 3 && NoteDragLog()) {
+        ++drag_move_logs_;
+        Log(L"dock", L"drag move dx=%d dy=%d slop=%d pressed=%d dragging=%d", pt.x - drag_origin_.x,
+            pt.y - drag_origin_.y, Dip(kDragSlopDip), pressed_, dragging_ ? 1 : 0);
+      }
       if (pressed_ >= 0) {
         BeginDragIfNeeded(pt);
         if (dragging_) {
@@ -1211,11 +1216,20 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         popup_.Close();
       }
       const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      drag_logs_ = 0;
+      drag_move_logs_ = 0;
       pressed_ = HitTest(pt);
       dragging_ = false;
       drag_index_ = -1;
       drop_index_ = -1;
       drag_origin_ = pt;
+      if (NoteDragLog()) {
+        const int pinned = (pressed_ >= 0 && pressed_ < static_cast<int>(items_.size()) &&
+                            items_[static_cast<size_t>(pressed_)].pinned)
+                               ? 1
+                               : 0;
+        Log(L"dock", L"drag down index=%d pinned=%d pins=%zu", pressed_, pinned, pins_.size());
+      }
       if (pressed_ >= 0) {
         SetCapture(hwnd_);
         RenderLayered();
@@ -1252,6 +1266,9 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       return 0;
     }
     case WM_CAPTURECHANGED:
+      if (NoteDragLog()) {
+        Log(L"dock", L"drag capture lost to=%p dragging=%d", reinterpret_cast<HWND>(lparam), dragging_ ? 1 : 0);
+      }
       if (dragging_ && reinterpret_cast<HWND>(lparam) != hwnd_) {
         EndDrag(false);
       } else if (!dragging_) {
@@ -1981,16 +1998,29 @@ std::vector<size_t> Dock::DisplayOrder() const {
 }
 
 void Dock::BeginDragIfNeeded(POINT client) {
-  if (dragging_ || pressed_ < 0 || pressed_ >= static_cast<int>(items_.size())) {
-    return;
+  const wchar_t* reason = nullptr;
+  if (dragging_) {
+    reason = L"already-dragging";
+  } else if (pressed_ < 0) {
+    reason = L"no-press";
+  } else if (pressed_ >= static_cast<int>(items_.size())) {
+    reason = L"index-out-of-range";
+  } else if (!items_[static_cast<size_t>(pressed_)].pinned) {
+    reason = L"not-pinned";
   }
-  if (!items_[static_cast<size_t>(pressed_)].pinned) {
+  if (reason != nullptr) {
+    if (NoteDragLog()) {
+      Log(L"dock", L"drag skip reason=%s", reason);
+    }
     return;
   }
   const int slop = Dip(kDragSlopDip);
   const int dx = client.x - drag_origin_.x;
   const int dy = client.y - drag_origin_.y;
   if (dx * dx + dy * dy < slop * slop) {
+    if (NoteDragLog()) {
+      Log(L"dock", L"drag skip reason=%s", L"below-slop");
+    }
     return;
   }
   dragging_ = true;
@@ -1999,6 +2029,14 @@ void Dock::BeginDragIfNeeded(POINT client) {
   if (tooltip_ != nullptr) {
     SendMessageW(tooltip_, TTM_POP, 0, 0);
   }
+}
+
+bool Dock::NoteDragLog() {
+  if (drag_logs_ >= 8) {
+    return false;
+  }
+  ++drag_logs_;
+  return true;
 }
 
 void Dock::UpdateDrag(POINT client) {

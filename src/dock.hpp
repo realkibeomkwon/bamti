@@ -68,6 +68,7 @@ class Dock {
   void BeginDragIfNeeded(POINT client);
   void UpdateDrag(POINT client);
   void EndDrag(bool commit);
+  bool NoteDragLog();
   bool Busy() const;
   int PinnedCount() const;
   int DropIndexAt(POINT client) const;
@@ -109,6 +110,8 @@ class Dock {
   uint64_t last_window_fp_ = 0;
   ULONGLONG last_menu_open_ = 0;
   ULONGLONG last_popup_tick_ = 0;
+  UINT drag_logs_ = 0;
+  UINT drag_move_logs_ = 0;
 };
 
 }  // namespace bamti
