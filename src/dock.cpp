@@ -16,9 +16,11 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <shlwapi.h>
 #include <uxtheme.h>
 #include <wincodec.h>
 #include <windowsx.h>
+#include <winreg.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -72,6 +74,8 @@ constexpr UINT kHideCommand = 5;
 constexpr UINT kNewWindowCommand = 6;
 constexpr UINT kOpenCommand = 7;
 constexpr UINT kOptionsCommand = 8;
+constexpr UINT kToggleLoginCommand = 9;
+constexpr UINT kShowInFolderCommand = 10;
 constexpr UINT kWindowCommandBase = 100;
 
 HWND g_notify = nullptr;
@@ -110,6 +114,10 @@ const wchar_t* MenuCmdName(UINT cmd) {
       return L"open";
     case kOptionsCommand:
       return L"options";
+    case kToggleLoginCommand:
+      return L"login";
+    case kShowInFolderCommand:
+      return L"show-in-folder";
     default:
       return L"none";
   }
@@ -704,6 +712,102 @@ HICON QueryWindowIcon(HWND hwnd) {
   return reinterpret_cast<HICON>(GetClassLongPtrW(hwnd, GCLP_HICONSM));
 }
 
+constexpr wchar_t kRunSubkey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+std::wstring LoginRunValueName(const DockApp& app) {
+  std::wstring tail;
+  if (!app.exe_path.empty()) {
+    const wchar_t* file = PathFindFileNameW(app.exe_path.c_str());
+    tail = file != nullptr ? file : app.exe_path;
+  } else if (!app.aumid.empty()) {
+    tail = app.aumid;
+  }
+  for (wchar_t& ch : tail) {
+    if (ch == L'\\' || ch == L'/' || ch == L':') {
+      ch = L'_';
+    }
+  }
+  if (tail.empty()) {
+    return {};
+  }
+  return L"bamti-dock-" + tail;
+}
+
+std::wstring LoginRunCommand(const DockApp& app) {
+  if (!app.exe_path.empty()) {
+    if (app.exe_path.find(L'"') != std::wstring::npos) {
+      return {};
+    }
+    return L"\"" + app.exe_path + L"\"";
+  }
+  if (!app.aumid.empty() && app.aumid.find(L'"') == std::wstring::npos) {
+    return L"explorer.exe shell:AppsFolder\\" + app.aumid;
+  }
+  return {};
+}
+
+bool LoginValueExists(const std::wstring& name) {
+  if (name.empty()) {
+    return false;
+  }
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunSubkey, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+    return false;
+  }
+  DWORD type = 0;
+  DWORD size = 0;
+  const LONG st = RegQueryValueExW(key, name.c_str(), nullptr, &type, nullptr, &size);
+  RegCloseKey(key);
+  return st == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ);
+}
+
+void ToggleLoginItem(const DockApp& app) {
+  const std::wstring name = LoginRunValueName(app);
+  const std::wstring command = LoginRunCommand(app);
+  if (name.empty() || command.empty()) {
+    Log(L"dock", L"login toggle failed err=%lu", static_cast<unsigned long>(ERROR_INVALID_DATA));
+    return;
+  }
+  HKEY key = nullptr;
+  LONG st = RegCreateKeyExW(HKEY_CURRENT_USER, kRunSubkey, 0, nullptr, 0, KEY_SET_VALUE | KEY_QUERY_VALUE, nullptr,
+                            &key, nullptr);
+  if (st != ERROR_SUCCESS) {
+    Log(L"dock", L"login toggle failed err=%lu", static_cast<unsigned long>(st));
+    return;
+  }
+  DWORD type = 0;
+  DWORD size = 0;
+  const bool exists = RegQueryValueExW(key, name.c_str(), nullptr, &type, nullptr, &size) == ERROR_SUCCESS;
+  if (exists) {
+    st = RegDeleteValueW(key, name.c_str());
+    if (st == ERROR_FILE_NOT_FOUND) {
+      st = ERROR_SUCCESS;
+    }
+  } else {
+    const DWORD bytes = static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t));
+    st = RegSetValueExW(key, name.c_str(), 0, REG_SZ, reinterpret_cast<const BYTE*>(command.c_str()), bytes);
+  }
+  RegCloseKey(key);
+  if (st != ERROR_SUCCESS) {
+    Log(L"dock", L"login toggle failed err=%lu", static_cast<unsigned long>(st));
+  } else {
+    Log(L"dock", L"login %s name=%s", exists ? L"removed" : L"added", name.c_str());
+  }
+}
+
+void ShowInFolder(const DockApp& app) {
+  if (app.exe_path.empty() || app.exe_path.find(L'"') != std::wstring::npos) {
+    Log(L"dock", L"show in folder skipped name=%s", app.display_name.c_str());
+    return;
+  }
+  const std::wstring args = L"/select,\"" + app.exe_path + L"\"";
+  const HINSTANCE ret = ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+  if (reinterpret_cast<INT_PTR>(ret) <= 32) {
+    Log(L"dock", L"show in folder failed err=%lu name=%s", static_cast<unsigned long>(reinterpret_cast<UINT_PTR>(ret)),
+        app.display_name.c_str());
+  }
+}
+
 }  // namespace
 
 struct DockMenuRow {
@@ -747,7 +851,6 @@ class DockMenuContent : public PopupContent {
     }
 
     const bool has_windows = !window_targets_.empty();
-    const bool can_pin = app.pinned || (app.can_pin && !IsSelfExecutable(app.exe_path));
     const bool can_launch = (!app.aumid.empty() || !app.relaunch_command.empty() || !app.exe_path.empty()) &&
                             !IsSelfExecutable(app.exe_path);
     auto add_sep = [&]() {
@@ -768,10 +871,6 @@ class DockMenuContent : public PopupContent {
     }
     add_sep();
     add_row(kOptionsCommand, L"옵션", false, true);
-    if (can_pin) {
-      add_sep();
-      add_row(app.pinned ? kUnpinCommand : kPinCommand, L"독에 유지", app.pinned);
-    }
     if (has_windows) {
       add_sep();
       add_row(kShowAllCommand, L"모두 보기");
@@ -789,6 +888,39 @@ class DockMenuContent : public PopupContent {
   bool empty() const { return rows_.empty(); }
   size_t size() const { return rows_.size(); }
   int RowCount() const override { return static_cast<int>(rows_.size()); }
+  const DockApp& App() const { return app_; }
+
+  bool StickyRow(int index) const override {
+    if (index < 0 || index >= static_cast<int>(rows_.size())) {
+      return false;
+    }
+    return rows_[static_cast<size_t>(index)].id == kOptionsCommand;
+  }
+
+  int OptionsIndex() const {
+    for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
+      if (rows_[static_cast<size_t>(i)].id == kOptionsCommand) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  bool RowScreenRect(int index, RECT* out) const {
+    if (out == nullptr || owner_ == nullptr || owner_->popup_.hwnd() == nullptr) {
+      return false;
+    }
+    HWND hwnd = owner_->popup_.hwnd();
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    const RECT row = RowRect(index, owner_->Dpi(), client.right);
+    POINT top_left{row.left, row.top};
+    POINT bottom_right{row.right, row.bottom};
+    ClientToScreen(hwnd, &top_left);
+    ClientToScreen(hwnd, &bottom_right);
+    *out = RECT{top_left.x, top_left.y, bottom_right.x, bottom_right.y};
+    return true;
+  }
 
   SIZE Measure(UINT dpi) override {
     const int pad = DipToPx(kMenuPadDip, dpi);
@@ -929,6 +1061,151 @@ class DockMenuContent : public PopupContent {
   std::vector<HWND> window_targets_;
 };
 
+class DockSubmenuContent : public PopupContent {
+ public:
+  void Reset(Dock* owner, const DockApp& app) {
+    owner_ = owner;
+    app_ = app;
+    rows_.clear();
+    if (owner_ == nullptr) {
+      return;
+    }
+    const bool can_pin = app.pinned || (app.can_pin && !IsSelfExecutable(app.exe_path));
+    if (can_pin) {
+      rows_.push_back({app.pinned ? kUnpinCommand : kPinCommand, std::wstring(L"독에 유지"), false, app.pinned});
+    }
+    const std::wstring login_name = LoginRunValueName(app);
+    const std::wstring login_cmd = LoginRunCommand(app);
+    if (!login_name.empty() && !login_cmd.empty()) {
+      rows_.push_back({kToggleLoginCommand, std::wstring(L"로그인 시 열기"), false, LoginValueExists(login_name)});
+    }
+    if (!app.exe_path.empty() && app.exe_path.find(L'"') == std::wstring::npos) {
+      rows_.push_back({kShowInFolderCommand, std::wstring(L"파일 위치 열기")});
+    }
+  }
+
+  bool empty() const { return rows_.empty(); }
+  int RowCount() const override { return static_cast<int>(rows_.size()); }
+
+  SIZE Measure(UINT dpi) override {
+    const int pad = DipToPx(kMenuPadDip, dpi);
+    const int row_h = DipToPx(kMenuRowDip, dpi);
+    const int sep_h = DipToPx(kMenuSepDip, dpi);
+    const int text_pad = DipToPx(kMenuTextPadDip, dpi);
+    const int check_w = DipToPx(kMenuCheckDip, dpi);
+    const int arrow_w = DipToPx(kMenuArrowDip, dpi);
+    int text_w = 0;
+    for (const DockMenuRow& row : rows_) {
+      if (row.separator || row.text.empty()) {
+        continue;
+      }
+      text_w = (std::max)(text_w, static_cast<int>(PopupTextWidth(dpi, row.text) + 0.5f));
+    }
+    int width = text_w + pad * 2 + text_pad * 2 + check_w + arrow_w;
+    width = (std::max)(width, DipToPx(kMenuMinWidthDip, dpi));
+    width = (std::min)(width, DipToPx(kMenuMaxWidthDip, dpi));
+    int height = pad * 2;
+    for (const DockMenuRow& row : rows_) {
+      height += row.separator ? sep_h : row_h;
+    }
+    return SIZE{width, height};
+  }
+
+  void Render(ID2D1RenderTarget* target, UINT dpi, int hot) override {
+    if (target == nullptr) {
+      return;
+    }
+    const D2D1_SIZE_F sz = target->GetSize();
+    const RECT client{0, 0, static_cast<LONG>(sz.width), static_cast<LONG>(sz.height)};
+    const bool dark = owner_ != nullptr ? owner_->dark_ : true;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> text;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover;
+    const D2D1_COLOR_F text_c = ClockTextColor(dark);
+    const D2D1_COLOR_F hover_c = MenuItemHoverFill(dark, false);
+    target->CreateSolidColorBrush(D2D1::ColorF(text_c.r, text_c.g, text_c.b, 1.0f), text.GetAddressOf());
+    target->CreateSolidColorBrush(hover_c, hover.GetAddressOf());
+    const int check_w = DipToPx(kMenuCheckDip, dpi);
+    const int arrow_w = DipToPx(kMenuArrowDip, dpi);
+    for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
+      const DockMenuRow& row = rows_[static_cast<size_t>(i)];
+      const RECT rc = RowRect(i, dpi, client.right);
+      if (i == hot && hover) {
+        target->FillRectangle(
+            D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top), static_cast<float>(rc.right),
+                        static_cast<float>(rc.bottom)),
+            hover.Get());
+      }
+      if (text) {
+        if (row.checked) {
+          DrawPopupText(target, dpi, L"\u2713",
+                        D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
+                                    static_cast<float>(rc.left + check_w), static_cast<float>(rc.bottom)),
+                        text.Get());
+        }
+        DrawPopupText(target, dpi, row.text,
+                      D2D1::RectF(static_cast<float>(rc.left + check_w), static_cast<float>(rc.top),
+                                  static_cast<float>(rc.right - arrow_w), static_cast<float>(rc.bottom)),
+                      text.Get());
+      }
+    }
+  }
+
+  int HitTest(POINT client, UINT dpi) const override {
+    int width = 0;
+    if (owner_ != nullptr && owner_->submenu_.hwnd() != nullptr) {
+      RECT rc{};
+      GetClientRect(owner_->submenu_.hwnd(), &rc);
+      width = rc.right;
+    }
+    for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
+      if (rows_[static_cast<size_t>(i)].separator) {
+        continue;
+      }
+      const RECT rc = RowRect(i, dpi, width);
+      if (PtInRect(&rc, client)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  void Invoke(int index) override {
+    if (owner_ == nullptr || owner_->hwnd_ == nullptr || index < 0 || index >= static_cast<int>(rows_.size())) {
+      return;
+    }
+    const UINT cmd = rows_[static_cast<size_t>(index)].id;
+    if (cmd == 0) {
+      return;
+    }
+    owner_->pending_menu_cmd_ = cmd;
+    owner_->pending_menu_app_ = app_;
+    owner_->pending_menu_windows_ = app_.windows;
+    PostMessageW(owner_->hwnd_, kMenuCommandMsg, 0, 0);
+  }
+
+ private:
+  RECT RowRect(int index, UINT dpi, int width) const {
+    RECT result{};
+    if (index < 0 || index >= static_cast<int>(rows_.size())) {
+      return result;
+    }
+    const int pad = DipToPx(kMenuPadDip, dpi);
+    const int row_h = DipToPx(kMenuRowDip, dpi);
+    const int sep_h = DipToPx(kMenuSepDip, dpi);
+    int y = pad;
+    for (int i = 0; i < index; ++i) {
+      y += rows_[static_cast<size_t>(i)].separator ? sep_h : row_h;
+    }
+    const int h = rows_[static_cast<size_t>(index)].separator ? sep_h : row_h;
+    result = {pad, y, width - pad, y + h};
+    return result;
+  }
+
+  Dock* owner_ = nullptr;
+  DockApp app_{};
+  std::vector<DockMenuRow> rows_;
+};
+
 Dock::Dock() = default;
 
 Dock::~Dock() {
@@ -944,6 +1221,7 @@ Dock::~Dock() {
   ResetIconCache();
   TaskbarController::UnwatchTray();
   StopFullscreenWatch(hwnd_);
+  submenu_.Destroy();
   popup_.Destroy();
   if (hwnd_ != nullptr) {
     DestroyWindow(hwnd_);
@@ -1024,10 +1302,16 @@ bool Dock::Create(HINSTANCE instance) {
   StartFullscreenWatch(hwnd_, kFullscreenMsg);
 
   menu_content_ = std::make_unique<DockMenuContent>();
+  submenu_content_ = std::make_unique<DockSubmenuContent>();
   if (!popup_.Create(instance, hwnd_)) {
     Log(L"dock", L"popup create failed err=%lu", GetLastError());
   }
+  if (!submenu_.Create(instance, hwnd_)) {
+    Log(L"dock", L"submenu create failed err=%lu", GetLastError());
+  }
   popup_.SetDark(dark_);
+  submenu_.SetDark(dark_);
+  popup_.SetAfterTick(&Dock::AfterPopupTick, this);
   RefreshFullscreen();
   Log(L"dock", L"ready hwnd=%p items=%zu", hwnd_, items_.size());
   return true;
@@ -1240,6 +1524,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         dark_ = ShellUsesDarkMode();
         ApplyBackdrop();
         popup_.SetDark(dark_);
+        submenu_.SetDark(dark_);
         RenderLayered();
       }
       return 0;
@@ -1388,6 +1673,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kTrayWatchTimerId);
       TaskbarController::UnwatchTray();
       StopFullscreenWatch(hwnd_);
+      submenu_.Destroy();
       popup_.Destroy();
       if (g_notify == hwnd_) {
         g_notify = nullptr;
@@ -1909,6 +2195,9 @@ void Dock::RaiseOverlays() {
   if (popup_.IsOpen() && popup_.hwnd() != nullptr) {
     SetWindowPos(popup_.hwnd(), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
   }
+  if (submenu_.IsOpen() && submenu_.hwnd() != nullptr) {
+    SetWindowPos(submenu_.hwnd(), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  }
 }
 
 void Dock::SetOverlaysTopmost(bool topmost) {
@@ -1935,6 +2224,7 @@ void Dock::OpenDockMenu(POINT screen, int index) {
     Log(L"dock", L"menu reopen storm %ums since last", static_cast<unsigned>(started - last_menu_open_));
   }
   last_menu_open_ = started;
+  CloseOptionsSubmenu(L"reopen");
   popup_.Close();
   CancelHideTimer();
   if (tooltip_ != nullptr) {
@@ -1959,6 +2249,72 @@ void Dock::OpenDockMenu(POINT screen, int index) {
   Log(L"dock", L"menu hwnd=%p rows=%zu %ums", popup_.hwnd(), menu_content_->size(),
       static_cast<unsigned>(GetTickCount64() - started));
   UpdateIdleTimer();
+}
+
+void Dock::AfterPopupTick(void* ctx) {
+  if (ctx != nullptr) {
+    static_cast<Dock*>(ctx)->SyncOptionsSubmenu();
+  }
+}
+
+void Dock::SyncOptionsSubmenu() {
+  if (!popup_.IsOpen() || menu_content_ == nullptr) {
+    CloseOptionsSubmenu(L"parent");
+    return;
+  }
+  POINT cursor{};
+  const bool got_cursor = GetCursorPos(&cursor) != FALSE;
+  RECT sub{};
+  const bool over_sub =
+      got_cursor && submenu_.IsOpen() && submenu_.hwnd() != nullptr && GetWindowRect(submenu_.hwnd(), &sub) != FALSE &&
+      PtInRect(&sub, cursor);
+  const int opt = menu_content_->OptionsIndex();
+  const int hot = popup_.Hot();
+  if (opt >= 0 && (hot == opt || over_sub)) {
+    OpenOptionsSubmenu();
+  } else {
+    CloseOptionsSubmenu(L"hover-leave");
+  }
+}
+
+void Dock::OpenOptionsSubmenu() {
+  if (!popup_.IsOpen() || menu_content_ == nullptr || submenu_.IsOpen()) {
+    return;
+  }
+  const int opt = menu_content_->OptionsIndex();
+  if (opt < 0) {
+    return;
+  }
+  if (!submenu_content_) {
+    submenu_content_ = std::make_unique<DockSubmenuContent>();
+  }
+  submenu_content_->Reset(this, menu_content_->App());
+  if (submenu_content_->empty()) {
+    return;
+  }
+  RECT row{};
+  if (!menu_content_->RowScreenRect(opt, &row)) {
+    return;
+  }
+  const POINT anchor{row.right, row.top};
+  popup_.SetAllied(&submenu_);
+  submenu_.SetDark(dark_);
+  if (!submenu_.Open(submenu_content_.get(), anchor, PopupSurface::Anchor::RightOf, false)) {
+    popup_.SetAllied(nullptr);
+    Log(L"popup", L"submenu open failed err=%lu", GetLastError());
+    return;
+  }
+  RaiseOverlays();
+}
+
+void Dock::CloseOptionsSubmenu(const wchar_t* reason) {
+  if (!submenu_.IsOpen()) {
+    popup_.SetAllied(nullptr);
+    return;
+  }
+  Log(L"popup", L"submenu close reason=%s", reason != nullptr ? reason : L"explicit");
+  popup_.SetAllied(nullptr);
+  submenu_.Close();
 }
 
 void Dock::ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND>& window_cmds) {
@@ -2004,6 +2360,10 @@ void Dock::ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND
     if (!LaunchDockApp(app)) {
       Log(L"dock", L"%s failed name=%s", MenuCmdName(cmd), app.display_name.c_str());
     }
+  } else if (cmd == kToggleLoginCommand) {
+    ToggleLoginItem(app);
+  } else if (cmd == kShowInFolderCommand) {
+    ShowInFolder(app);
   }
 
   if (pending_rebuild_) {

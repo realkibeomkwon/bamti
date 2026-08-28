@@ -16,6 +16,7 @@ inline constexpr wchar_t kDockClass[] = L"bamti.Dock";
 inline constexpr wchar_t kDockHotClass[] = L"bamti.DockHot";
 
 class DockMenuContent;
+class DockSubmenuContent;
 
 class Dock {
  public:
@@ -28,6 +29,7 @@ class Dock {
 
  private:
   friend class DockMenuContent;
+  friend class DockSubmenuContent;
 
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
   static LRESULT CALLBACK HotProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
@@ -59,6 +61,10 @@ class Dock {
   void RaiseOverlays();
   void OpenDockMenu(POINT screen, int index);
   void ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND>& window_cmds);
+  void SyncOptionsSubmenu();
+  void OpenOptionsSubmenu();
+  void CloseOptionsSubmenu(const wchar_t* reason);
+  static void AfterPopupTick(void* ctx);
   void ScheduleRebuild();
   void ArmMouseLeave();
   void ArmHotMouseLeave();
@@ -106,7 +112,9 @@ class Dock {
   std::wstring tooltip_text_;
   std::vector<HWINEVENTHOOK> hooks_;
   PopupSurface popup_;
+  PopupSurface submenu_;
   std::unique_ptr<DockMenuContent> menu_content_;
+  std::unique_ptr<DockSubmenuContent> submenu_content_;
   std::wstring last_collect_snap_;
   uint64_t last_window_fp_ = 0;
   ULONGLONG last_menu_open_ = 0;

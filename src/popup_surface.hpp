@@ -20,6 +20,7 @@ class PopupContent {
   virtual int HitTest(POINT client, UINT dpi) const = 0;
   virtual void Invoke(int index) = 0;
   virtual int RowCount() const { return 0; }
+  virtual bool StickyRow(int /*index*/) const { return false; }
 };
 
 float PopupTextWidth(UINT dpi, const std::wstring& text);
@@ -28,7 +29,7 @@ void DrawPopupText(ID2D1RenderTarget* target, UINT dpi, const std::wstring& text
 
 class PopupSurface {
  public:
-  enum class Anchor { AboveAt, BelowAt };
+  enum class Anchor { AboveAt, BelowAt, RightOf };
 
   enum class DismissReason {
     kInvoke,
@@ -51,12 +52,21 @@ class PopupSurface {
   bool Create(HINSTANCE instance, HWND owner);
   void Destroy();
 
-  bool Open(PopupContent* content, POINT anchor_screen, Anchor mode);
+  bool Open(PopupContent* content, POINT anchor_screen, Anchor mode, bool capture = true);
   void Close();
   bool IsOpen() const { return open_; }
   HWND hwnd() const { return hwnd_; }
+  int Hot() const { return hot_; }
 
   void SetDark(bool dark);
+  void SetAllied(PopupSurface* allied) { allied_ = allied; }
+  void SetAfterTick(void (*fn)(void*), void* ctx) {
+    after_tick_ = fn;
+    after_tick_ctx_ = ctx;
+  }
+  int HitTestScreen(POINT screen) const;
+  void TrackHotScreen(POINT screen);
+  void InvokeRow(int index);
   void Tick();
 
  private:
@@ -69,11 +79,15 @@ class PopupSurface {
   void ApplyChrome();
   void ArmGuardTimer();
   void Tick(const wchar_t* src);
+  void HitTree(POINT screen, bool* in_self, bool* in_allied) const;
   UINT Dpi() const;
 
   HWND hwnd_ = nullptr;
   HWND owner_ = nullptr;
   HWND last_fg_ = nullptr;
+  PopupSurface* allied_ = nullptr;
+  void (*after_tick_)(void*) = nullptr;
+  void* after_tick_ctx_ = nullptr;
   PopupContent* content_ = nullptr;
   bool open_ = false;
   bool esc_down_ = false;
@@ -84,6 +98,7 @@ class PopupSurface {
   bool armed_ = false;
   bool ticking_ = false;
   bool dark_ = true;
+  bool capture_ = true;
   int hot_ = -1;
   unsigned tick_ = 0;
   Anchor mode_ = Anchor::AboveAt;

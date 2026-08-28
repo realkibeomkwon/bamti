@@ -121,6 +121,14 @@ bool SameProcess(HWND hwnd) {
   return pid == GetCurrentProcessId();
 }
 
+bool PointInWindow(HWND hwnd, POINT screen) {
+  if (hwnd == nullptr || !IsWindow(hwnd)) {
+    return false;
+  }
+  RECT rc{};
+  return GetWindowRect(hwnd, &rc) != FALSE && PtInRect(&rc, screen);
+}
+
 }  // namespace
 
 float PopupTextWidth(UINT dpi, const std::wstring& text) {
@@ -227,7 +235,7 @@ void PopupSurface::Destroy() {
   }
 }
 
-bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode) {
+bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode, bool capture) {
   WatchdogStage(L"popup.open");
   const ULONGLONG started = GetTickCount64();
   if (hwnd_ == nullptr || content == nullptr) {
@@ -237,6 +245,7 @@ bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode)
   content_ = content;
   mode_ = mode;
   anchor_ = anchor_screen;
+  capture_ = capture;
   const UINT dpi = Dpi();
   const SIZE size = content_->Measure(dpi);
   if (size.cx <= 0 || size.cy <= 0) {
@@ -264,10 +273,17 @@ bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode)
   SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
   InvalidateRect(hwnd_, nullptr, FALSE);
   UpdateWindow(hwnd_);
-  SetCapture(hwnd_);
-  ArmGuardTimer();
-  Log(L"popup", L"open rows=%d shown %ums", content_->RowCount(),
-      static_cast<unsigned>(GetTickCount64() - started));
+  if (capture) {
+    SetCapture(hwnd_);
+    ArmGuardTimer();
+  }
+  if (capture) {
+    Log(L"popup", L"open rows=%d shown %ums", content_->RowCount(),
+        static_cast<unsigned>(GetTickCount64() - started));
+  } else {
+    Log(L"popup", L"submenu open rows=%d %ums", content_->RowCount(),
+        static_cast<unsigned>(GetTickCount64() - started));
+  }
   return true;
 }
 
@@ -294,6 +310,12 @@ void PopupSurface::Dismiss(int invoke_index, DismissReason reason) {
   if (!open_) {
     return;
   }
+  if (allied_ != nullptr && allied_->IsOpen()) {
+    Log(L"popup", L"submenu close reason=%s", ReasonName(reason));
+    PopupSurface* allied = allied_;
+    allied_ = nullptr;
+    allied->Close();
+  }
   Log(L"popup", L"dismiss reason=%s index=%d", ReasonName(reason), invoke_index);
   open_ = false;
   hot_ = -1;
@@ -312,7 +334,7 @@ void PopupSurface::Dismiss(int invoke_index, DismissReason reason) {
   if (content != nullptr && invoke_index >= 0) {
     content->Invoke(invoke_index);
   }
-  if (owner_ != nullptr) {
+  if (capture_ && owner_ != nullptr) {
     PostMessageW(owner_, kPopupClosedMsg, 0, 0);
   }
 }
@@ -324,8 +346,18 @@ void PopupSurface::Place(SIZE size, POINT anchor_screen, Anchor mode) {
   const UINT dpi = Dpi();
   const int gap = MulDiv(4, static_cast<int>(dpi), 96);
   const int inset = MulDiv(8, static_cast<int>(dpi), 96);
-  int x = anchor_screen.x - inset;
-  int y = mode == Anchor::AboveAt ? anchor_screen.y - size.cy - gap : anchor_screen.y + gap;
+  int x = 0;
+  int y = 0;
+  if (mode == Anchor::RightOf) {
+    x = anchor_screen.x;
+    y = anchor_screen.y;
+    if (x + size.cx > info.rcWork.right) {
+      x = anchor_screen.x - size.cx;
+    }
+  } else {
+    x = anchor_screen.x - inset;
+    y = mode == Anchor::AboveAt ? anchor_screen.y - size.cy - gap : anchor_screen.y + gap;
+  }
   if (x + size.cx > info.rcWork.right) {
     x = info.rcWork.right - size.cx;
   }
@@ -359,6 +391,41 @@ void PopupSurface::ArmGuardTimer() {
   }
   const UINT_PTR id = SetTimer(hwnd_, kPopupGuardTimer, kPopupGuardMs, nullptr);
   Log(L"popup", L"arm guard id=%llu err=%lu", static_cast<unsigned long long>(id), id == 0 ? GetLastError() : 0);
+}
+
+void PopupSurface::HitTree(POINT screen, bool* in_self, bool* in_allied) const {
+  if (in_self != nullptr) {
+    *in_self = PointInWindow(hwnd_, screen);
+  }
+  if (in_allied != nullptr) {
+    *in_allied = allied_ != nullptr && allied_->IsOpen() && PointInWindow(allied_->hwnd(), screen);
+  }
+}
+
+int PopupSurface::HitTestScreen(POINT screen) const {
+  if (!open_ || content_ == nullptr || hwnd_ == nullptr || !PointInWindow(hwnd_, screen)) {
+    return -1;
+  }
+  POINT client = screen;
+  ScreenToClient(hwnd_, &client);
+  return content_->HitTest(client, Dpi());
+}
+
+void PopupSurface::TrackHotScreen(POINT screen) {
+  if (!open_ || content_ == nullptr || hwnd_ == nullptr) {
+    return;
+  }
+  const int hot = HitTestScreen(screen);
+  if (hot == hot_) {
+    return;
+  }
+  hot_ = hot;
+  InvalidateRect(hwnd_, nullptr, FALSE);
+  UpdateWindow(hwnd_);
+}
+
+void PopupSurface::InvokeRow(int index) {
+  Dismiss(index, DismissReason::kInvoke);
 }
 
 void PopupSurface::Tick() {
@@ -399,7 +466,12 @@ void PopupSurface::Tick(const wchar_t* src) {
   POINT cursor{};
   RECT window{};
   const bool got_cursor = GetCursorPos(&cursor) != FALSE && GetWindowRect(hwnd_, &window) != FALSE;
-  const bool inside = got_cursor && PtInRect(&window, cursor);
+  bool in_self = false;
+  bool in_allied = false;
+  if (got_cursor) {
+    HitTree(cursor, &in_self, &in_allied);
+  }
+  const bool inside = in_self || in_allied;
 
   const AsyncKey left = ReadAsyncKey(VK_LBUTTON);
   const AsyncKey right = ReadAsyncKey(VK_RBUTTON);
@@ -418,15 +490,33 @@ void PopupSurface::Tick(const wchar_t* src) {
   }
   if (!down && (mouse_down_ || (pressed_since && press_inside_))) {
     if (armed_ && press_inside_ && inside && content_ != nullptr) {
-      POINT client = cursor;
-      ScreenToClient(hwnd_, &client);
-      const int row = content_->HitTest(client, Dpi());
-      if (row >= 0) {
-        Log(L"popup", L"poll invoke row=%d", row);
-        press_inside_ = false;
-        mouse_down_ = false;
-        Dismiss(row, DismissReason::kInvoke);
-        return;
+      if (in_allied && allied_ != nullptr) {
+        const int row = allied_->HitTestScreen(cursor);
+        if (row >= 0) {
+          Log(L"popup", L"poll invoke submenu row=%d", row);
+          Log(L"popup", L"submenu close reason=%s", L"invoke");
+          press_inside_ = false;
+          mouse_down_ = false;
+          allied_->InvokeRow(row);
+          Dismiss(-1, DismissReason::kInvoke);
+          return;
+        }
+      } else if (in_self) {
+        POINT client = cursor;
+        ScreenToClient(hwnd_, &client);
+        const int row = content_->HitTest(client, Dpi());
+        if (row >= 0) {
+          if (content_->StickyRow(row)) {
+            Log(L"popup", L"poll sticky row=%d", row);
+            press_inside_ = false;
+          } else {
+            Log(L"popup", L"poll invoke row=%d", row);
+            press_inside_ = false;
+            mouse_down_ = false;
+            Dismiss(row, DismissReason::kInvoke);
+            return;
+          }
+        }
       }
     }
     press_inside_ = false;
@@ -443,17 +533,22 @@ void PopupSurface::Tick(const wchar_t* src) {
   }
 
   if (content_ != nullptr) {
-    int hot = -1;
-    if (inside) {
+    int hot = hot_;
+    if (in_self) {
       POINT client = cursor;
       ScreenToClient(hwnd_, &client);
       hot = content_->HitTest(client, Dpi());
+    } else if (!in_allied) {
+      hot = -1;
     }
     if (hot != hot_) {
       hot_ = hot;
       InvalidateRect(hwnd_, nullptr, FALSE);
       UpdateWindow(hwnd_);
     }
+  }
+  if (allied_ != nullptr && allied_->IsOpen()) {
+    allied_->TrackHotScreen(cursor);
   }
 
   const HWND fg = GetForegroundWindow();
@@ -462,6 +557,9 @@ void PopupSurface::Tick(const wchar_t* src) {
     return;
   }
   last_fg_ = fg;
+  if (open_ && after_tick_ != nullptr) {
+    after_tick_(after_tick_ctx_);
+  }
 }
 
 void PopupSurface::EnsureRenderTarget() {
@@ -578,18 +676,29 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
       }
       const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-      RECT client{};
-      GetClientRect(hwnd_, &client);
-      const int inside = PtInRect(&client, pt) ? 1 : 0;
+      POINT screen = pt;
+      ClientToScreen(hwnd_, &screen);
+      bool in_self = false;
+      bool in_allied = false;
+      HitTree(screen, &in_self, &in_allied);
+      const int inside = in_self ? 1 : 0;
       if (!saw_mousemove_) {
         saw_mousemove_ = true;
         Log(L"popup", L"msg=%s pt=%d,%d inside=%d", MouseMsgName(msg), pt.x, pt.y, inside);
       }
-      const int hot = inside ? content_->HitTest(pt, Dpi()) : -1;
+      int hot = hot_;
+      if (in_self) {
+        hot = content_->HitTest(pt, Dpi());
+      } else if (!in_allied) {
+        hot = -1;
+      }
       if (hot != hot_) {
         hot_ = hot;
         InvalidateRect(hwnd_, nullptr, FALSE);
         UpdateWindow(hwnd_);
+      }
+      if (in_allied && allied_ != nullptr) {
+        allied_->TrackHotScreen(screen);
       }
       return 0;
     }
@@ -597,9 +706,12 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_RBUTTONDOWN:
     case WM_MBUTTONDOWN: {
       const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-      RECT client{};
-      GetClientRect(hwnd_, &client);
-      const int inside = PtInRect(&client, pt) ? 1 : 0;
+      POINT screen = pt;
+      ClientToScreen(hwnd_, &screen);
+      bool in_self = false;
+      bool in_allied = false;
+      HitTree(screen, &in_self, &in_allied);
+      const int inside = (in_self || in_allied) ? 1 : 0;
       if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN) {
         Log(L"popup", L"msg=%s pt=%d,%d inside=%d", MouseMsgName(msg), pt.x, pt.y, inside);
       }
@@ -614,14 +726,36 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONUP:
     case WM_RBUTTONUP: {
       const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-      RECT client{};
-      GetClientRect(hwnd_, &client);
-      const int inside = PtInRect(&client, pt) ? 1 : 0;
+      POINT screen = pt;
+      ClientToScreen(hwnd_, &screen);
+      bool in_self = false;
+      bool in_allied = false;
+      HitTree(screen, &in_self, &in_allied);
+      const int inside = (in_self || in_allied) ? 1 : 0;
       Log(L"popup", L"msg=%s pt=%d,%d inside=%d", MouseMsgName(msg), pt.x, pt.y, inside);
       if (!open_ || content_ == nullptr || !armed_) {
         return 0;
       }
-      const int index = inside ? content_->HitTest(pt, Dpi()) : -1;
+      if (in_allied && allied_ != nullptr) {
+        const int row = allied_->HitTestScreen(screen);
+        if (row >= 0) {
+          Log(L"popup", L"submenu close reason=%s", L"invoke");
+          allied_->InvokeRow(row);
+          Dismiss(-1, DismissReason::kInvoke);
+        }
+        return 0;
+      }
+      if (!in_self) {
+        Dismiss(-1, DismissReason::kOutsideClick);
+        return 0;
+      }
+      const int index = content_->HitTest(pt, Dpi());
+      if (index >= 0 && content_->StickyRow(index)) {
+        if (after_tick_ != nullptr) {
+          after_tick_(after_tick_ctx_);
+        }
+        return 0;
+      }
       Dismiss(index, index >= 0 ? DismissReason::kInvoke : DismissReason::kOutsideClick);
       return 0;
     }
