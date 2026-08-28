@@ -461,8 +461,9 @@ void PopupSurface::Tick(const wchar_t* src) {
   }
   win_down_ = lwin.down || rwin.down;
 
-  // WS_EX_NOACTIVATE windows do not receive mouse messages, even over the
-  // popup itself. Drive click and hover from the same poll that already works.
+  // Capture on a WS_EX_NOACTIVATE popup only delivers messages while the
+  // cursor is over that window. Poll dismisses outside clicks and keeps hover
+  // in sync. Inner mouse-up reaches WM_LBUTTONUP, so this path must not invoke.
   POINT cursor{};
   RECT window{};
   const bool got_cursor = GetCursorPos(&cursor) != FALSE && GetWindowRect(hwnd_, &window) != FALSE;
@@ -489,38 +490,6 @@ void PopupSurface::Tick(const wchar_t* src) {
     }
   }
   if (!down && (mouse_down_ || (pressed_since && press_inside_))) {
-    if (armed_ && press_inside_ && inside && content_ != nullptr) {
-      if (in_allied && allied_ != nullptr) {
-        const int row = allied_->HitTestScreen(cursor);
-        if (row >= 0) {
-          Log(L"popup", L"poll invoke submenu row=%d", row);
-          Log(L"popup", L"submenu close reason=%s", L"invoke");
-          press_inside_ = false;
-          mouse_down_ = false;
-          allied_->InvokeRow(row);
-          Dismiss(-1, DismissReason::kInvoke);
-          return;
-        }
-      } else if (in_self) {
-        POINT client = cursor;
-        ScreenToClient(hwnd_, &client);
-        const int row = content_->HitTest(client, Dpi());
-        if (row >= 0) {
-          if (content_->StickyRow(row)) {
-            Log(L"popup", L"poll sticky row=%d", row);
-            content_->StickyInvoke(row);
-            press_inside_ = false;
-            InvalidateRect(hwnd_, nullptr, FALSE);
-          } else {
-            Log(L"popup", L"poll invoke row=%d", row);
-            press_inside_ = false;
-            mouse_down_ = false;
-            Dismiss(row, DismissReason::kInvoke);
-            return;
-          }
-        }
-      }
-    }
     press_inside_ = false;
   }
   mouse_down_ = down;
@@ -742,6 +711,8 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         const int row = allied_->HitTestScreen(screen);
         if (row >= 0) {
           Log(L"popup", L"submenu close reason=%s", L"invoke");
+          press_inside_ = false;
+          mouse_down_ = false;
           allied_->InvokeRow(row);
           Dismiss(-1, DismissReason::kInvoke);
         }
@@ -753,6 +724,8 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       }
       const int index = content_->HitTest(pt, Dpi());
       if (index >= 0 && content_->StickyRow(index)) {
+        press_inside_ = false;
+        mouse_down_ = false;
         content_->StickyInvoke(index);
         InvalidateRect(hwnd_, nullptr, FALSE);
         if (after_tick_ != nullptr) {
