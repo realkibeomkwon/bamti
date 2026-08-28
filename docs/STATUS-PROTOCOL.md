@@ -15,6 +15,8 @@ bamti 상단바에 아이콘과 값, 아이콘과 토글, 아이콘과 팝업 �
 
 연결 직후 bamti가 먼저 보냅니다. 이 `hello` 한 줄이 클라이언트 수신 버퍼의 첫 줄입니다. 클라이언트가 이 줄을 읽지 않고 `upsert`를 보내도 됩니다. 수신한 바이트에서 줄바꿈으로 끝나는 완결된 줄을 모두 처리해야 합니다. 한 번에 한 줄만 꺼내면 `hello` 뒤에 온 이벤트가 새 바이트가 올 때까지 버퍼에 남습니다.
 
+수신 인스턴스는 한 번에 하나뿐입니다. 두 클라이언트가 동시에 연결하면 한쪽이 `ERROR_PIPE_BUSY`를 받습니다. 클라이언트는 연결 실패 시 짧은 간격으로 재시도해야 합니다.
+
 ```json
 {"v":2,"op":"hello","renderer":"bamti","version":"1.2.0","proto":[1,2],
  "features":["icon_glyph","icon_png","gauge","kv","toggle","button","text","separator","events"],
