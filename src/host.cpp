@@ -5,6 +5,7 @@
 #include "menu_bar.hpp"
 #include "paths.hpp"
 #include "taskbar_controller.hpp"
+#include "tray_probe.hpp"
 #include "watchdog.hpp"
 
 #include <objbase.h>
@@ -140,9 +141,37 @@ bool CommandLineHasRestoreTaskbar() {
   return restore;
 }
 
+bool CommandLineHasProbeTray() {
+  int argc = 0;
+  LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  if (argv == nullptr) {
+    return false;
+  }
+  bool probe = false;
+  for (int i = 1; i < argc; ++i) {
+    if (lstrcmpiW(argv[i], L"--probe-tray") == 0) {
+      probe = true;
+      break;
+    }
+  }
+  LocalFree(argv);
+  return probe;
+}
+
 }  // namespace
 
 int Run(HINSTANCE instance) {
+  if (CommandLineHasProbeTray()) {
+    LogInit();
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const int code = RunTrayProbe();
+    if (SUCCEEDED(com)) {
+      CoUninitialize();
+    }
+    LogShutdown();
+    return code;
+  }
+
   const bool restore_taskbar = CommandLineHasRestoreTaskbar();
   const HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\bamti.singleton");
   if (mutex == nullptr) {

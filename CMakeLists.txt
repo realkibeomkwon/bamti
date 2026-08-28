@@ -23,6 +23,7 @@ add_executable(bamti WIN32
   src/popup_surface.cpp
   src/start_menu.cpp
   src/spotlight.cpp
+  src/tray_probe.cpp
 )
 
 target_include_directories(bamti PRIVATE src)
@@ -76,6 +77,7 @@ target_link_libraries(bamti PRIVATE
   shlwapi
   winmm
   delayimp
+  uiautomationcore
 )
 
 set_property(TARGET bamti PROPERTY VS_DPI_AWARE "PerMonitor")
