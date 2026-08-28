@@ -19,6 +19,9 @@ struct BarSegment {
   std::wstring text;
   std::wstring tooltip;
   uint32_t accent = 0;
+  IconKind icon_kind = IconKind::kNone;
+  uint64_t icon_key = 0;
+  StatusIcon icon;
   RECT rect{};
 };
 

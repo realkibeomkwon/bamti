@@ -72,12 +72,17 @@ bool ClockRenderer::Initialize() {
   return SUCCEEDED(hr);
 }
 
+void ClockRenderer::DropTarget() {
+  icons_.Clear();
+  rt_.Reset();
+}
+
 void ClockRenderer::SetDpi(UINT dpi) {
   if (dpi_ == dpi) {
     return;
   }
   dpi_ = dpi == 0 ? 96 : dpi;
-  rt_.Reset();
+  DropTarget();
 }
 
 void ClockRenderer::DrawStartButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed, float height_dip,
@@ -134,6 +139,7 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
     if (FAILED(hr)) {
       return false;
     }
+    icons_.SetRenderTarget(rt_.Get());
   }
 
   LARGE_INTEGER t0{};
@@ -145,7 +151,7 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
     timings->bind_ms = QpcMs(t0, t1);
   }
   if (FAILED(hr)) {
-    rt_.Reset();
+    DropTarget();
     return false;
   }
 
@@ -184,6 +190,22 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
       DrawStartButton(brush.Get(), dark, start_hot, start_pressed, height_dip, client, seg.rect);
       continue;
     }
+    const bool bitmap =
+        seg.icon_kind == IconKind::kPng || seg.icon_kind == IconKind::kFile || seg.icon_kind == IconKind::kHicon;
+    if (seg.text.empty() && !bitmap) {
+      continue;
+    }
+    const float x0 = static_cast<float>(seg.rect.left - client.left) / px;
+    float text_x = x0;
+    if (bitmap) {
+      const int icon_px = (std::max)(1, static_cast<int>(std::lround(16.0f * px)));
+      if (ID2D1Bitmap* bmp = icons_.Get(seg.icon, icon_px)) {
+        const float icon_top = (height_dip - 16.0f) * 0.5f;
+        rt_->DrawBitmap(bmp, D2D1::RectF(x0, icon_top, x0 + 16.0f, icon_top + 16.0f), 1.0f,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        text_x = x0 + 16.0f + 4.0f;
+      }
+    }
     if (seg.text.empty()) {
       continue;
     }
@@ -195,7 +217,6 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
     if (FAILED(layout_text->GetMetrics(&metrics))) {
       continue;
     }
-    const float x = static_cast<float>(seg.rect.left - client.left) / px;
     const float y = (height_dip - metrics.height) * 0.5f;
     switch (seg.kind) {
       case SegmentKind::kWarning:
@@ -208,7 +229,7 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
         brush->SetColor(ClockTextColor(dark));
         break;
     }
-    rt_->DrawTextLayout(D2D1::Point2F(x, y), layout_text, brush.Get(), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+    rt_->DrawTextLayout(D2D1::Point2F(text_x, y), layout_text, brush.Get(), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
   }
   QueryPerformanceCounter(&t1);
   if (timings != nullptr) {
@@ -222,7 +243,7 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
     timings->end_ms = QpcMs(t0, t1);
   }
   if (hr == D2DERR_RECREATE_TARGET) {
-    rt_.Reset();
+    DropTarget();
     return false;
   }
   return SUCCEEDED(hr);

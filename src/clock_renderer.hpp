@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bar_layout.hpp"
+#include "icon_cache.hpp"
 
 #include <d2d1.h>
 #include <wrl/client.h>
@@ -29,8 +30,11 @@ class ClockRenderer {
   void DrawStartButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed, float height_dip,
                        const RECT& client, const RECT& start_rect);
 
+  void DropTarget();
+
   Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
   Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> rt_;
+  IconCache icons_;
   UINT dpi_ = 96;
 };
 

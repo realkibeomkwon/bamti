@@ -914,9 +914,10 @@ void PipeServer::HandleV1(Client* client, std::string_view line) {
     if (!AllowUpsertLocked(item.id, client->id)) {
       return;
     }
-    auto it = items_.find(item.id);
+    std::string key = item.id;
+    auto it = items_.find(key);
     item.revision = (it == items_.end()) ? 1 : it->second.item.revision + 1;
-    items_[item.id] = Record{std::move(item), client->id};
+    items_.insert_or_assign(std::move(key), Record{std::move(item), client->id});
     changed = true;
   }
   if (changed) {
@@ -964,9 +965,10 @@ void PipeServer::HandleV2(Client* client, std::string_view line) {
     if (!AllowUpsertLocked(item.id, client->id)) {
       return;
     }
-    auto it = items_.find(item.id);
+    std::string key = item.id;
+    auto it = items_.find(key);
     item.revision = (it == items_.end()) ? 1 : it->second.item.revision + 1;
-    items_[item.id] = Record{std::move(item), client->id};
+    items_.insert_or_assign(std::move(key), Record{std::move(item), client->id});
     changed = true;
   } else if (*op == "patch") {
     const auto id = json::GetString(line, "id");

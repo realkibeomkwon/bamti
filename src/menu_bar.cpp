@@ -899,7 +899,7 @@ void MenuBar::RefreshLayout() {
       InvalidateRect(hwnd_, nullptr, FALSE);
       return;
     }
-    if (a.text != b.text || a.accent != b.accent) {
+    if (a.text != b.text || a.accent != b.accent || a.icon_key != b.icon_key) {
       InvalidateRect(hwnd_, &b.rect, FALSE);
     }
   }

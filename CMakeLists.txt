@@ -15,6 +15,7 @@ add_executable(bamti WIN32
   src/menu_bar.cpp
   src/clock_renderer.cpp
   src/bar_layout.cpp
+  src/icon_cache.cpp
   src/theme.cpp
   src/pipe_server.cpp
   src/taskbar_controller.cpp

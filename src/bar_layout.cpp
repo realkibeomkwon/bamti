@@ -12,8 +12,24 @@ constexpr float kStatusClockGapDip = 20.0f;
 constexpr float kItemGapDip = 14.0f;
 constexpr float kStartPadLeftDip = 4.0f;
 constexpr float kStartHitWidthDip = 34.0f;
+constexpr float kStatusIconDip = 16.0f;
+constexpr float kStatusIconGapDip = 4.0f;
 constexpr size_t kLayoutCacheMax = 64;
 constexpr wchar_t kOverflowGlyph[] = L"\u2039";  // ‹
+
+bool IconIsBitmap(IconKind kind) {
+  return kind == IconKind::kPng || kind == IconKind::kFile || kind == IconKind::kHicon;
+}
+
+bool ItemOnBar(const StatusItem& item) {
+  if (!item.visible) {
+    return false;
+  }
+  if (IconIsBitmap(item.icon.kind)) {
+    return true;
+  }
+  return !StatusBarText(item).empty();
+}
 
 }  // namespace
 
@@ -190,19 +206,38 @@ const BarLayoutResult& BarLayout::Compute(const RECT& client, const std::wstring
   bool overflowed = false;
   for (size_t i = 0; i < ordered.size(); ++i) {
     const StatusItem& item = ordered[i];
+    if (!item.visible) {
+      last_.overflow.push_back(item);
+      overflowed = true;
+      continue;
+    }
+    if (!ItemOnBar(item)) {
+      continue;
+    }
     const std::wstring label = StatusBarText(item);
-    if (label.empty()) {
+    const bool bitmap = IconIsBitmap(item.icon.kind);
+    float text_w = 0.0f;
+    if (!label.empty()) {
+      CacheEntry* entry = GetOrCreate(label);
+      if (entry == nullptr && !bitmap) {
+        continue;
+      }
+      if (entry != nullptr) {
+        text_w = entry->metrics.widthIncludingTrailingWhitespace;
+      }
+    } else if (!bitmap) {
       continue;
     }
-    CacheEntry* entry = GetOrCreate(label);
-    if (entry == nullptr) {
+    const float icon_w = bitmap ? kStatusIconDip : 0.0f;
+    const float gap = (bitmap && text_w > 0.0f) ? kStatusIconGapDip : 0.0f;
+    const float width = icon_w + gap + text_w;
+    if (width <= 0.0f) {
       continue;
     }
-    const float width = entry->metrics.widthIncludingTrailingWhitespace;
     const float x = cursor - width;
     if (x < left_limit) {
       for (size_t j = i; j < ordered.size(); ++j) {
-        if (!StatusBarText(ordered[j]).empty()) {
+        if (ItemOnBar(ordered[j]) || !ordered[j].visible) {
           last_.overflow.push_back(ordered[j]);
         }
       }
@@ -215,6 +250,11 @@ const BarLayoutResult& BarLayout::Compute(const RECT& client, const std::wstring
     seg.text = label;
     seg.tooltip = item.tooltip;
     seg.accent = item.accent;
+    if (bitmap) {
+      seg.icon_kind = item.icon.kind;
+      seg.icon_key = item.icon.cache_key;
+      seg.icon = item.icon;
+    }
     seg.rect = PixelRect(client, x, width);
     cursor = x - kItemGapDip;
     status_x.push_back(x);
