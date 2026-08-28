@@ -52,6 +52,15 @@ def main() -> int:
     stop = threading.Event()
     lock = threading.Lock()
 
+    def ping_loop() -> None:
+        while not stop.wait(5.0):
+            with lock:
+                try:
+                    send(pipe, {"v": 2, "op": "ping"})
+                except OSError:
+                    stop.set()
+                    return
+
     def tick() -> None:
         nonlocal price
         while not stop.wait(30):
@@ -60,11 +69,15 @@ def main() -> int:
                 send(pipe, {"v": 2, "op": "patch", "id": ITEM_ID, "segment": {"text": f"{price:,}"},
                             "panel": item(price, alerts)["panel"]})
 
+    threading.Thread(target=ping_loop, daemon=True).start()
     threading.Thread(target=tick, daemon=True).start()
     buf = b""
     try:
-        while True:
-            chunk = pipe.read(1)
+        while not stop.is_set():
+            try:
+                chunk = pipe.read(1)
+            except OSError:
+                break
             if not chunk:
                 break
             buf += chunk
@@ -82,10 +95,11 @@ def main() -> int:
     except (KeyboardInterrupt, OSError):
         pass
     stop.set()
-    try:
-        send(pipe, {"v": 2, "op": "remove", "id": ITEM_ID})
-    except OSError:
-        pass
+    with lock:
+        try:
+            send(pipe, {"v": 2, "op": "remove", "id": ITEM_ID})
+        except OSError:
+            pass
     pipe.close()
     return 0
 
