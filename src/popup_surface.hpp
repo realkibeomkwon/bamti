@@ -57,6 +57,7 @@ class PopupSurface {
   HWND hwnd() const { return hwnd_; }
 
   void SetDark(bool dark);
+  void Tick();
 
  private:
   static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -67,7 +68,7 @@ class PopupSurface {
   void Place(SIZE size, POINT anchor_screen, Anchor mode);
   void ApplyChrome();
   void ArmGuardTimer();
-  void OnGuardTimer();
+  void Tick(const wchar_t* src);
   UINT Dpi() const;
 
   HWND hwnd_ = nullptr;
@@ -81,6 +82,7 @@ class PopupSurface {
   bool press_inside_ = false;
   bool saw_mousemove_ = false;
   bool armed_ = false;
+  bool ticking_ = false;
   bool dark_ = true;
   int hot_ = -1;
   unsigned tick_ = 0;

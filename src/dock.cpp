@@ -1713,6 +1713,7 @@ void Dock::UpdateIdleTimer() {
 void Dock::PollPointer() {
   RefreshFullscreen();
   if (popup_.IsOpen()) {
+    popup_.Tick();
     CancelHideTimer();
     return;
   }

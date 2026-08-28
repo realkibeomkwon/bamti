@@ -341,15 +341,28 @@ void PopupSurface::ApplyChrome() {
 }
 
 void PopupSurface::ArmGuardTimer() {
-  if (hwnd_ != nullptr) {
-    SetTimer(hwnd_, kPopupGuardTimer, kPopupGuardMs, nullptr);
-  }
-}
-
-void PopupSurface::OnGuardTimer() {
-  if (!open_ || hwnd_ == nullptr) {
+  if (hwnd_ == nullptr) {
     return;
   }
+  const UINT_PTR id = SetTimer(hwnd_, kPopupGuardTimer, kPopupGuardMs, nullptr);
+  Log(L"popup", L"arm guard id=%llu err=%lu", static_cast<unsigned long long>(id), id == 0 ? GetLastError() : 0);
+}
+
+void PopupSurface::Tick() {
+  Tick(L"owner");
+}
+
+void PopupSurface::Tick(const wchar_t* src) {
+  if (!open_ || hwnd_ == nullptr || ticking_) {
+    return;
+  }
+  struct TickGuard {
+    bool& busy;
+    explicit TickGuard(bool& flag) : busy(flag) { busy = true; }
+    ~TickGuard() { busy = false; }
+  } guard(ticking_);
+  static_cast<void>(guard);
+
   const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
   if (esc && !esc_down_) {
     Dismiss(-1, DismissReason::kEscape);
@@ -402,8 +415,9 @@ void PopupSurface::OnGuardTimer() {
   }
 
   ++tick_;
-  if (tick_ % 20 == 0) {
-    Log(L"popup", L"alive tick=%u hot=%d inside=%d", tick_, hot_, inside ? 1 : 0);
+  if (tick_ <= 5 || tick_ % 20 == 0) {
+    Log(L"popup", L"alive tick=%u src=%s armed=%d hot=%d inside=%d", tick_, src != nullptr ? src : L"?",
+        armed_ ? 1 : 0, hot_, inside ? 1 : 0);
   }
 
   if (content_ != nullptr) {
@@ -531,7 +545,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_TIMER:
       if (wp == kPopupGuardTimer) {
-        OnGuardTimer();
+        Tick(L"timer");
       }
       return 0;
     case WM_MOUSEMOVE: {

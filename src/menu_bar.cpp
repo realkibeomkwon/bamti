@@ -451,6 +451,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       return 0;
     case WM_TIMER:
       if (wparam == kClockTimerId) {
+        if (status_popup_.IsOpen()) {
+          status_popup_.Tick();
+        }
         status_.DropStale();
         taskbar_.EnsureHidden();
         const std::wstring clock = clock_.CurrentTimeText();
