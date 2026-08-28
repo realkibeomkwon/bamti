@@ -1,12 +1,14 @@
 #include "pipe_server.hpp"
 
 #include "json_line.hpp"
+#include "log.hpp"
 
 #include <aclapi.h>
 #include <sddl.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <optional>
 
 namespace bamti {
@@ -15,7 +17,8 @@ namespace {
 constexpr DWORD kPipeBuffer = 16384;
 constexpr DWORD kMaxPipeInstances = 16;
 constexpr ULONGLONG kHeartbeatMs = 15000;
-constexpr size_t kMaxLineBytes = 16384;
+constexpr size_t kMaxLineBytes = kStatusLineMaxBytes;
+constexpr ULONGLONG kNotifyCoalesceMs = 50;
 constexpr size_t kMaxIdBytes = 128;
 
 struct UserOnlySd {
@@ -103,13 +106,297 @@ std::wstring TruncateLabel(std::wstring text) {
 }
 
 float ClampUnit(double value) {
-  if (value < 0.0) {
+  if (!std::isfinite(value) || value < 0.0) {
     return 0.0f;
   }
   if (value > 1.0) {
     return 1.0f;
   }
   return static_cast<float>(value);
+}
+
+bool DecodeBase64(std::string_view in, std::vector<uint8_t>* out) {
+  static const int8_t kTable[256] = {
+      -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+      -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1, -1, 63, 52, 53, 54, 55,
+      56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1, -1, 0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12,
+      13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, -1, -1, 26, 27, 28, 29, 30, 31, 32,
+      33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1};
+  out->clear();
+  int val = 0;
+  int bits = 0;
+  for (unsigned char c : in) {
+    if (c == '=' || c <= ' ') {
+      continue;
+    }
+    const int8_t d = kTable[c];
+    if (d < 0) {
+      out->clear();
+      return false;
+    }
+    val = (val << 6) | d;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out->push_back(static_cast<uint8_t>((val >> bits) & 0xFF));
+    }
+  }
+  return true;
+}
+
+void SkipRawWs(std::string_view& s) {
+  while (!s.empty() && static_cast<unsigned char>(s.front()) <= ' ') {
+    s.remove_prefix(1);
+  }
+}
+
+uint32_t ParseHexRgb(std::string_view s) {
+  if (s.size() < 7 || s.front() != '#') {
+    return 0;
+  }
+  unsigned rgb = 0;
+  for (int i = 1; i <= 6; ++i) {
+    unsigned nibble = 0;
+    const char c = s[static_cast<size_t>(i)];
+    if (c >= '0' && c <= '9') {
+      nibble = static_cast<unsigned>(c - '0');
+    } else if (c >= 'a' && c <= 'f') {
+      nibble = static_cast<unsigned>(c - 'a' + 10);
+    } else if (c >= 'A' && c <= 'F') {
+      nibble = static_cast<unsigned>(c - 'A' + 10);
+    } else {
+      return 0;
+    }
+    rgb = (rgb << 4) | nibble;
+  }
+  return rgb;
+}
+
+uint32_t ParseAccentRaw(std::string_view raw) {
+  SkipRawWs(raw);
+  if (raw.empty()) {
+    return 0;
+  }
+  if (raw.front() == '"') {
+    raw.remove_prefix(1);
+    const size_t end = raw.find('"');
+    if (end == std::string_view::npos) {
+      return 0;
+    }
+    return ParseHexRgb(raw.substr(0, end));
+  }
+  char* end = nullptr;
+  const unsigned long value = std::strtoul(raw.data(), &end, 10);
+  if (end == raw.data()) {
+    return 0;
+  }
+  return static_cast<uint32_t>(value);
+}
+
+StatusState ParseState(std::string_view s) {
+  if (s == "warn") {
+    return StatusState::kWarn;
+  }
+  if (s == "error") {
+    return StatusState::kError;
+  }
+  if (s == "on") {
+    return StatusState::kOn;
+  }
+  if (s == "off") {
+    return StatusState::kOff;
+  }
+  if (s == "busy") {
+    return StatusState::kBusy;
+  }
+  return StatusState::kNormal;
+}
+
+StatusIcon ParseIconV2(std::string_view raw) {
+  StatusIcon icon;
+  const auto kind = json::GetString(raw, "kind");
+  if (!kind) {
+    return icon;
+  }
+  if (*kind == "glyph") {
+    if (const auto glyph = json::GetString(raw, "glyph")) {
+      icon.kind = IconKind::kGlyph;
+      icon.glyph = TruncateWide(Utf8ToWide(*glyph), kStatusGlyphMaxChars);
+    }
+  } else if (*kind == "png") {
+    if (const auto data = json::GetString(raw, "data")) {
+      std::vector<uint8_t> bytes;
+      if (!DecodeBase64(*data, &bytes) || bytes.empty()) {
+        // omit
+      } else if (bytes.size() > kStatusIconPngMaxBytes) {
+        Log(L"status", L"png icon rejected size=%zu", bytes.size());
+      } else {
+        icon.kind = IconKind::kPng;
+        icon.bytes = std::move(bytes);
+      }
+    }
+  } else if (*kind == "file") {
+    if (const auto path = json::GetString(raw, "path")) {
+      std::wstring wide = Utf8ToWide(*path);
+      if (wide.size() > 4096) {
+        wide.resize(4096);
+      }
+      auto ascii_eq = [](wchar_t a, wchar_t b) {
+        if (a >= L'A' && a <= L'Z') {
+          a = static_cast<wchar_t>(a - L'A' + L'a');
+        }
+        return a == b;
+      };
+      const bool png = wide.size() >= 4 && ascii_eq(wide[wide.size() - 4], L'.') &&
+                       ascii_eq(wide[wide.size() - 3], L'p') && ascii_eq(wide[wide.size() - 2], L'n') &&
+                       ascii_eq(wide[wide.size() - 1], L'g');
+      const bool ico = wide.size() >= 4 && ascii_eq(wide[wide.size() - 4], L'.') &&
+                       ascii_eq(wide[wide.size() - 3], L'i') && ascii_eq(wide[wide.size() - 2], L'c') &&
+                       ascii_eq(wide[wide.size() - 1], L'o');
+      if ((png || ico) && !wide.empty()) {
+        icon.kind = IconKind::kFile;
+        icon.path = std::move(wide);
+      }
+    }
+  }
+  if (icon.kind != IconKind::kNone) {
+    icon.cache_key = HashStatusIcon(icon);
+  }
+  return icon;
+}
+
+void ParseRowsV2(std::string_view raw, std::vector<StatusRow>* rows) {
+  json::ForEachArray(raw, [&](std::string_view one) {
+    if (rows->size() >= kStatusRowMax) {
+      return true;
+    }
+    const auto type = json::GetString(one, "type");
+    StatusRow row;
+    if (!type) {
+      return true;
+    }
+    if (*type == "gauge") {
+      row.type = RowType::kGauge;
+    } else if (*type == "kv") {
+      row.type = RowType::kKeyValue;
+    } else if (*type == "text") {
+      row.type = RowType::kText;
+    } else if (*type == "separator") {
+      row.type = RowType::kSeparator;
+    } else if (*type == "toggle") {
+      row.type = RowType::kToggle;
+    } else if (*type == "button") {
+      row.type = RowType::kButton;
+    } else {
+      if (const auto fallback = json::GetString(one, "fallback_text")) {
+        row.type = RowType::kText;
+        row.fallback_text = TruncateWide(Utf8ToWide(*fallback), kStatusPanelTextMaxChars);
+        row.label = row.fallback_text;
+        rows->push_back(std::move(row));
+      }
+      return true;
+    }
+    if (const auto row_id = json::GetString(one, "row_id")) {
+      row.row_id = row_id->size() > kMaxIdBytes ? row_id->substr(0, kMaxIdBytes) : *row_id;
+    }
+    if (const auto label = json::GetString(one, "label")) {
+      row.label = TruncateWide(Utf8ToWide(*label), kStatusPanelTextMaxChars);
+    }
+    if (const auto value_text = json::GetString(one, "value_text")) {
+      row.value_text = TruncateWide(Utf8ToWide(*value_text), kStatusPanelTextMaxChars);
+    }
+    if (row.type == RowType::kKeyValue) {
+      if (const auto value = json::GetString(one, "value")) {
+        row.value_text = TruncateWide(Utf8ToWide(*value), kStatusPanelTextMaxChars);
+      }
+    }
+    if (const auto detail = json::GetString(one, "detail")) {
+      row.detail = TruncateWide(Utf8ToWide(*detail), kStatusPanelTextMaxChars);
+    }
+    if (const auto note = json::GetString(one, "note")) {
+      row.note = TruncateWide(Utf8ToWide(*note), kStatusPanelTextMaxChars);
+    }
+    if (row.type == RowType::kText) {
+      if (const auto text = json::GetString(one, "text")) {
+        row.label = TruncateWide(Utf8ToWide(*text), kStatusPanelTextMaxChars);
+      }
+    }
+    if (const auto fallback = json::GetString(one, "fallback_text")) {
+      row.fallback_text = TruncateWide(Utf8ToWide(*fallback), kStatusPanelTextMaxChars);
+    }
+    if (const auto value = json::GetDouble(one, "value")) {
+      row.value = ClampUnit(*value);
+    }
+    if (const auto on = json::GetBool(one, "on")) {
+      row.on = *on;
+    }
+    if (const auto style = json::GetString(one, "style")) {
+      if (row.type == RowType::kButton) {
+        row.danger = (*style == "danger");
+      } else if (row.type == RowType::kText && *style == "note") {
+        row.note = L"note";
+      }
+    }
+    rows->push_back(std::move(row));
+    return true;
+  });
+}
+
+void ApplySegmentV2(std::string_view raw, StatusItem* item) {
+  if (const auto text = json::GetString(raw, "text")) {
+    item->text = TruncateLabel(Utf8ToWide(*text));
+  }
+  if (const auto icon = json::GetRaw(raw, "icon")) {
+    item->icon = ParseIconV2(*icon);
+  }
+  if (const auto tip = json::GetString(raw, "tooltip")) {
+    item->tooltip = TruncateWide(Utf8ToWide(*tip), kStatusPanelTextMaxChars);
+  }
+  if (const auto state = json::GetString(raw, "state")) {
+    item->state = ParseState(*state);
+  }
+  if (const auto accent = json::GetRaw(raw, "accent")) {
+    item->accent = ParseAccentRaw(*accent);
+  }
+  if (const auto pri = json::GetInt(raw, "priority")) {
+    item->priority = *pri;
+  }
+  if (const auto visible = json::GetBool(raw, "visible")) {
+    item->visible = *visible;
+  }
+}
+
+std::optional<StatusPanel> ParsePanelV2(std::string_view raw) {
+  SkipRawWs(raw);
+  if (raw.empty() || raw.front() != '{') {
+    return std::nullopt;
+  }
+  StatusPanel panel;
+  if (const auto title = json::GetString(raw, "title")) {
+    panel.title = TruncateWide(Utf8ToWide(*title), kStatusPanelTextMaxChars);
+  }
+  if (const auto subtitle = json::GetString(raw, "subtitle")) {
+    panel.subtitle = TruncateWide(Utf8ToWide(*subtitle), kStatusPanelTextMaxChars);
+  }
+  if (const auto updated = json::GetString(raw, "updated")) {
+    panel.updated_text = TruncateWide(Utf8ToWide(*updated), kStatusPanelTextMaxChars);
+  }
+  if (const auto rows = json::GetRaw(raw, "rows")) {
+    ParseRowsV2(*rows, &panel.rows);
+  }
+  if (panel.title.empty() && panel.rows.empty()) {
+    return std::nullopt;
+  }
+  return panel;
+}
+
+void ApplyPanelPatch(std::string_view raw, StatusItem* item) {
+  SkipRawWs(raw);
+  if (raw.empty() || raw.front() == 'n') {
+    item->panel.reset();
+    return;
+  }
+  item->panel = ParsePanelV2(raw);
 }
 
 std::optional<StatusPanel> ParsePanel(std::string_view raw) {
@@ -195,6 +482,7 @@ ULONGLONG NowMs() {
 
 struct PipeServer::Client {
   uint64_t id = 0;
+  int proto = 1;
   HANDLE pipe = INVALID_HANDLE_VALUE;
   std::thread thread;
   std::mutex write_mu;
@@ -282,6 +570,7 @@ void PipeServer::DropStale() {
   if (closed) {
     // ClientLoop removes items and notifies the UI when ReadFile unblocks.
   }
+  FlushNotify();
 }
 
 std::vector<StatusItem> PipeServer::Snapshot() const {
@@ -295,6 +584,11 @@ std::vector<StatusItem> PipeServer::Snapshot() const {
 }
 
 void PipeServer::SendClick(const std::string& id, std::string_view button) {
+  SendEvent(id, "click", {}, button);
+}
+
+void PipeServer::SendEvent(const std::string& id, std::string_view event, std::string_view row_id,
+                           std::string_view button, bool on) {
   uint64_t owner = 0;
   {
     std::lock_guard lock(mu_);
@@ -317,10 +611,37 @@ void PipeServer::SendClick(const std::string& id, std::string_view button) {
   if (target == nullptr) {
     return;
   }
+  if (target->proto == 2) {
+    std::string line = "{\"v\":2,\"op\":\"event\",\"id\":\"";
+    line += json::Escape(id);
+    line += "\",\"event\":\"";
+    line += json::Escape(event);
+    line += "\"";
+    if (!row_id.empty()) {
+      line += ",\"row_id\":\"";
+      line += json::Escape(row_id);
+      line += "\"";
+    }
+    if (!button.empty()) {
+      line += ",\"button\":\"";
+      line += json::Escape(button);
+      line += "\"";
+    }
+    if (event == "toggle") {
+      line += on ? ",\"on\":true" : ",\"on\":false";
+    }
+    line += "}";
+    WriteLine(target, line);
+    return;
+  }
+  if (event != "click" && event != "invoke") {
+    return;
+  }
+  const std::string_view v1_button = !button.empty() ? button : row_id;
   std::string line = "{\"v\":1,\"op\":\"click\",\"id\":\"";
   line += json::Escape(id);
   line += "\",\"button\":\"";
-  line += json::Escape(button);
+  line += json::Escape(v1_button);
   line += "\"}";
   WriteLine(target, line);
 }
@@ -424,6 +745,12 @@ void PipeServer::ListenLoop() {
 }
 
 void PipeServer::ClientLoop(Client* client) {
+  WriteLine(client,
+            "{\"v\":2,\"op\":\"hello\",\"renderer\":\"bamti\",\"version\":\"1.2.0\",\"proto\":[1,2],"
+            "\"features\":[\"icon_glyph\",\"icon_png\",\"gauge\",\"kv\",\"toggle\",\"button\",\"text\","
+            "\"separator\",\"events\"],\"limits\":{\"segment_text\":32,\"panel_rows\":32,\"panel_text\":128,"
+            "\"icon_png_bytes\":8192,\"upserts_per_sec\":10}}");
+
   std::string pending;
   char chunk[1024];
   OVERLAPPED ov{};
@@ -442,12 +769,24 @@ void PipeServer::ClientLoop(Client* client) {
         break;
       }
       const HANDLE waits[] = {stop_event_, ov.hEvent};
-      const DWORD wait = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
-      if (wait != WAIT_OBJECT_0 + 1) {
-        CancelIoEx(client->pipe, &ov);
+      bool got = false;
+      for (;;) {
+        const DWORD wait = WaitForMultipleObjects(2, waits, FALSE, NotifyWaitTimeoutMs());
+        if (wait == WAIT_TIMEOUT) {
+          FlushNotify();
+          continue;
+        }
+        if (wait != WAIT_OBJECT_0 + 1) {
+          CancelIoEx(client->pipe, &ov);
+          break;
+        }
+        if (!GetOverlappedResult(client->pipe, &ov, &read, FALSE) || read == 0) {
+          break;
+        }
+        got = true;
         break;
       }
-      if (!GetOverlappedResult(client->pipe, &ov, &read, FALSE) || read == 0) {
+      if (!got) {
         break;
       }
     } else if (read == 0) {
@@ -492,14 +831,31 @@ void PipeServer::ClientLoop(Client* client) {
       }
     }
   }
-  NotifyUi();
+  {
+    std::lock_guard lock(mu_);
+    notify_pending_ = true;
+  }
+  FlushNotify();
 }
 
 void PipeServer::HandleLine(Client* client, std::string_view line) {
   client->last_tick.store(NowMs());
-  const auto op = json::GetString(line, "op");
   const auto ver = json::GetInt(line, "v");
-  if (!op || !ver || *ver != 1) {
+  if (!ver) {
+    return;
+  }
+  if (*ver == 1) {
+    return HandleV1(client, line);
+  }
+  if (*ver == 2) {
+    return HandleV2(client, line);
+  }
+}
+
+void PipeServer::HandleV1(Client* client, std::string_view line) {
+  client->proto = 1;
+  const auto op = json::GetString(line, "op");
+  if (!op) {
     return;
   }
   if (*op == "ping") {
@@ -555,6 +911,9 @@ void PipeServer::HandleLine(Client* client, std::string_view line) {
       item.panel = ParsePanel(*panel);
     }
     std::lock_guard lock(mu_);
+    if (!AllowUpsertLocked(item.id, client->id)) {
+      return;
+    }
     auto it = items_.find(item.id);
     item.revision = (it == items_.end()) ? 1 : it->second.item.revision + 1;
     items_[item.id] = Record{std::move(item), client->id};
@@ -565,15 +924,148 @@ void PipeServer::HandleLine(Client* client, std::string_view line) {
   }
 }
 
+void PipeServer::HandleV2(Client* client, std::string_view line) {
+  client->proto = 2;
+  const auto op = json::GetString(line, "op");
+  if (!op || *op == "ping" || *op == "hello") {
+    return;
+  }
+
+  bool changed = false;
+  if (*op == "remove") {
+    const auto id = json::GetString(line, "id");
+    if (!id || !ValidId(*id)) {
+      return;
+    }
+    std::lock_guard lock(mu_);
+    const auto it = items_.find(*id);
+    if (it != items_.end() && it->second.owner == client->id) {
+      items_.erase(it);
+      changed = true;
+    }
+  } else if (*op == "upsert") {
+    const auto id = json::GetString(line, "id");
+    if (!id || !ValidId(*id)) {
+      return;
+    }
+    StatusItem item;
+    item.id = *id;
+    item.source = "pipe";
+    if (const auto segment = json::GetRaw(line, "segment")) {
+      ApplySegmentV2(*segment, &item);
+    }
+    if (item.icon.kind == IconKind::kNone && item.text.empty()) {
+      return;
+    }
+    if (const auto panel = json::GetRaw(line, "panel")) {
+      ApplyPanelPatch(*panel, &item);
+    }
+    std::lock_guard lock(mu_);
+    if (!AllowUpsertLocked(item.id, client->id)) {
+      return;
+    }
+    auto it = items_.find(item.id);
+    item.revision = (it == items_.end()) ? 1 : it->second.item.revision + 1;
+    items_[item.id] = Record{std::move(item), client->id};
+    changed = true;
+  } else if (*op == "patch") {
+    const auto id = json::GetString(line, "id");
+    if (!id || !ValidId(*id)) {
+      return;
+    }
+    std::lock_guard lock(mu_);
+    const auto it = items_.find(*id);
+    if (it == items_.end() || it->second.owner != client->id) {
+      return;
+    }
+    StatusItem item = it->second.item;
+    if (const auto segment = json::GetRaw(line, "segment")) {
+      ApplySegmentV2(*segment, &item);
+    }
+    if (const auto panel = json::GetRaw(line, "panel")) {
+      ApplyPanelPatch(*panel, &item);
+    }
+    item.revision += 1;
+    it->second.item = std::move(item);
+    changed = true;
+  }
+  if (changed) {
+    NotifyUi();
+  }
+}
+
+bool PipeServer::AllowUpsertLocked(const std::string& id, uint64_t owner) {
+  const auto it = items_.find(id);
+  if (it != items_.end()) {
+    return it->second.owner == owner;
+  }
+  if (items_.size() >= kStatusItemsMax) {
+    if (!logged_total_limit_) {
+      logged_total_limit_ = true;
+      Log(L"status", L"total item limit %zu reached; dropping upsert", kStatusItemsMax);
+    }
+    return false;
+  }
+  size_t owned = 0;
+  for (const auto& pair : items_) {
+    if (pair.second.owner == owner) {
+      ++owned;
+    }
+  }
+  if (owned >= kStatusItemsPerClient) {
+    if (!logged_client_limit_) {
+      logged_client_limit_ = true;
+      Log(L"status", L"per-client item limit %zu reached; dropping upsert", kStatusItemsPerClient);
+    }
+    return false;
+  }
+  return true;
+}
+
 void PipeServer::NotifyUi() {
   HWND hwnd = nullptr;
   {
     std::lock_guard lock(mu_);
+    const ULONGLONG now = NowMs();
+    if (last_notify_ms_ != 0 && now - last_notify_ms_ < kNotifyCoalesceMs) {
+      notify_pending_ = true;
+      return;
+    }
+    last_notify_ms_ = now;
+    notify_pending_ = false;
     hwnd = notify_;
   }
   if (hwnd != nullptr) {
     PostMessageW(hwnd, kStatusChangedMsg, 0, 0);
   }
+}
+
+void PipeServer::FlushNotify() {
+  HWND hwnd = nullptr;
+  {
+    std::lock_guard lock(mu_);
+    if (!notify_pending_) {
+      return;
+    }
+    notify_pending_ = false;
+    last_notify_ms_ = NowMs();
+    hwnd = notify_;
+  }
+  if (hwnd != nullptr) {
+    PostMessageW(hwnd, kStatusChangedMsg, 0, 0);
+  }
+}
+
+DWORD PipeServer::NotifyWaitTimeoutMs() {
+  std::lock_guard lock(mu_);
+  if (!notify_pending_) {
+    return INFINITE;
+  }
+  const ULONGLONG now = NowMs();
+  if (last_notify_ms_ == 0 || now - last_notify_ms_ >= kNotifyCoalesceMs) {
+    return 0;
+  }
+  return static_cast<DWORD>(kNotifyCoalesceMs - (now - last_notify_ms_));
 }
 
 void PipeServer::CloseClientPipe(Client* client) {

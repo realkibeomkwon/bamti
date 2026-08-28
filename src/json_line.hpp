@@ -313,6 +313,26 @@ inline std::optional<double> GetDouble(std::string_view json, std::string_view k
   return found;
 }
 
+inline std::optional<bool> GetBool(std::string_view json, std::string_view key) {
+  std::optional<bool> found;
+  const bool ok = ForEachField(json, [&](const std::string& k, std::string_view raw) {
+    if (k == key) {
+      std::string_view cur = raw;
+      SkipWs(cur);
+      if (cur.size() >= 4 && cur.substr(0, 4) == "true") {
+        found = true;
+      } else if (cur.size() >= 5 && cur.substr(0, 5) == "false") {
+        found = false;
+      }
+    }
+    return true;
+  });
+  if (!ok) {
+    return std::nullopt;
+  }
+  return found;
+}
+
 inline std::optional<uint32_t> GetUint32(std::string_view json, std::string_view key) {
   std::optional<uint32_t> found;
   const bool ok = ForEachField(json, [&](const std::string& k, std::string_view raw) {
