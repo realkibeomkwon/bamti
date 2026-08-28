@@ -7,6 +7,7 @@
 #include "spotlight.hpp"
 #include "start_menu.hpp"
 #include "status_item.hpp"
+#include "status_panel.hpp"
 #include "status_registry.hpp"
 #include "taskbar_controller.hpp"
 
@@ -20,9 +21,6 @@
 namespace bamti {
 
 inline constexpr wchar_t kMenuBarClass[] = L"bamti.MenuBar";
-
-class StatusPanelContent;
-class OverflowContent;
 
 class MenuBar {
  public:
@@ -64,13 +62,12 @@ class MenuBar {
   void OpenStatusPanel(const StatusHit& hit);
   void OpenOverflow();
   const BarSegment* HitSegment(POINT client) const;
+  void ArmToggle(std::string id, std::string row_id, uint64_t revision, bool on);
+  void OnToggleTimeout();
   bool InstallWinHook();
   void RemoveWinHook();
   UINT Dpi() const;
   int BarHeightPx() const;
-
-  friend class StatusPanelContent;
-  friend class OverflowContent;
 
   HWND hwnd_ = nullptr;
   HWND tooltip_ = nullptr;
@@ -121,6 +118,15 @@ class MenuBar {
   std::unique_ptr<StatusPanelContent> status_panel_;
   std::unique_ptr<OverflowContent> overflow_panel_;
   std::wstring tooltip_text_;
+  std::string open_panel_id_;
+  struct PendingToggle {
+    std::string id;
+    std::string row_id;
+    uint64_t revision = 0;
+    bool on = false;
+  };
+  PendingToggle pending_toggle_{};
+  bool toggle_armed_ = false;
 };
 
 }  // namespace bamti

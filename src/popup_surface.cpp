@@ -508,7 +508,9 @@ void PopupSurface::Tick(const wchar_t* src) {
         if (row >= 0) {
           if (content_->StickyRow(row)) {
             Log(L"popup", L"poll sticky row=%d", row);
+            content_->StickyInvoke(row);
             press_inside_ = false;
+            InvalidateRect(hwnd_, nullptr, FALSE);
           } else {
             Log(L"popup", L"poll invoke row=%d", row);
             press_inside_ = false;
@@ -751,6 +753,8 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       }
       const int index = content_->HitTest(pt, Dpi());
       if (index >= 0 && content_->StickyRow(index)) {
+        content_->StickyInvoke(index);
+        InvalidateRect(hwnd_, nullptr, FALSE);
         if (after_tick_ != nullptr) {
           after_tick_(after_tick_ctx_);
         }

@@ -21,6 +21,7 @@ class PopupContent {
   virtual void Invoke(int index) = 0;
   virtual int RowCount() const { return 0; }
   virtual bool StickyRow(int /*index*/) const { return false; }
+  virtual void StickyInvoke(int /*index*/) {}
 };
 
 float PopupTextWidth(UINT dpi, const std::wstring& text);

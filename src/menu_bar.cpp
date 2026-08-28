@@ -25,21 +25,11 @@ constexpr UINT kToggleSpotlightMsg = WM_APP + 8;
 constexpr UINT kFullscreenWatchMsg = WM_APP + 9;
 constexpr UINT_PTR kClockTimerId = 1;
 constexpr UINT_PTR kRepaintTimerId = 2;
+constexpr UINT_PTR kToggleTimerId = 3;
 constexpr UINT kRepaintCoalesceMs = 16;
+constexpr UINT kToggleTimeoutMs = 2000;
 constexpr int kBarHeightDip = 32;
 constexpr UINT kExitCommand = 1;
-
-constexpr int kPanelPadDip = 12;
-constexpr int kPanelMinWidthDip = 280;
-constexpr int kPanelMaxWidthDip = 360;
-constexpr int kPanelTitleDip = 22;
-constexpr int kPanelSubDip = 18;
-constexpr int kPanelGaugeLabelDip = 18;
-constexpr int kPanelGaugeBarDip = 6;
-constexpr int kPanelGaugeNoteDip = 16;
-constexpr int kPanelGaugeGapDip = 10;
-constexpr int kPanelSepDip = 9;
-constexpr int kPanelActionDip = 28;
 
 MenuBar* g_menu_bar = nullptr;
 HHOOK g_key_hook = nullptr;
@@ -144,321 +134,7 @@ double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
   return (end.QuadPart - start.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
 }
 
-std::string WideToUtf8(std::wstring_view wide) {
-  if (wide.empty()) {
-    return {};
-  }
-  const int n = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr,
-                                   nullptr);
-  if (n <= 0) {
-    return {};
-  }
-  std::string out(static_cast<size_t>(n), '\0');
-  WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), n, nullptr, nullptr);
-  return out;
-}
-
 }  // namespace
-
-class StatusPanelContent : public PopupContent {
- public:
-  void Reset(MenuBar* owner, StatusItem item) {
-    owner_ = owner;
-    item_ = std::move(item);
-    action_hits_.clear();
-  }
-
-  int RowCount() const override { return static_cast<int>(action_hits_.size()); }
-
-  SIZE Measure(UINT dpi) override {
-    action_hits_.clear();
-    const StatusPanel* panel = item_.panel ? &*item_.panel : nullptr;
-    if (panel == nullptr) {
-      return SIZE{};
-    }
-
-    const int pad = DipToPx(kPanelPadDip, dpi);
-    int inner = 0;
-    auto consider = [&](const std::wstring& text) {
-      if (!text.empty()) {
-        inner = (std::max)(inner, static_cast<int>(PopupTextWidth(dpi, text) + 0.5f));
-      }
-    };
-    consider(panel->title);
-    consider(panel->subtitle);
-    consider(panel->updated_text);
-    for (const StatusRow& row : panel->rows) {
-      if (row.type == RowType::kGauge) {
-        const int label = static_cast<int>(PopupTextWidth(dpi, row.label) + 0.5f);
-        const int detail = static_cast<int>(PopupTextWidth(dpi, row.detail) + 0.5f);
-        inner = (std::max)(inner, label + DipToPx(12, dpi) + detail);
-        consider(row.note);
-      } else if (row.type == RowType::kButton) {
-        consider(row.label);
-      }
-    }
-
-    int width = inner + pad * 2;
-    width = (std::max)(width, DipToPx(kPanelMinWidthDip, dpi));
-    width = (std::min)(width, DipToPx(kPanelMaxWidthDip, dpi));
-
-    int y = pad;
-    if (!panel->title.empty()) {
-      y += DipToPx(kPanelTitleDip, dpi);
-    }
-    if (!panel->subtitle.empty()) {
-      y += DipToPx(kPanelSubDip, dpi);
-    }
-    if (!panel->updated_text.empty()) {
-      y += DipToPx(kPanelSubDip, dpi);
-    }
-    for (const StatusRow& row : panel->rows) {
-      if (row.type == RowType::kGauge) {
-        y += DipToPx(kPanelGaugeLabelDip, dpi);
-        y += DipToPx(kPanelGaugeBarDip, dpi);
-        if (!row.note.empty()) {
-          y += DipToPx(kPanelGaugeNoteDip, dpi);
-        }
-        y += DipToPx(kPanelGaugeGapDip, dpi);
-      } else if (row.type == RowType::kSeparator) {
-        y += DipToPx(kPanelSepDip, dpi);
-      } else if (row.type == RowType::kButton) {
-        const int h = DipToPx(kPanelActionDip, dpi);
-        RECT rc{pad, y, width - pad, y + h};
-        action_hits_.push_back(rc);
-        y += h;
-      }
-    }
-    y += pad;
-    return SIZE{width, y};
-  }
-
-  void Render(ID2D1RenderTarget* target, UINT dpi, int hot_index) override {
-    if (target == nullptr || owner_ == nullptr || !item_.panel) {
-      return;
-    }
-    const StatusPanel& panel = *item_.panel;
-    const bool dark = owner_->dark_;
-    const D2D1_SIZE_F sz = target->GetSize();
-    const int width = static_cast<int>(sz.width);
-    const int pad = DipToPx(kPanelPadDip, dpi);
-
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> text;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> muted;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> line;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> track;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> fill;
-    const D2D1_COLOR_F text_c = ClockTextColor(dark);
-    D2D1_COLOR_F muted_c = text_c;
-    muted_c.a *= 0.65f;
-    const D2D1_COLOR_F fill_c =
-        item_.accent != 0 ? D2D1::ColorF(item_.accent) : DockIndicatorColor(dark);
-    if (FAILED(target->CreateSolidColorBrush(text_c, text.GetAddressOf())) ||
-        FAILED(target->CreateSolidColorBrush(muted_c, muted.GetAddressOf())) ||
-        FAILED(target->CreateSolidColorBrush(MenuItemHoverFill(dark, false), hover.GetAddressOf())) ||
-        FAILED(target->CreateSolidColorBrush(DockStrokeColor(dark), line.GetAddressOf())) ||
-        FAILED(target->CreateSolidColorBrush(D2D1::ColorF(text_c.r, text_c.g, text_c.b, 0.18f),
-                                            track.GetAddressOf())) ||
-        FAILED(target->CreateSolidColorBrush(fill_c, fill.GetAddressOf()))) {
-      return;
-    }
-
-    int y = pad;
-    auto draw_line = [&](const std::wstring& s, int height, ID2D1Brush* brush) {
-      if (s.empty()) {
-        return;
-      }
-      DrawPopupText(target, dpi, s,
-                    D2D1::RectF(static_cast<float>(pad), static_cast<float>(y),
-                                static_cast<float>(width - pad), static_cast<float>(y + height)),
-                    brush);
-      y += height;
-    };
-    draw_line(panel.title, DipToPx(kPanelTitleDip, dpi), text.Get());
-    draw_line(panel.subtitle, DipToPx(kPanelSubDip, dpi), muted.Get());
-    draw_line(panel.updated_text, DipToPx(kPanelSubDip, dpi), muted.Get());
-
-    const int label_h = DipToPx(kPanelGaugeLabelDip, dpi);
-    const int bar_h = DipToPx(kPanelGaugeBarDip, dpi);
-    const int note_h = DipToPx(kPanelGaugeNoteDip, dpi);
-    const int gap = DipToPx(kPanelGaugeGapDip, dpi);
-    int button_i = 0;
-    for (const StatusRow& row : panel.rows) {
-      const float left = static_cast<float>(pad);
-      const float right = static_cast<float>(width - pad);
-      if (row.type == RowType::kGauge) {
-        DrawPopupText(target, dpi, row.label,
-                      D2D1::RectF(left, static_cast<float>(y), right * 0.55f, static_cast<float>(y + label_h)),
-                      text.Get());
-        DrawPopupText(target, dpi, row.detail,
-                      D2D1::RectF(right * 0.55f, static_cast<float>(y), right, static_cast<float>(y + label_h)),
-                      muted.Get());
-        y += label_h;
-        const float bar_top = static_cast<float>(y);
-        const float bar_bottom = bar_top + static_cast<float>(bar_h);
-        target->FillRectangle(D2D1::RectF(left, bar_top, right, bar_bottom), track.Get());
-        const float filled = left + (right - left) * row.value;
-        if (filled > left) {
-          target->FillRectangle(D2D1::RectF(left, bar_top, filled, bar_bottom), fill.Get());
-        }
-        y += bar_h;
-        if (!row.note.empty()) {
-          DrawPopupText(target, dpi, row.note,
-                        D2D1::RectF(left, static_cast<float>(y), right, static_cast<float>(y + note_h)), fill.Get());
-          y += note_h;
-        }
-        y += gap;
-      } else if (row.type == RowType::kSeparator) {
-        const float mid = static_cast<float>(y + DipToPx(kPanelSepDip, dpi) / 2) + 0.5f;
-        target->DrawLine(D2D1::Point2F(left, mid), D2D1::Point2F(right, mid), line.Get(), 1.0f);
-        y += DipToPx(kPanelSepDip, dpi);
-      } else if (row.type == RowType::kButton) {
-        const int row_h = DipToPx(kPanelActionDip, dpi);
-        const float top = static_cast<float>(y);
-        const float bottom = top + static_cast<float>(row_h);
-        if (button_i == hot_index) {
-          target->FillRectangle(D2D1::RectF(left, top, right, bottom), hover.Get());
-        }
-        DrawPopupText(target, dpi, row.label, D2D1::RectF(left, top, right, bottom), text.Get());
-        y += row_h;
-        ++button_i;
-      }
-    }
-  }
-
-  int HitTest(POINT client, UINT dpi) const override {
-    (void)dpi;
-    for (int i = 0; i < static_cast<int>(action_hits_.size()); ++i) {
-      if (PtInRect(&action_hits_[static_cast<size_t>(i)], client)) {
-        return i;
-      }
-    }
-    return -1;
-  }
-
-  void Invoke(int index) override {
-    if (owner_ == nullptr || !item_.panel) {
-      return;
-    }
-    std::vector<std::wstring> buttons;
-    for (const StatusRow& row : item_.panel->rows) {
-      if (row.type == RowType::kButton) {
-        buttons.push_back(row.label);
-      }
-    }
-    if (index < 0 || index >= static_cast<int>(buttons.size())) {
-      return;
-    }
-    StatusEvent ev;
-    ev.id = item_.id;
-    ev.event = "click";
-    ev.button = WideToUtf8(buttons[static_cast<size_t>(index)]);
-    owner_->status_.Dispatch(ev);
-  }
-
- private:
-  MenuBar* owner_ = nullptr;
-  StatusItem item_{};
-  std::vector<RECT> action_hits_;
-};
-
-std::wstring OverflowLabel(const StatusItem& item) {
-  return StatusBarText(item);
-}
-
-class OverflowContent : public PopupContent {
- public:
-  void Reset(MenuBar* owner, std::vector<StatusItem> items) {
-    owner_ = owner;
-    items_ = std::move(items);
-    row_hits_.clear();
-  }
-
-  int RowCount() const override { return static_cast<int>(items_.size()); }
-
-  SIZE Measure(UINT dpi) override {
-    row_hits_.clear();
-    const int pad = DipToPx(kPanelPadDip, dpi);
-    const int row = DipToPx(kPanelActionDip, dpi);
-    int inner = DipToPx(120, dpi);
-    for (const StatusItem& item : items_) {
-      inner = (std::max)(inner, static_cast<int>(PopupTextWidth(dpi, OverflowLabel(item)) + 0.5f));
-    }
-    const int width = inner + pad * 2;
-    int y = pad;
-    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
-      row_hits_.push_back(RECT{pad, y, width - pad, y + row});
-      y += row;
-    }
-    y += pad;
-    return SIZE{width, y};
-  }
-
-  void Render(ID2D1RenderTarget* target, UINT dpi, int hot_index) override {
-    if (target == nullptr || owner_ == nullptr) {
-      return;
-    }
-    const bool dark = owner_->dark_;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> text;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover;
-    if (FAILED(target->CreateSolidColorBrush(ClockTextColor(dark), text.GetAddressOf())) ||
-        FAILED(target->CreateSolidColorBrush(MenuItemHoverFill(dark, false), hover.GetAddressOf()))) {
-      return;
-    }
-    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
-      const RECT& rc = row_hits_[static_cast<size_t>(i)];
-      if (i == hot_index) {
-        target->FillRectangle(D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
-                                          static_cast<float>(rc.right), static_cast<float>(rc.bottom)),
-                              hover.Get());
-      }
-      DrawPopupText(target, dpi, OverflowLabel(items_[static_cast<size_t>(i)]),
-                    D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
-                                static_cast<float>(rc.right), static_cast<float>(rc.bottom)),
-                    text.Get());
-    }
-  }
-
-  int HitTest(POINT client, UINT dpi) const override {
-    (void)dpi;
-    for (int i = 0; i < static_cast<int>(row_hits_.size()); ++i) {
-      if (PtInRect(&row_hits_[static_cast<size_t>(i)], client)) {
-        return i;
-      }
-    }
-    return -1;
-  }
-
-  void Invoke(int index) override {
-    if (owner_ == nullptr || index < 0 || index >= static_cast<int>(items_.size())) {
-      return;
-    }
-    const StatusItem& item = items_[static_cast<size_t>(index)];
-    if (item.panel) {
-      StatusHit hit;
-      hit.id = item.id;
-      for (const BarSegment& seg : owner_->layout_.last().segments) {
-        if (seg.kind == SegmentKind::kOverflow) {
-          hit.rect = seg.rect;
-          break;
-        }
-      }
-      owner_->OpenStatusPanel(hit);
-    } else {
-      StatusEvent ev;
-      ev.id = item.id;
-      ev.event = "click";
-      ev.button = "left";
-      owner_->status_.Dispatch(ev);
-    }
-  }
-
- private:
-  MenuBar* owner_ = nullptr;
-  std::vector<StatusItem> items_;
-  std::vector<RECT> row_hits_;
-};
 
 MenuBar::MenuBar()
     : status_panel_(std::make_unique<StatusPanelContent>()),
@@ -591,6 +267,18 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         status_.DropStale();
         taskbar_.EnsureHidden();
         RefreshLayout();
+      }
+      if (wparam == kToggleTimerId) {
+        OnToggleTimeout();
+      }
+      return 0;
+    case kPopupClosedMsg:
+      if (!open_panel_id_.empty()) {
+        StatusEvent ev;
+        ev.id = std::move(open_panel_id_);
+        ev.event = "panel_close";
+        status_.Dispatch(ev);
+        open_panel_id_.clear();
       }
       return 0;
     case kFullscreenWatchMsg:
@@ -778,6 +466,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (wparam) {
         KillTimer(hwnd_, kClockTimerId);
         KillTimer(hwnd_, kRepaintTimerId);
+        KillTimer(hwnd_, kToggleTimerId);
         StopFullscreenWatch(hwnd_);
         status_.StopAll();
         taskbar_.Restore();
@@ -788,6 +477,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       RemoveWinHook();
       KillTimer(hwnd_, kClockTimerId);
       KillTimer(hwnd_, kRepaintTimerId);
+      KillTimer(hwnd_, kToggleTimerId);
       StopFullscreenWatch(hwnd_);
       status_.StopAll();
       status_popup_.Destroy();
@@ -1068,7 +758,22 @@ void MenuBar::OpenOverflow() {
   if (spotlight_.visible()) {
     spotlight_.Hide();
   }
-  overflow_panel_->Reset(this, layout_.last().overflow);
+  OverflowHost host;
+  host.dark = dark_;
+  host.overflow_rect = {};
+  host.open_panel = [this](const std::string& id) {
+    StatusHit hit;
+    hit.id = id;
+    for (const BarSegment& seg : layout_.last().segments) {
+      if (seg.kind == SegmentKind::kOverflow) {
+        hit.rect = seg.rect;
+        break;
+      }
+    }
+    OpenStatusPanel(hit);
+  };
+  host.dispatch = [this](const StatusEvent& ev) { status_.Dispatch(ev); };
+  overflow_panel_->Reset(layout_.last().overflow, std::move(host));
   RECT chevron{};
   for (const BarSegment& seg : layout_.last().segments) {
     if (seg.kind == SegmentKind::kOverflow) {
@@ -1171,10 +876,72 @@ void MenuBar::OpenStatusPanel(const StatusHit& hit) {
   if (spotlight_.visible()) {
     spotlight_.Hide();
   }
-  status_panel_->Reset(this, *found);
+  StatusPanelHost host;
+  host.dark = dark_;
+  host.dispatch = [this](const StatusEvent& ev) { status_.Dispatch(ev); };
+  host.arm_toggle = [this](std::string id, std::string row_id, uint64_t revision, bool on) {
+    ArmToggle(std::move(id), std::move(row_id), revision, on);
+  };
+  status_panel_->Reset(*found, std::move(host));
   POINT anchor{hit.rect.left, hit.rect.bottom};
   ClientToScreen(hwnd_, &anchor);
+  open_panel_id_ = found->id;
+  StatusEvent ev;
+  ev.id = found->id;
+  ev.event = "panel_open";
+  status_.Dispatch(ev);
   status_popup_.Open(status_panel_.get(), anchor, PopupSurface::Anchor::BelowAt);
+}
+
+void MenuBar::ArmToggle(std::string id, std::string row_id, uint64_t revision, bool on) {
+  pending_toggle_.id = std::move(id);
+  pending_toggle_.row_id = std::move(row_id);
+  pending_toggle_.revision = revision;
+  pending_toggle_.on = on;
+  toggle_armed_ = true;
+  if (hwnd_ != nullptr) {
+    SetTimer(hwnd_, kToggleTimerId, kToggleTimeoutMs, nullptr);
+  }
+}
+
+void MenuBar::OnToggleTimeout() {
+  if (hwnd_ != nullptr) {
+    KillTimer(hwnd_, kToggleTimerId);
+  }
+  if (!toggle_armed_) {
+    return;
+  }
+  toggle_armed_ = false;
+  auto item = status_.Get(pending_toggle_.id);
+  if (!item || item->revision != pending_toggle_.revision) {
+    return;
+  }
+  if (item->panel) {
+    for (StatusRow& row : item->panel->rows) {
+      if (row.type == RowType::kToggle && row.row_id == pending_toggle_.row_id) {
+        row.on = !pending_toggle_.on;
+        break;
+      }
+    }
+  }
+  item->state = StatusState::kError;
+  const std::string id = item->id;
+  status_.Upsert(std::move(*item));
+  if (status_popup_.IsOpen() && open_panel_id_ == id && status_panel_ != nullptr) {
+    if (auto again = status_.Get(id)) {
+      StatusPanelHost host;
+      host.dark = dark_;
+      host.dispatch = [this](const StatusEvent& ev) { status_.Dispatch(ev); };
+      host.arm_toggle = [this](std::string iid, std::string row_id, uint64_t revision, bool on) {
+        ArmToggle(std::move(iid), std::move(row_id), revision, on);
+      };
+      status_panel_->Reset(std::move(*again), std::move(host));
+      if (status_popup_.hwnd() != nullptr) {
+        InvalidateRect(status_popup_.hwnd(), nullptr, FALSE);
+      }
+    }
+  }
+  ArmRepaint();
 }
 
 bool MenuBar::InstallWinHook() {
