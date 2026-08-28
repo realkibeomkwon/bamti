@@ -574,6 +574,43 @@ struct Group {
   DockApp app;
 };
 
+constexpr UINT kPinCmpLogMax = 5;
+UINT g_pin_cmp_logs = 0;
+
+std::wstring PinCmpDisplay(const std::wstring& text) {
+  std::wstring out;
+  out.reserve(text.size());
+  for (size_t i = 0; i < text.size(); ++i) {
+    const wchar_t c = text[i];
+    if (c == L'\t') {
+      wchar_t mark[32]{};
+      swprintf_s(mark, L"<TAB:%zu>", i);
+      out += mark;
+    } else if (c < 32) {
+      wchar_t mark[16]{};
+      swprintf_s(mark, L"<0x%02X>", static_cast<unsigned>(c) & 0xFFu);
+      out += mark;
+    } else {
+      out.push_back(c);
+    }
+  }
+  return out;
+}
+
+void LogPinCmpFalse(const wchar_t* branch, const std::wstring& a, const std::wstring& b, const std::wstring& ca,
+                    const std::wstring& cb) {
+  if (g_pin_cmp_logs >= kPinCmpLogMax) {
+    return;
+  }
+  ++g_pin_cmp_logs;
+  const std::wstring da = PinCmpDisplay(a);
+  const std::wstring db = PinCmpDisplay(b);
+  const std::wstring dca = PinCmpDisplay(ca);
+  const std::wstring dcb = PinCmpDisplay(cb);
+  Log(L"dock", L"pin cmp branch=%s a=[%s](%zu) b=[%s](%zu) ca=[%s](%zu) cb=[%s](%zu)", branch, da.c_str(), a.size(),
+      db.c_str(), b.size(), dca.c_str(), ca.size(), dcb.c_str(), cb.size());
+}
+
 }  // namespace
 
 uint64_t TaskWindowFingerprint() {
@@ -677,19 +714,38 @@ std::wstring DockPinId(const DockApp& app) {
 
 bool SameDockPin(const std::wstring& a, const std::wstring& b) {
   if (a.empty() || b.empty()) {
+    LogPinCmpFalse(L"path", a, b, {}, {});
     return false;
   }
   const bool a_aumid = IsAumidPin(a);
   const bool b_aumid = IsAumidPin(b);
   if (a_aumid && b_aumid) {
-    return EqualsIgnoreCase(AumidFromPin(a), AumidFromPin(b));
+    const bool same = EqualsIgnoreCase(AumidFromPin(a), AumidFromPin(b));
+    if (!same) {
+      LogPinCmpFalse(L"both-aumid", a, b, {}, {});
+    }
+    return same;
   }
   if (a_aumid || b_aumid) {
     const std::wstring a_id = Lower(a_aumid ? AumidFromPin(a) : PathAumid(a));
     const std::wstring b_id = Lower(b_aumid ? AumidFromPin(b) : PathAumid(b));
-    return !a_id.empty() && a_id == b_id;
+    const bool same = !a_id.empty() && a_id == b_id;
+    if (!same) {
+      LogPinCmpFalse(L"mixed-aumid", a, b, {}, {});
+    }
+    return same;
   }
-  return CanonicalPath(a) == CanonicalPath(b);
+  const std::wstring ca = CanonicalPath(a);
+  const std::wstring cb = CanonicalPath(b);
+  const bool same = ca == cb;
+  if (!same) {
+    LogPinCmpFalse(L"path", a, b, ca, cb);
+  }
+  return same;
+}
+
+void ResetPinCmpLog() {
+  g_pin_cmp_logs = 0;
 }
 
 std::wstring DockPinCompareForm(const std::wstring& pin) {
@@ -898,10 +954,9 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
   };
 
   auto find_by_path = [&](const std::wstring& path) -> DockApp* {
-    const std::wstring canon = CanonicalPath(path);
     for (const auto& key : order) {
       DockApp& app = groups[key];
-      if (already_used(app.key) || app.exe_path.empty() || CanonicalPath(app.exe_path) != canon) {
+      if (already_used(app.key) || app.exe_path.empty() || !SameDockPin(path, app.exe_path)) {
         continue;
       }
       if (!app.aumid.empty() &&

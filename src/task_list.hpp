@@ -38,6 +38,7 @@ void CloseHwnds(const std::vector<HWND>& windows);
 std::wstring DockPinId(const DockApp& app);
 bool SameDockPin(const std::wstring& a, const std::wstring& b);
 std::wstring DockPinCompareForm(const std::wstring& pin);
+void ResetPinCmpLog();
 
 std::wstring CanonicalPath(const std::wstring& path);
 std::wstring WindowTitle(HWND hwnd);

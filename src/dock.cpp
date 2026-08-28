@@ -1316,6 +1316,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
 
 void Dock::Rebuild() {
   WatchdogStage(L"dock.rebuild");
+  ResetPinCmpLog();
   if (!shown_) {
     pending_rebuild_ = true;
     return;
