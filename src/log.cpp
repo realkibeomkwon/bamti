@@ -4,6 +4,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
@@ -15,6 +16,7 @@ namespace {
 constexpr long kMaxLogBytes = 2 * 1024 * 1024;
 
 std::mutex g_lock;
+std::atomic<int> g_log_depth{0};
 FILE* g_file = nullptr;
 std::wstring g_path;
 
@@ -94,22 +96,13 @@ void Log(const wchar_t* area, const wchar_t* fmt, ...) {
   OutputDebugStringW(line);
 
   std::lock_guard lock(g_lock);
+  g_log_depth.fetch_add(1, std::memory_order_acq_rel);
   WriteLogFile(line);
+  g_log_depth.fetch_sub(1, std::memory_order_acq_rel);
 }
 
-void LogTry(const wchar_t* tag, const wchar_t* fmt, ...) {
-  wchar_t line[1280]{};
-  va_list args;
-  va_start(args, fmt);
-  FormatLogLine(line, tag, fmt, args);
-  va_end(args);
-
-  std::unique_lock lock(g_lock, std::try_to_lock);
-  if (!lock.owns_lock()) {
-    return;
-  }
-  OutputDebugStringW(line);
-  WriteLogFile(line);
+bool LogBusy() {
+  return g_log_depth.load(std::memory_order_acquire) > 0;
 }
 
 }  // namespace bamti

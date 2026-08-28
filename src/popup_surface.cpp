@@ -573,6 +573,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       }
       return 0;
     case WM_MOUSEMOVE: {
+      WatchdogStage(L"popup.mousemove");
       if (!open_ || content_ == nullptr) {
         return 0;
       }
