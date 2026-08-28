@@ -105,4 +105,16 @@ bool LogBusy() {
   return g_log_depth.load(std::memory_order_acquire) > 0;
 }
 
+void NotePostedStorm(const wchar_t* label, unsigned& count, unsigned long long& window_start) {
+  const ULONGLONG now = GetTickCount64();
+  if (window_start == 0 || now - window_start >= 1000) {
+    count = 0;
+    window_start = now;
+  }
+  ++count;
+  if (count == 11) {
+    Log(L"dock", L"%s storm %u msgs in 1s", label, count);
+  }
+}
+
 }  // namespace bamti

@@ -47,6 +47,10 @@ constexpr UINT kIconReadyMsg = WM_APP + 41;
 constexpr UINT kFileSearchDelayMs = 40;
 constexpr ULONGLONG kWalkBudgetMs = 45;
 constexpr ULONGLONG kAppReloadMs = 60000;
+UINT g_file_search_count = 0;
+ULONGLONG g_file_search_window = 0;
+UINT g_icon_ready_count = 0;
+ULONGLONG g_icon_ready_window = 0;
 constexpr COLORREF kSearchFillLight = RGB(255, 255, 255);
 constexpr COLORREF kSearchFillDark = RGB(48, 48, 48);
 constexpr COLORREF kSearchTextLight = RGB(24, 24, 24);
@@ -1245,9 +1249,11 @@ LRESULT Spotlight::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     case kFileSearchDoneMsg:
+      NotePostedStorm(L"file-search", g_file_search_count, g_file_search_window);
       AcceptFileHits(reinterpret_cast<void*>(lparam));
       return 0;
     case kIconReadyMsg:
+      NotePostedStorm(L"icon-ready", g_icon_ready_count, g_icon_ready_window);
       AcceptIcon(reinterpret_cast<void*>(lparam));
       return 0;
     case WM_MOUSEMOVE: {

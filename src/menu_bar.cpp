@@ -41,6 +41,12 @@ constexpr int kPanelActionDip = 28;
 
 MenuBar* g_menu_bar = nullptr;
 HHOOK g_key_hook = nullptr;
+UINT g_status_msg_count = 0;
+ULONGLONG g_status_msg_window = 0;
+UINT g_toggle_start_count = 0;
+ULONGLONG g_toggle_start_window = 0;
+UINT g_toggle_spotlight_count = 0;
+ULONGLONG g_toggle_spotlight_window = 0;
 bool g_win_held = false;
 bool g_win_combo = false;
 bool g_win_injected = false;
@@ -472,6 +478,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       RefreshFullscreenState();
       return 0;
     case kStatusChangedMsg:
+      NotePostedStorm(L"status", g_status_msg_count, g_status_msg_window);
       InvalidateRect(hwnd_, nullptr, FALSE);
       return 0;
     case WM_DPICHANGED:
@@ -604,9 +611,11 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     case kToggleStartMsg:
+      NotePostedStorm(L"toggle-start", g_toggle_start_count, g_toggle_start_window);
       ToggleStartMenu(true);
       return 0;
     case kToggleSpotlightMsg:
+      NotePostedStorm(L"toggle-spotlight", g_toggle_spotlight_count, g_toggle_spotlight_window);
       ToggleSpotlight();
       return 0;
     case kAppBarCallback:

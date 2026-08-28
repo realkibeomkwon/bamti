@@ -11,8 +11,117 @@
 #include <shellapi.h>
 #include <uxtheme.h>
 
+#include <cstdint>
+
 namespace bamti {
 namespace {
+
+constexpr UINT kMsgFloodLimit = 500;
+constexpr size_t kMsgFloodSlots = 64;
+
+struct MsgFloodSlot {
+  HWND hwnd;
+  UINT message;
+  UINT count;
+};
+
+struct MsgFlood {
+  MsgFloodSlot slots[kMsgFloodSlots];
+  UINT total;
+  ULONGLONG window_start;
+};
+
+size_t MsgFloodIndex(HWND hwnd, UINT message) {
+  auto h = reinterpret_cast<std::uintptr_t>(hwnd);
+  h ^= static_cast<std::uintptr_t>(message) * 0x9E3779B9u;
+  h ^= h >> 16;
+  return static_cast<size_t>(h & (kMsgFloodSlots - 1));
+}
+
+void ResetMsgFlood(MsgFlood& flood) {
+  flood.total = 0;
+  flood.window_start = 0;
+  for (size_t i = 0; i < kMsgFloodSlots; ++i) {
+    flood.slots[i].hwnd = nullptr;
+    flood.slots[i].message = 0;
+    flood.slots[i].count = 0;
+  }
+}
+
+void ClassNameForLog(HWND hwnd, wchar_t (&out)[256]) {
+  if (hwnd == nullptr || GetClassNameW(hwnd, out, 256) <= 0) {
+    out[0] = L'?';
+    out[1] = L'\0';
+  }
+}
+
+void LogMsgFlood(const MsgFlood& flood) {
+  const MsgFloodSlot* top[3] = {};
+  UINT best[3] = {};
+  for (size_t i = 0; i < kMsgFloodSlots; ++i) {
+    const UINT count = flood.slots[i].count;
+    if (count == 0) {
+      continue;
+    }
+    if (count > best[0]) {
+      top[2] = top[1];
+      best[2] = best[1];
+      top[1] = top[0];
+      best[1] = best[0];
+      top[0] = &flood.slots[i];
+      best[0] = count;
+    } else if (count > best[1]) {
+      top[2] = top[1];
+      best[2] = best[1];
+      top[1] = &flood.slots[i];
+      best[1] = count;
+    } else if (count > best[2]) {
+      top[2] = &flood.slots[i];
+      best[2] = count;
+    }
+  }
+
+  wchar_t c0[256];
+  wchar_t c1[256];
+  wchar_t c2[256];
+  ClassNameForLog(top[0] != nullptr ? top[0]->hwnd : nullptr, c0);
+  ClassNameForLog(top[1] != nullptr ? top[1]->hwnd : nullptr, c1);
+  ClassNameForLog(top[2] != nullptr ? top[2]->hwnd : nullptr, c2);
+  Log(L"perf", L"msg flood %u/s top=[%s:0x%04X x%u] [%s:0x%04X x%u] [%s:0x%04X x%u]", flood.total, c0,
+      top[0] != nullptr ? top[0]->message : 0, top[0] != nullptr ? top[0]->count : 0, c1,
+      top[1] != nullptr ? top[1]->message : 0, top[1] != nullptr ? top[1]->count : 0, c2,
+      top[2] != nullptr ? top[2]->message : 0, top[2] != nullptr ? top[2]->count : 0);
+}
+
+void NoteDispatched(const MSG& msg) {
+  static MsgFlood flood{};
+  const ULONGLONG now = GetTickCount64();
+  if (flood.window_start != 0 && now - flood.window_start >= 1000) {
+    if (flood.total > kMsgFloodLimit) {
+      LogMsgFlood(flood);
+    }
+    ResetMsgFlood(flood);
+  }
+  if (flood.window_start == 0) {
+    flood.window_start = now;
+  }
+  ++flood.total;
+
+  size_t index = MsgFloodIndex(msg.hwnd, msg.message);
+  for (int probe = 0; probe < 8; ++probe) {
+    MsgFloodSlot& slot = flood.slots[(index + static_cast<size_t>(probe)) & (kMsgFloodSlots - 1)];
+    if (slot.count == 0) {
+      slot.hwnd = msg.hwnd;
+      slot.message = msg.message;
+      slot.count = 1;
+      return;
+    }
+    if (slot.hwnd == msg.hwnd && slot.message == msg.message) {
+      ++slot.count;
+      return;
+    }
+  }
+}
 
 bool CommandLineHasRestoreTaskbar() {
   int argc = 0;
@@ -92,6 +201,7 @@ int Run(HINSTANCE instance) {
         if (GetMessageW(&msg, nullptr, 0, 0) <= 0) {
           break;
         }
+        NoteDispatched(msg);
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
       }

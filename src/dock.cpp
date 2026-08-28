@@ -77,18 +77,12 @@ UINT g_tray_msg_count = 0;
 ULONGLONG g_tray_msg_window = 0;
 UINT g_task_msg_count = 0;
 ULONGLONG g_task_msg_window = 0;
-
-void NotePostedStorm(const wchar_t* label, UINT& count, ULONGLONG& window_start) {
-  const ULONGLONG now = GetTickCount64();
-  if (window_start == 0 || now - window_start >= 1000) {
-    count = 0;
-    window_start = now;
-  }
-  ++count;
-  if (count == 11) {
-    Log(L"dock", L"%s storm %u msgs in 1s", label, count);
-  }
-}
+UINT g_fullscreen_msg_count = 0;
+ULONGLONG g_fullscreen_msg_window = 0;
+UINT g_popup_closed_count = 0;
+ULONGLONG g_popup_closed_window = 0;
+UINT g_menu_cmd_count = 0;
+ULONGLONG g_menu_cmd_window = 0;
 
 const wchar_t* MenuCmdName(UINT cmd) {
   if (cmd >= kWindowCommandBase) {
@@ -1150,6 +1144,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       ScheduleRebuild();
       return 0;
     case kMenuCommandMsg: {
+      NotePostedStorm(L"menu", g_menu_cmd_count, g_menu_cmd_window);
       const UINT cmd = pending_menu_cmd_;
       DockApp app = std::move(pending_menu_app_);
       std::vector<HWND> windows = std::move(pending_menu_windows_);
@@ -1165,9 +1160,11 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       g_tray_posted = false;
       return 0;
     case kFullscreenMsg:
+      NotePostedStorm(L"fullscreen", g_fullscreen_msg_count, g_fullscreen_msg_window);
       RefreshFullscreen();
       return 0;
     case kPopupClosedMsg:
+      NotePostedStorm(L"popup-closed", g_popup_closed_count, g_popup_closed_window);
       UpdateIdleTimer();
       if (pending_rebuild_) {
         ScheduleRebuild();
