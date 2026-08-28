@@ -3,6 +3,7 @@
 #include "dwm.hpp"
 #include "log.hpp"
 #include "theme.hpp"
+#include "watchdog.hpp"
 
 #include <dwmapi.h>
 #include <windowsx.h>
@@ -217,6 +218,7 @@ void PopupSurface::Destroy() {
 }
 
 bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode) {
+  WatchdogStage(L"popup.open");
   const ULONGLONG started = GetTickCount64();
   if (hwnd_ == nullptr || content == nullptr) {
     return false;
@@ -278,6 +280,7 @@ void PopupSurface::SetDark(bool dark) {
 }
 
 void PopupSurface::Dismiss(int invoke_index, DismissReason reason) {
+  WatchdogStage(L"popup.dismiss");
   if (!open_) {
     return;
   }
@@ -353,6 +356,7 @@ void PopupSurface::Tick() {
 }
 
 void PopupSurface::Tick(const wchar_t* src) {
+  WatchdogStage(L"popup.tick");
   if (!open_ || hwnd_ == nullptr || ticking_) {
     return;
   }
@@ -443,6 +447,7 @@ void PopupSurface::Tick(const wchar_t* src) {
 }
 
 void PopupSurface::EnsureRenderTarget() {
+  WatchdogStage(L"popup.target");
   if (hwnd_ == nullptr || !d2d_) {
     return;
   }
@@ -478,6 +483,7 @@ void PopupSurface::EnsureRenderTarget() {
 }
 
 void PopupSurface::Render() {
+  WatchdogStage(L"popup.render");
   if (!open_ || hwnd_ == nullptr || content_ == nullptr) {
     return;
   }

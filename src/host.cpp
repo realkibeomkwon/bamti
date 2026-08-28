@@ -5,6 +5,7 @@
 #include "menu_bar.hpp"
 #include "paths.hpp"
 #include "taskbar_controller.hpp"
+#include "watchdog.hpp"
 
 #include <objbase.h>
 #include <shellapi.h>
@@ -78,6 +79,7 @@ int Run(HINSTANCE instance) {
     MenuBar bar;
     Dock dock;
     if (bar.Create(instance)) {
+      WatchdogStart(bar.hwnd());
       Log(L"host", L"menu bar ready taskbar_hidden=%d", bar.taskbar_hidden() ? 1 : 0);
       if (bar.taskbar_hidden()) {
         if (!dock.Create(instance)) {
@@ -85,10 +87,15 @@ int Run(HINSTANCE instance) {
         }
       }
       MSG msg{};
-      while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+      for (;;) {
+        WatchdogStage(L"idle");
+        if (GetMessageW(&msg, nullptr, 0, 0) <= 0) {
+          break;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
       }
+      WatchdogStop();
       exit_code = static_cast<int>(msg.wParam);
     } else {
       Log(L"host", L"menu bar create failed");

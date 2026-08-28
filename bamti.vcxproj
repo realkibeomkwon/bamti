@@ -82,6 +82,7 @@
     <ClCompile Include="src\host.cpp" />
     <ClCompile Include="src\paths.cpp" />
     <ClCompile Include="src\log.cpp" />
+    <ClCompile Include="src\watchdog.cpp" />
     <ClCompile Include="src\menu_bar.cpp" />
     <ClCompile Include="src\clock_renderer.cpp" />
     <ClCompile Include="src\theme.cpp" />
@@ -98,6 +99,7 @@
     <ClInclude Include="src\host.hpp" />
     <ClInclude Include="src\paths.hpp" />
     <ClInclude Include="src\log.hpp" />
+    <ClInclude Include="src\watchdog.hpp" />
     <ClInclude Include="src\menu_bar.hpp" />
     <ClInclude Include="src\clock_renderer.hpp" />
     <ClInclude Include="src\theme.hpp" />

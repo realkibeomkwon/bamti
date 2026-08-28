@@ -2,6 +2,7 @@
 
 #include "log.hpp"
 #include "paths.hpp"
+#include "watchdog.hpp"
 
 #include <appmodel.h>
 #include <dwmapi.h>
@@ -734,6 +735,7 @@ bool SaveDockPins(const std::vector<std::wstring>& paths) {
 }
 
 std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_paths) {
+  WatchdogStage(L"collect");
   IVirtualDesktopManager* vdm = DesktopManager();
 
   struct Raw {

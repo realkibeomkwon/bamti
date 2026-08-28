@@ -4,6 +4,7 @@
 #include "fullscreen.hpp"
 #include "log.hpp"
 #include "theme.hpp"
+#include "watchdog.hpp"
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -733,6 +734,7 @@ void MenuBar::ApplyBackdrop() {
 }
 
 void MenuBar::Paint() {
+  WatchdogStage(L"bar.paint");
   PAINTSTRUCT ps{};
   const HDC hdc = BeginPaint(hwnd_, &ps);
   RECT client{};

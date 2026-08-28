@@ -49,6 +49,27 @@ void RotateIfNeeded() {
   OpenFile(false);
 }
 
+void FormatLogLine(wchar_t (&line)[1280], const wchar_t* area, const wchar_t* fmt, va_list args) {
+  wchar_t body[1024]{};
+  _vsnwprintf_s(body, _TRUNCATE, fmt, args);
+  SYSTEMTIME st{};
+  GetLocalTime(&st);
+  swprintf_s(line, L"%04u-%02u-%02u %02u:%02u:%02u.%03u [%s] %s\n", st.wYear, st.wMonth, st.wDay, st.wHour,
+             st.wMinute, st.wSecond, st.wMilliseconds, area != nullptr ? area : L"", body);
+}
+
+void WriteLogFile(const wchar_t* line) {
+  if (g_file == nullptr) {
+    return;
+  }
+  RotateIfNeeded();
+  if (g_file == nullptr) {
+    return;
+  }
+  fputws(line, g_file);
+  fflush(g_file);
+}
+
 }  // namespace
 
 void LogInit() {
@@ -64,30 +85,31 @@ void LogShutdown() {
 }
 
 void Log(const wchar_t* area, const wchar_t* fmt, ...) {
-  wchar_t body[1024]{};
+  wchar_t line[1280]{};
   va_list args;
   va_start(args, fmt);
-  _vsnwprintf_s(body, _TRUNCATE, fmt, args);
+  FormatLogLine(line, area, fmt, args);
   va_end(args);
-
-  SYSTEMTIME st{};
-  GetLocalTime(&st);
-  wchar_t line[1280]{};
-  swprintf_s(line, L"%04u-%02u-%02u %02u:%02u:%02u.%03u [%s] %s\n", st.wYear, st.wMonth, st.wDay, st.wHour,
-             st.wMinute, st.wSecond, st.wMilliseconds, area != nullptr ? area : L"", body);
 
   OutputDebugStringW(line);
 
   std::lock_guard lock(g_lock);
-  if (g_file == nullptr) {
+  WriteLogFile(line);
+}
+
+void LogTry(const wchar_t* tag, const wchar_t* fmt, ...) {
+  wchar_t line[1280]{};
+  va_list args;
+  va_start(args, fmt);
+  FormatLogLine(line, tag, fmt, args);
+  va_end(args);
+
+  std::unique_lock lock(g_lock, std::try_to_lock);
+  if (!lock.owns_lock()) {
     return;
   }
-  RotateIfNeeded();
-  if (g_file == nullptr) {
-    return;
-  }
-  fputws(line, g_file);
-  fflush(g_file);
+  OutputDebugStringW(line);
+  WriteLogFile(line);
 }
 
 }  // namespace bamti

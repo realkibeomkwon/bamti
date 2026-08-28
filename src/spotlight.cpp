@@ -3,6 +3,7 @@
 #include "dwm.hpp"
 #include "log.hpp"
 #include "theme.hpp"
+#include "watchdog.hpp"
 
 #include <d2d1helper.h>
 #include <dwmapi.h>
@@ -2135,6 +2136,7 @@ void Spotlight::RebuildRows() {
 }
 
 void Spotlight::Present() {
+  WatchdogStage(L"spot.paint");
   if (hwnd_ == nullptr || !EnsureRenderer()) {
     return;
   }
@@ -2403,6 +2405,7 @@ void Spotlight::ApplyChrome() {
 }
 
 void Spotlight::ApplyFilter() {
+  WatchdogStage(L"spot.filter");
   const ULONGLONG started = GetTickCount64();
   filter_.clear();
   if (edit_ != nullptr) {

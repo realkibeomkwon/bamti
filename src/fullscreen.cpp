@@ -1,5 +1,7 @@
 #include "fullscreen.hpp"
 
+#include "watchdog.hpp"
+
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <shobjidl.h>
@@ -167,6 +169,7 @@ bool ImmersiveAppVisible(HWND self) {
 }  // namespace
 
 bool IsTrueFullscreen(HWND self) {
+  WatchdogStage(L"fullscreen");
   QUERY_USER_NOTIFICATION_STATE state{};
   if (SUCCEEDED(SHQueryUserNotificationState(&state)) && state == QUNS_RUNNING_D3D_FULL_SCREEN) {
     return true;

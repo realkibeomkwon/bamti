@@ -5,6 +5,7 @@
 #include "log.hpp"
 #include "taskbar_controller.hpp"
 #include "theme.hpp"
+#include "watchdog.hpp"
 
 #include <commctrl.h>
 #include <commoncontrols.h>
@@ -1087,6 +1088,7 @@ LRESULT Dock::HandleHot(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 }
 
 LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
+  WatchdogStage(L"dock.msg");
   switch (msg) {
     case WM_ERASEBKGND:
       return 1;
@@ -1285,6 +1287,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
 }
 
 void Dock::Rebuild() {
+  WatchdogStage(L"dock.rebuild");
   if (!shown_) {
     pending_rebuild_ = true;
     return;
@@ -1497,6 +1500,7 @@ void Dock::Paint() {
 }
 
 void Dock::RenderLayered() {
+  WatchdogStage(L"dock.render");
   if (hwnd_ == nullptr || !shown_) {
     return;
   }
@@ -1771,6 +1775,7 @@ void Dock::SetOverlaysTopmost(bool topmost) {
 }
 
 void Dock::OpenDockMenu(POINT screen, int index) {
+  WatchdogStage(L"dock.menu");
   if (index < 0 || index >= static_cast<int>(items_.size())) {
     return;
   }

@@ -11,6 +11,7 @@ add_executable(bamti WIN32
   src/host.cpp
   src/paths.cpp
   src/log.cpp
+  src/watchdog.cpp
   src/menu_bar.cpp
   src/clock_renderer.cpp
   src/theme.cpp
