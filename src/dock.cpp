@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -60,7 +61,9 @@ constexpr UINT_PTR kHideTimerId = 1;
 constexpr UINT_PTR kPollTimerId = 2;
 constexpr UINT_PTR kRebuildTimerId = 3;
 constexpr UINT_PTR kTrayWatchTimerId = 4;
+constexpr UINT_PTR kAnimTimerId = 5;
 constexpr UINT kTrayWatchMs = 5000;
+constexpr UINT kAnimTimerMs = 16;
 constexpr UINT kIdlePollMs = 500;
 constexpr UINT kTasksChangedMsg = WM_APP + 20;
 constexpr UINT kMenuCommandMsg = WM_APP + 21;
@@ -92,6 +95,17 @@ UINT g_popup_closed_count = 0;
 ULONGLONG g_popup_closed_window = 0;
 UINT g_menu_cmd_count = 0;
 ULONGLONG g_menu_cmd_window = 0;
+
+double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
+  static LARGE_INTEGER freq{};
+  if (freq.QuadPart == 0) {
+    QueryPerformanceFrequency(&freq);
+  }
+  if (freq.QuadPart == 0) {
+    return 0.0;
+  }
+  return (end.QuadPart - start.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+}
 
 const wchar_t* MenuCmdName(UINT cmd) {
   if (cmd >= kWindowCommandBase) {
@@ -1590,6 +1604,8 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         if (TaskbarController::Rehide()) {
           RaiseOverlays();
         }
+      } else if (wparam == kAnimTimerId) {
+        TickDragAnim();
       }
       return 0;
     case kTasksChangedMsg:
@@ -1786,6 +1802,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kPollTimerId);
       KillTimer(hwnd_, kRebuildTimerId);
       KillTimer(hwnd_, kTrayWatchTimerId);
+      KillTimer(hwnd_, kAnimTimerId);
       TaskbarController::UnwatchTray();
       StopFullscreenWatch(hwnd_);
       submenu_.Destroy();
@@ -2072,6 +2089,10 @@ void Dock::Layout() {
     slots_[static_cast<size_t>(i)] = slot_rect;
   }
 
+  if (!anim_timer_on_) {
+    SnapAnimX();
+  }
+
   if (tooltip_ != nullptr) {
     TOOLINFOW ti{};
     ti.cbSize = sizeof(ti);
@@ -2154,6 +2175,9 @@ void Dock::RenderLayered() {
   const int icon_px = Dip(kIconDip);
   const auto order = DisplayOrder();
   const int pinned = PinnedCount();
+  if (anim_x_.size() != items_.size()) {
+    SnapAnimX();
+  }
   auto draw_icon = [&](size_t i, float x, float y, float alpha) {
     if (i >= icons_.size() || icons_[i] == nullptr || i >= items_.size()) {
       return;
@@ -2181,7 +2205,11 @@ void Dock::RenderLayered() {
   for (size_t slot_i = 0; slot_i < order.size() && slot_i < slots_.size(); ++slot_i) {
     const size_t i = order[slot_i];
     const RECT& slot = slots_[slot_i];
-    const float x = static_cast<float>(slot.left + (slot.right - slot.left - icon_px) / 2);
+    const float slot_x = static_cast<float>(slot.left + (slot.right - slot.left - icon_px) / 2);
+    float x = slot_x;
+    if (!(dragging_ && static_cast<int>(i) == drag_index_) && i < anim_x_.size()) {
+      x = anim_x_[i];
+    }
     float y = static_cast<float>((height - icon_px) / 2 - Dip(4));
     if (!dragging_ && static_cast<int>(i) == pressed_) {
       y += static_cast<float>(Dip(1));
@@ -2199,7 +2227,7 @@ void Dock::RenderLayered() {
     if (items_[i].running && indicator) {
       const float dot_w = static_cast<float>(Dip(10));
       const float dot_h = static_cast<float>(Dip(3));
-      const float dx = static_cast<float>(slot.left) + (static_cast<float>(slot.right - slot.left) - dot_w) * 0.5f;
+      const float dx = x + (static_cast<float>(icon_px) - dot_w) * 0.5f;
       const float dy = static_cast<float>(height - Dip(10));
       const D2D1_ROUNDED_RECT dot{D2D1::RectF(dx, dy, dx + dot_w, dy + dot_h), dot_h * 0.5f, dot_h * 0.5f};
       rt->FillRoundedRectangle(dot, indicator.Get());
@@ -2266,6 +2294,9 @@ void Dock::HidePill() {
   }
   shown_ = false;
   ShowWindow(hwnd_, SW_HIDE);
+  if (anim_timer_on_) {
+    StopDragAnimTimer(true);
+  }
   UpdateIdleTimer();
 }
 
@@ -2616,6 +2647,107 @@ std::vector<size_t> Dock::DisplayOrder() const {
   return order;
 }
 
+float Dock::SlotIconX(size_t slot) const {
+  const int icon_px = Dip(kIconDip);
+  if (slot >= slots_.size()) {
+    return 0.0f;
+  }
+  const RECT& rect = slots_[slot];
+  return static_cast<float>(rect.left + (rect.right - rect.left - icon_px) / 2);
+}
+
+void Dock::SnapAnimX() {
+  anim_x_.assign(items_.size(), 0.0f);
+  const auto order = DisplayOrder();
+  for (size_t slot = 0; slot < order.size() && slot < slots_.size(); ++slot) {
+    const size_t i = order[slot];
+    if (i < anim_x_.size()) {
+      anim_x_[i] = SlotIconX(slot);
+    }
+  }
+}
+
+void Dock::StartDragAnimTimer() {
+  if (hwnd_ == nullptr) {
+    return;
+  }
+  if (!anim_timer_on_) {
+    SetTimer(hwnd_, kAnimTimerId, kAnimTimerMs, nullptr);
+    anim_timer_on_ = true;
+  }
+  anim_frames_ = 0;
+  anim_ms_sum_ = 0.0;
+  last_anim_tick_ = GetTickCount64();
+  if (anim_x_.size() != items_.size()) {
+    SnapAnimX();
+  }
+}
+
+void Dock::StopDragAnimTimer(bool log) {
+  if (hwnd_ != nullptr) {
+    KillTimer(hwnd_, kAnimTimerId);
+  }
+  anim_timer_on_ = false;
+  last_anim_tick_ = 0;
+  if (log && anim_frames_ > 0) {
+    Log(L"perf", L"drag anim frames=%u avg=%.1fms", anim_frames_,
+        anim_ms_sum_ / static_cast<double>(anim_frames_));
+  }
+  anim_frames_ = 0;
+  anim_ms_sum_ = 0.0;
+  SnapAnimX();
+}
+
+void Dock::TickDragAnim() {
+  if (hwnd_ == nullptr || !shown_ || items_.empty()) {
+    StopDragAnimTimer(true);
+    return;
+  }
+  if (anim_x_.size() != items_.size()) {
+    SnapAnimX();
+  }
+  const ULONGLONG now = GetTickCount64();
+  double dt = last_anim_tick_ == 0 ? 16.0 : static_cast<double>(now - last_anim_tick_);
+  last_anim_tick_ = now;
+  if (dt < 1.0) {
+    dt = 1.0;
+  } else if (dt > 100.0) {
+    dt = 100.0;
+  }
+  const float k = static_cast<float>(1.0 - std::pow(0.8, dt / 16.0));
+  const auto order = DisplayOrder();
+  bool moving = false;
+  for (size_t slot = 0; slot < order.size() && slot < slots_.size(); ++slot) {
+    const size_t i = order[slot];
+    if (i >= anim_x_.size()) {
+      continue;
+    }
+    const float target = SlotIconX(slot);
+    if (dragging_ && static_cast<int>(i) == drag_index_) {
+      anim_x_[i] = target;
+      continue;
+    }
+    const float x = anim_x_[i];
+    const float delta = target - x;
+    if (delta > -0.5f && delta < 0.5f) {
+      anim_x_[i] = target;
+    } else {
+      anim_x_[i] = x + delta * k;
+      moving = true;
+    }
+  }
+  LARGE_INTEGER t0{};
+  LARGE_INTEGER t1{};
+  QueryPerformanceCounter(&t0);
+  RenderLayered();
+  QueryPerformanceCounter(&t1);
+  ++anim_frames_;
+  anim_ms_sum_ += QpcMs(t0, t1);
+  if (!dragging_ && !moving) {
+    StopDragAnimTimer(true);
+  }
+}
+
 void Dock::BeginDragIfNeeded(POINT client) {
   const wchar_t* reason = nullptr;
   if (dragging_) {
@@ -2649,6 +2781,7 @@ void Dock::BeginDragIfNeeded(POINT client) {
   if (tooltip_ != nullptr) {
     SendMessageW(tooltip_, TTM_POP, 0, 0);
   }
+  StartDragAnimTimer();
 }
 
 bool Dock::NoteDragLog() {
@@ -2668,7 +2801,7 @@ void Dock::UpdateDrag(POINT client) {
     return;
   }
   drop_index_ = next;
-  RenderLayered();
+  TickDragAnim();
 }
 
 void Dock::EndDrag(bool commit) {
@@ -2690,6 +2823,7 @@ void Dock::EndDrag(bool commit) {
       pins_.insert(pins_.begin() + to, moved);
       RotatePinnedRange(items_, from, to);
       RotatePinnedRange(icons_, from, to);
+      RotatePinnedRange(anim_x_, from, to);
       SaveDockPins(pins_);
       pending_rebuild_ = true;
       force_collect_ = true;
@@ -2700,7 +2834,13 @@ void Dock::EndDrag(bool commit) {
     ScheduleRebuild();
   }
   if (shown_) {
-    RenderLayered();
+    if (was_dragging && anim_timer_on_) {
+      TickDragAnim();
+    } else {
+      RenderLayered();
+    }
+  } else if (was_dragging) {
+    StopDragAnimTimer(true);
   }
 }
 

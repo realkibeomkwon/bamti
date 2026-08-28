@@ -79,6 +79,11 @@ class Dock {
   void BeginDragIfNeeded(POINT client);
   void UpdateDrag(POINT client);
   void EndDrag(bool commit);
+  void TickDragAnim();
+  void StartDragAnimTimer();
+  void StopDragAnimTimer(bool log);
+  void SnapAnimX();
+  float SlotIconX(size_t slot) const;
   bool NoteDragLog();
   bool Busy() const;
   int PinnedCount() const;
@@ -133,6 +138,11 @@ class Dock {
   ULONGLONG last_popup_tick_ = 0;
   UINT drag_logs_ = 0;
   UINT drag_move_logs_ = 0;
+  std::vector<float> anim_x_;
+  ULONGLONG last_anim_tick_ = 0;
+  UINT anim_frames_ = 0;
+  double anim_ms_sum_ = 0;
+  bool anim_timer_on_ = false;
 };
 
 }  // namespace bamti
