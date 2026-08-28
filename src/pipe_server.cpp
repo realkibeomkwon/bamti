@@ -18,7 +18,6 @@ constexpr DWORD kPipeBuffer = 16384;
 constexpr DWORD kMaxPipeInstances = 16;
 constexpr ULONGLONG kHeartbeatMs = 15000;
 constexpr size_t kMaxLineBytes = kStatusLineMaxBytes;
-constexpr ULONGLONG kNotifyCoalesceMs = 50;
 constexpr size_t kMaxIdBytes = 128;
 
 struct UserOnlySd {
@@ -334,7 +333,7 @@ void ParseRowsV2(std::string_view raw, std::vector<StatusRow>* rows) {
       if (row.type == RowType::kButton) {
         row.danger = (*style == "danger");
       } else if (row.type == RowType::kText && *style == "note") {
-        row.note = L"note";
+        row.muted = true;
       }
     }
     rows->push_back(std::move(row));
@@ -496,9 +495,17 @@ PipeServer::~PipeServer() {
   Stop();
 }
 
-bool PipeServer::Start(HWND notify) {
+const char* PipeServer::Name() const {
+  return "pipe";
+}
+
+void PipeServer::SetActive(bool active) {
+  active_ = active;
+}
+
+bool PipeServer::Start(StatusSink* sink) {
   Stop();
-  notify_ = notify;
+  sink_ = sink;
   auto sd = BuildCurrentUserSd();
   if (!sd.ok) {
     return false;
@@ -519,7 +526,7 @@ void PipeServer::Stop() {
   HANDLE listen = INVALID_HANDLE_VALUE;
   {
     std::lock_guard lock(mu_);
-    notify_ = nullptr;
+    sink_ = nullptr;
     listen = listen_pipe_;
     listen_pipe_ = INVALID_HANDLE_VALUE;
   }
@@ -546,7 +553,7 @@ void PipeServer::Stop() {
   {
     std::lock_guard lock(mu_);
     clients_.clear();
-    items_.clear();
+    owners_.clear();
   }
   if (stop_event_ != nullptr) {
     CloseHandle(stop_event_);
@@ -570,21 +577,13 @@ void PipeServer::DropStale() {
   if (closed) {
     // ClientLoop removes items and notifies the UI when ReadFile unblocks.
   }
-  FlushNotify();
-}
-
-std::vector<StatusItem> PipeServer::Snapshot() const {
-  std::lock_guard lock(mu_);
-  std::vector<StatusItem> out;
-  out.reserve(items_.size());
-  for (const auto& [id, rec] : items_) {
-    out.push_back(rec.item);
+  if (sink_ != nullptr) {
+    sink_->Flush();
   }
-  return out;
 }
 
-void PipeServer::SendClick(const std::string& id, std::string_view button) {
-  SendEvent(id, "click", {}, button);
+void PipeServer::OnEvent(const StatusEvent& ev) {
+  SendEvent(ev.id, ev.event, ev.row_id, ev.button, ev.on);
 }
 
 void PipeServer::SendEvent(const std::string& id, std::string_view event, std::string_view row_id,
@@ -592,11 +591,11 @@ void PipeServer::SendEvent(const std::string& id, std::string_view event, std::s
   uint64_t owner = 0;
   {
     std::lock_guard lock(mu_);
-    const auto it = items_.find(id);
-    if (it == items_.end()) {
+    const auto it = owners_.find(id);
+    if (it == owners_.end()) {
       return;
     }
-    owner = it->second.owner;
+    owner = it->second;
   }
   Client* target = nullptr;
   {
@@ -771,9 +770,12 @@ void PipeServer::ClientLoop(Client* client) {
       const HANDLE waits[] = {stop_event_, ov.hEvent};
       bool got = false;
       for (;;) {
-        const DWORD wait = WaitForMultipleObjects(2, waits, FALSE, NotifyWaitTimeoutMs());
+        const DWORD wait =
+            WaitForMultipleObjects(2, waits, FALSE, sink_ != nullptr ? sink_->NotifyWaitTimeoutMs() : INFINITE);
         if (wait == WAIT_TIMEOUT) {
-          FlushNotify();
+          if (sink_ != nullptr) {
+            sink_->Flush();
+          }
           continue;
         }
         if (wait != WAIT_OBJECT_0 + 1) {
@@ -819,23 +821,25 @@ void PipeServer::ClientLoop(Client* client) {
   CloseHandle(ov.hEvent);
 
   const uint64_t owner = client->id;
+  std::vector<std::string> drop;
   {
     std::lock_guard lock(mu_);
     client->alive.store(false);
     CloseClientPipe(client);
-    for (auto it = items_.begin(); it != items_.end();) {
-      if (it->second.owner == owner) {
-        it = items_.erase(it);
+    for (auto it = owners_.begin(); it != owners_.end();) {
+      if (it->second == owner) {
+        drop.push_back(it->first);
+        it = owners_.erase(it);
       } else {
         ++it;
       }
     }
   }
-  {
-    std::lock_guard lock(mu_);
-    notify_pending_ = true;
+  for (const std::string& id : drop) {
+    if (sink_ != nullptr) {
+      sink_->Remove(id);
+    }
   }
-  FlushNotify();
 }
 
 void PipeServer::HandleLine(Client* client, std::string_view line) {
@@ -862,18 +866,12 @@ void PipeServer::HandleV1(Client* client, std::string_view line) {
     return;
   }
 
-  bool changed = false;
   if (*op == "remove") {
     const auto id = json::GetString(line, "id");
     if (!id || !ValidId(*id)) {
       return;
     }
-    std::lock_guard lock(mu_);
-    const auto it = items_.find(*id);
-    if (it != items_.end() && it->second.owner == client->id) {
-      items_.erase(it);
-      changed = true;
-    }
+    PublishRemove(*id, client->id);
   } else if (*op == "upsert") {
     const auto id = json::GetString(line, "id");
     const auto text = json::GetString(line, "text");
@@ -910,18 +908,13 @@ void PipeServer::HandleV1(Client* client, std::string_view line) {
     if (const auto panel = json::GetRaw(line, "panel")) {
       item.panel = ParsePanel(*panel);
     }
-    std::lock_guard lock(mu_);
-    if (!AllowUpsertLocked(item.id, client->id)) {
-      return;
+    {
+      std::lock_guard lock(mu_);
+      if (!AllowUpsertLocked(item.id, client->id)) {
+        return;
+      }
     }
-    std::string key = item.id;
-    auto it = items_.find(key);
-    item.revision = (it == items_.end()) ? 1 : it->second.item.revision + 1;
-    items_.insert_or_assign(std::move(key), Record{std::move(item), client->id});
-    changed = true;
-  }
-  if (changed) {
-    NotifyUi();
+    PublishUpsert(std::move(item), client->id);
   }
 }
 
@@ -932,18 +925,12 @@ void PipeServer::HandleV2(Client* client, std::string_view line) {
     return;
   }
 
-  bool changed = false;
   if (*op == "remove") {
     const auto id = json::GetString(line, "id");
     if (!id || !ValidId(*id)) {
       return;
     }
-    std::lock_guard lock(mu_);
-    const auto it = items_.find(*id);
-    if (it != items_.end() && it->second.owner == client->id) {
-      items_.erase(it);
-      changed = true;
-    }
+    PublishRemove(*id, client->id);
   } else if (*op == "upsert") {
     const auto id = json::GetString(line, "id");
     if (!id || !ValidId(*id)) {
@@ -961,47 +948,45 @@ void PipeServer::HandleV2(Client* client, std::string_view line) {
     if (const auto panel = json::GetRaw(line, "panel")) {
       ApplyPanelPatch(*panel, &item);
     }
-    std::lock_guard lock(mu_);
-    if (!AllowUpsertLocked(item.id, client->id)) {
-      return;
+    {
+      std::lock_guard lock(mu_);
+      if (!AllowUpsertLocked(item.id, client->id)) {
+        return;
+      }
     }
-    std::string key = item.id;
-    auto it = items_.find(key);
-    item.revision = (it == items_.end()) ? 1 : it->second.item.revision + 1;
-    items_.insert_or_assign(std::move(key), Record{std::move(item), client->id});
-    changed = true;
+    PublishUpsert(std::move(item), client->id);
   } else if (*op == "patch") {
     const auto id = json::GetString(line, "id");
-    if (!id || !ValidId(*id)) {
+    if (!id || !ValidId(*id) || sink_ == nullptr) {
       return;
     }
-    std::lock_guard lock(mu_);
-    const auto it = items_.find(*id);
-    if (it == items_.end() || it->second.owner != client->id) {
+    {
+      std::lock_guard lock(mu_);
+      const auto it = owners_.find(*id);
+      if (it == owners_.end() || it->second != client->id) {
+        return;
+      }
+    }
+    auto prev = sink_->Get(*id);
+    if (!prev) {
       return;
     }
-    StatusItem item = it->second.item;
     if (const auto segment = json::GetRaw(line, "segment")) {
-      ApplySegmentV2(*segment, &item);
+      ApplySegmentV2(*segment, &*prev);
     }
     if (const auto panel = json::GetRaw(line, "panel")) {
-      ApplyPanelPatch(*panel, &item);
+      ApplyPanelPatch(*panel, &*prev);
     }
-    item.revision += 1;
-    it->second.item = std::move(item);
-    changed = true;
-  }
-  if (changed) {
-    NotifyUi();
+    PublishUpsert(std::move(*prev), client->id);
   }
 }
 
 bool PipeServer::AllowUpsertLocked(const std::string& id, uint64_t owner) {
-  const auto it = items_.find(id);
-  if (it != items_.end()) {
-    return it->second.owner == owner;
+  const auto it = owners_.find(id);
+  if (it != owners_.end()) {
+    return it->second == owner;
   }
-  if (items_.size() >= kStatusItemsMax) {
+  if (owners_.size() >= kStatusItemsMax) {
     if (!logged_total_limit_) {
       logged_total_limit_ = true;
       Log(L"status", L"total item limit %zu reached; dropping upsert", kStatusItemsMax);
@@ -1009,8 +994,8 @@ bool PipeServer::AllowUpsertLocked(const std::string& id, uint64_t owner) {
     return false;
   }
   size_t owned = 0;
-  for (const auto& pair : items_) {
-    if (pair.second.owner == owner) {
+  for (const auto& pair : owners_) {
+    if (pair.second == owner) {
       ++owned;
     }
   }
@@ -1024,50 +1009,34 @@ bool PipeServer::AllowUpsertLocked(const std::string& id, uint64_t owner) {
   return true;
 }
 
-void PipeServer::NotifyUi() {
-  HWND hwnd = nullptr;
+void PipeServer::PublishUpsert(StatusItem item, uint64_t owner) {
+  if (sink_ == nullptr) {
+    return;
+  }
+  if (const auto prev = sink_->Get(item.id)) {
+    item.revision = prev->revision + 1;
+  } else {
+    item.revision = 1;
+  }
   {
     std::lock_guard lock(mu_);
-    const ULONGLONG now = NowMs();
-    if (last_notify_ms_ != 0 && now - last_notify_ms_ < kNotifyCoalesceMs) {
-      notify_pending_ = true;
-      return;
-    }
-    last_notify_ms_ = now;
-    notify_pending_ = false;
-    hwnd = notify_;
+    owners_[item.id] = owner;
   }
-  if (hwnd != nullptr) {
-    PostMessageW(hwnd, kStatusChangedMsg, 0, 0);
-  }
+  sink_->Upsert(std::move(item));
 }
 
-void PipeServer::FlushNotify() {
-  HWND hwnd = nullptr;
+void PipeServer::PublishRemove(const std::string& id, uint64_t owner) {
   {
     std::lock_guard lock(mu_);
-    if (!notify_pending_) {
+    const auto it = owners_.find(id);
+    if (it == owners_.end() || it->second != owner) {
       return;
     }
-    notify_pending_ = false;
-    last_notify_ms_ = NowMs();
-    hwnd = notify_;
+    owners_.erase(it);
   }
-  if (hwnd != nullptr) {
-    PostMessageW(hwnd, kStatusChangedMsg, 0, 0);
+  if (sink_ != nullptr) {
+    sink_->Remove(id);
   }
-}
-
-DWORD PipeServer::NotifyWaitTimeoutMs() {
-  std::lock_guard lock(mu_);
-  if (!notify_pending_) {
-    return INFINITE;
-  }
-  const ULONGLONG now = NowMs();
-  if (last_notify_ms_ == 0 || now - last_notify_ms_ >= kNotifyCoalesceMs) {
-    return 0;
-  }
-  return static_cast<DWORD>(kNotifyCoalesceMs - (now - last_notify_ms_));
 }
 
 void PipeServer::CloseClientPipe(Client* client) {

@@ -44,6 +44,7 @@ struct StatusRow {
   float value = 0.0f;
   bool on = false;
   bool danger = false;
+  bool muted = false;
 };
 
 struct StatusPanel {

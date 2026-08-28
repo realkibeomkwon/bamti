@@ -192,13 +192,7 @@ const BarLayoutResult& BarLayout::Compute(const RECT& client, const std::wstring
     }
   }
 
-  std::vector<StatusItem> ordered = items;
-  std::sort(ordered.begin(), ordered.end(), [](const StatusItem& a, const StatusItem& b) {
-    if (a.priority != b.priority) {
-      return a.priority > b.priority;
-    }
-    return a.id < b.id;
-  });
+  const std::vector<StatusItem>& ordered = items;
 
   std::vector<BarSegment> status;
   std::vector<StatusItem> visible;

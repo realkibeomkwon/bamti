@@ -350,7 +350,11 @@ class StatusPanelContent : public PopupContent {
     if (index < 0 || index >= static_cast<int>(buttons.size())) {
       return;
     }
-    owner_->status_.SendClick(item_.id, WideToUtf8(buttons[static_cast<size_t>(index)]));
+    StatusEvent ev;
+    ev.id = item_.id;
+    ev.event = "click";
+    ev.button = WideToUtf8(buttons[static_cast<size_t>(index)]);
+    owner_->status_.Dispatch(ev);
   }
 
  private:
@@ -442,7 +446,11 @@ class OverflowContent : public PopupContent {
       }
       owner_->OpenStatusPanel(hit);
     } else {
-      owner_->status_.SendClick(item.id, "left");
+      StatusEvent ev;
+      ev.id = item.id;
+      ev.event = "click";
+      ev.button = "left";
+      owner_->status_.Dispatch(ev);
     }
   }
 
@@ -458,7 +466,7 @@ MenuBar::MenuBar()
 
 MenuBar::~MenuBar() {
   RemoveWinHook();
-  status_.Stop();
+  status_.StopAll();
   start_menu_.Hide();
   spotlight_.Hide();
   status_popup_.Destroy();
@@ -505,7 +513,11 @@ bool MenuBar::Create(HINSTANCE instance) {
     return false;
   }
   CreateTooltip();
-  status_.Start(hwnd_);
+  status_.SetNotify(hwnd_);
+  status_.Register(&pipe_);
+  if (!status_.StartAll()) {
+    return false;
+  }
   if (!status_popup_.Create(instance, hwnd_)) {
     return false;
   }
@@ -687,7 +699,11 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         }
       }
       if (const auto hit = HitTest(pt)) {
-        status_.SendClick(hit->id, "left");
+        StatusEvent ev;
+        ev.id = hit->id;
+        ev.event = "click";
+        ev.button = "left";
+        status_.Dispatch(ev);
         OpenStatusPanel(*hit);
       }
       return 0;
@@ -695,7 +711,11 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_RBUTTONUP: {
       POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       if (const auto hit = HitTest(pt)) {
-        status_.SendClick(hit->id, "right");
+        StatusEvent ev;
+        ev.id = hit->id;
+        ev.event = "click";
+        ev.button = "right";
+        status_.Dispatch(ev);
         return 0;
       }
       ClientToScreen(hwnd_, &pt);
@@ -759,7 +779,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         KillTimer(hwnd_, kClockTimerId);
         KillTimer(hwnd_, kRepaintTimerId);
         StopFullscreenWatch(hwnd_);
-        status_.Stop();
+        status_.StopAll();
         taskbar_.Restore();
         UnregisterAppBar();
       }
@@ -769,7 +789,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kClockTimerId);
       KillTimer(hwnd_, kRepaintTimerId);
       StopFullscreenWatch(hwnd_);
-      status_.Stop();
+      status_.StopAll();
       status_popup_.Destroy();
       taskbar_.Restore();
       UnregisterAppBar();
@@ -1199,6 +1219,7 @@ void MenuBar::SetFullscreenOccluded(bool occluded) {
     return;
   }
   fullscreen_occluded_ = occluded;
+  status_.SetActive(!occluded);
   if (occluded) {
     start_menu_.Hide();
     spotlight_.Hide();

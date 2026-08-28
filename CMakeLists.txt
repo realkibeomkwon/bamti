@@ -18,6 +18,7 @@ add_executable(bamti WIN32
   src/icon_cache.cpp
   src/theme.cpp
   src/pipe_server.cpp
+  src/status_registry.cpp
   src/taskbar_controller.cpp
   src/fullscreen.cpp
   src/task_list.cpp

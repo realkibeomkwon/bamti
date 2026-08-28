@@ -7,6 +7,7 @@
 #include "spotlight.hpp"
 #include "start_menu.hpp"
 #include "status_item.hpp"
+#include "status_registry.hpp"
 #include "taskbar_controller.hpp"
 
 #include <windows.h>
@@ -111,7 +112,8 @@ class MenuBar {
   PerfAcc perf_bpend_;
   BarLayout layout_;
   ClockRenderer clock_;
-  PipeServer status_;
+  PipeServer pipe_;
+  StatusRegistry status_;
   TaskbarController taskbar_;
   StartMenu start_menu_;
   Spotlight spotlight_;
