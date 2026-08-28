@@ -53,7 +53,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>dwmapi.lib;d2d1.lib;dwrite.lib;shell32.lib;user32.lib;gdi32.lib;uxtheme.lib;ole32.lib;advapi32.lib;shcore.lib;comctl32.lib;propsys.lib;uuid.lib;msimg32.lib;windowscodecs.lib;powrprof.lib;imm32.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwmapi.lib;d2d1.lib;dwrite.lib;shell32.lib;user32.lib;gdi32.lib;uxtheme.lib;ole32.lib;advapi32.lib;shcore.lib;comctl32.lib;propsys.lib;uuid.lib;msimg32.lib;windowscodecs.lib;powrprof.lib;imm32.lib;shlwapi.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">

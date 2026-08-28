@@ -17,6 +17,7 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <shlwapi.h>
+#include <timeapi.h>
 #include <uxtheme.h>
 #include <wincodec.h>
 #include <windowsx.h>
@@ -63,7 +64,7 @@ constexpr UINT_PTR kRebuildTimerId = 3;
 constexpr UINT_PTR kTrayWatchTimerId = 4;
 constexpr UINT_PTR kAnimTimerId = 5;
 constexpr UINT kTrayWatchMs = 5000;
-constexpr UINT kAnimTimerMs = 16;
+constexpr UINT kAnimTimerMs = 8;
 constexpr UINT kIdlePollMs = 500;
 constexpr UINT kTasksChangedMsg = WM_APP + 20;
 constexpr UINT kMenuCommandMsg = WM_APP + 21;
@@ -1364,6 +1365,7 @@ Dock::~Dock() {
   }
   ResetIconCache();
   ReleaseLayeredTarget();
+  ReleaseAnimTimerPeriod();
   TaskbarController::UnwatchTray();
   StopFullscreenWatch(hwnd_);
   submenu_.Destroy();
@@ -1592,6 +1594,11 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     last_popup_tick_ = GetTickCount64();
     popup_.Tick();
   }
+  bool anim_pumped = false;
+  if (anim_timer_on_ && AnimFrameDue()) {
+    TickDragAnim();
+    anim_pumped = true;
+  }
   switch (msg) {
     case WM_ERASEBKGND:
       return 1;
@@ -1622,7 +1629,9 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           RaiseOverlays();
         }
       } else if (wparam == kAnimTimerId) {
-        TickDragAnim();
+        if (!anim_pumped) {
+          TickDragAnim();
+        }
       }
       return 0;
     case kTasksChangedMsg:
@@ -1820,6 +1829,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kRebuildTimerId);
       KillTimer(hwnd_, kTrayWatchTimerId);
       KillTimer(hwnd_, kAnimTimerId);
+      ReleaseAnimTimerPeriod();
       TaskbarController::UnwatchTray();
       StopFullscreenWatch(hwnd_);
       submenu_.Destroy();
@@ -2684,11 +2694,43 @@ void Dock::SnapAnimX() {
   }
 }
 
+void Dock::HoldAnimTimerPeriod() {
+  if (anim_period_held_) {
+    return;
+  }
+  timeBeginPeriod(1);
+  anim_period_held_ = true;
+  ++anim_period_begin_;
+}
+
+void Dock::ReleaseAnimTimerPeriod() {
+  if (!anim_period_held_) {
+    return;
+  }
+  timeEndPeriod(1);
+  anim_period_held_ = false;
+  ++anim_period_end_;
+  Log(L"perf", L"timer period begin=%u end=%u", anim_period_begin_, anim_period_end_);
+}
+
+bool Dock::AnimFrameDue() const {
+  if (!anim_timer_on_) {
+    return false;
+  }
+  if (last_anim_qpc_.QuadPart == 0) {
+    return true;
+  }
+  LARGE_INTEGER now{};
+  QueryPerformanceCounter(&now);
+  return QpcMs(last_anim_qpc_, now) >= static_cast<double>(kAnimTimerMs);
+}
+
 void Dock::StartDragAnimTimer() {
   if (hwnd_ == nullptr) {
     return;
   }
   if (!anim_timer_on_) {
+    HoldAnimTimerPeriod();
     SetTimer(hwnd_, kAnimTimerId, kAnimTimerMs, nullptr);
     anim_timer_on_ = true;
   }
@@ -2709,6 +2751,7 @@ void Dock::StopDragAnimTimer(bool log) {
   }
   anim_timer_on_ = false;
   last_anim_qpc_ = {};
+  ReleaseAnimTimerPeriod();
   if (log && anim_frames_ > 0) {
     const UINT intervals = anim_frames_ > 1 ? anim_frames_ - 1 : 0;
     const double interval_avg = intervals > 0 ? anim_interval_sum_ / static_cast<double>(intervals) : 0.0;

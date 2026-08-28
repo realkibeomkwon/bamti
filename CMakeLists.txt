@@ -74,6 +74,7 @@ target_link_libraries(bamti PRIVATE
   powrprof
   imm32
   shlwapi
+  winmm
   delayimp
 )
 

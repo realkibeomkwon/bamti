@@ -82,6 +82,9 @@ class Dock {
   void TickDragAnim();
   void StartDragAnimTimer();
   void StopDragAnimTimer(bool log);
+  void HoldAnimTimerPeriod();
+  void ReleaseAnimTimerPeriod();
+  bool AnimFrameDue() const;
   void SnapAnimX();
   float SlotIconX(size_t slot) const;
   bool NoteDragLog();
@@ -146,6 +149,9 @@ class Dock {
   double anim_interval_max_ = 0;
   LARGE_INTEGER last_anim_qpc_{};
   bool anim_timer_on_ = false;
+  bool anim_period_held_ = false;
+  UINT anim_period_begin_ = 0;
+  UINT anim_period_end_ = 0;
 };
 
 }  // namespace bamti
