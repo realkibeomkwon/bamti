@@ -713,8 +713,50 @@ HICON QueryWindowIcon(HWND hwnd) {
 }
 
 constexpr wchar_t kRunSubkey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t kRunNamePrefix[] = L"bamti-dock-";
+constexpr size_t kMaxRunValueName = 240;
 
-std::wstring LoginRunValueName(const DockApp& app) {
+void SanitizeRunTail(std::wstring& tail) {
+  for (wchar_t& ch : tail) {
+    if (ch == L'\\' || ch == L'/' || ch == L':') {
+      ch = L'_';
+    }
+  }
+}
+
+uint32_t Fnv1a32(const std::wstring& text) {
+  uint32_t hash = 2166136261u;
+  for (const wchar_t ch : text) {
+    hash ^= static_cast<uint32_t>(ch);
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+std::wstring Hex8(uint32_t value) {
+  std::wstring out(8, L'0');
+  for (int i = 7; i >= 0; --i) {
+    out[static_cast<size_t>(i)] = L"0123456789abcdef"[value & 0xfu];
+    value >>= 4;
+  }
+  return out;
+}
+
+std::wstring MakeRunValueName(std::wstring tail) {
+  SanitizeRunTail(tail);
+  if (tail.empty()) {
+    return {};
+  }
+  std::wstring name = std::wstring(kRunNamePrefix) + tail;
+  if (name.size() <= kMaxRunValueName) {
+    return name;
+  }
+  const std::wstring hash = Hex8(Fnv1a32(name));
+  const size_t keep = kMaxRunValueName - 1 - hash.size();
+  return name.substr(0, keep) + L"_" + hash;
+}
+
+std::wstring LoginRunValueNameLegacy(const DockApp& app) {
   std::wstring tail;
   if (!app.exe_path.empty()) {
     const wchar_t* file = PathFindFileNameW(app.exe_path.c_str());
@@ -722,15 +764,21 @@ std::wstring LoginRunValueName(const DockApp& app) {
   } else if (!app.aumid.empty()) {
     tail = app.aumid;
   }
-  for (wchar_t& ch : tail) {
-    if (ch == L'\\' || ch == L'/' || ch == L':') {
-      ch = L'_';
-    }
-  }
+  SanitizeRunTail(tail);
   if (tail.empty()) {
     return {};
   }
-  return L"bamti-dock-" + tail;
+  return std::wstring(kRunNamePrefix) + tail;
+}
+
+std::wstring LoginRunValueName(const DockApp& app) {
+  std::wstring tail;
+  if (!app.aumid.empty()) {
+    tail = app.aumid;
+  } else if (!app.exe_path.empty()) {
+    tail = app.exe_path;
+  }
+  return MakeRunValueName(std::move(tail));
 }
 
 std::wstring LoginRunCommand(const DockApp& app) {
@@ -752,8 +800,29 @@ bool LoginValueExists(const std::wstring& name) {
   return st == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ);
 }
 
+bool LoginItemPresent(const DockApp& app) {
+  const std::wstring name = LoginRunValueName(app);
+  const std::wstring legacy = LoginRunValueNameLegacy(app);
+  if (LoginValueExists(name)) {
+    return true;
+  }
+  return legacy != name && LoginValueExists(legacy);
+}
+
+LONG DeleteRunValue(HKEY key, const std::wstring& name) {
+  if (name.empty()) {
+    return ERROR_SUCCESS;
+  }
+  const LONG st = RegDeleteValueW(key, name.c_str());
+  if (st == ERROR_FILE_NOT_FOUND) {
+    return ERROR_SUCCESS;
+  }
+  return st;
+}
+
 void ToggleLoginItem(const DockApp& app) {
   const std::wstring name = LoginRunValueName(app);
+  const std::wstring legacy = LoginRunValueNameLegacy(app);
   const std::wstring command = LoginRunCommand(app);
   if (name.empty() || command.empty()) {
     Log(L"dock", L"login toggle failed err=%lu", static_cast<unsigned long>(ERROR_INVALID_DATA));
@@ -766,13 +835,11 @@ void ToggleLoginItem(const DockApp& app) {
     Log(L"dock", L"login toggle failed err=%lu", static_cast<unsigned long>(st));
     return;
   }
-  DWORD type = 0;
-  DWORD size = 0;
-  const bool exists = RegQueryValueExW(key, name.c_str(), nullptr, &type, nullptr, &size) == ERROR_SUCCESS;
+  const bool exists = LoginItemPresent(app);
   if (exists) {
-    st = RegDeleteValueW(key, name.c_str());
-    if (st == ERROR_FILE_NOT_FOUND) {
-      st = ERROR_SUCCESS;
+    st = DeleteRunValue(key, name);
+    if (st == ERROR_SUCCESS) {
+      st = DeleteRunValue(key, legacy);
     }
   } else {
     const DWORD bytes = static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t));
@@ -781,8 +848,10 @@ void ToggleLoginItem(const DockApp& app) {
   RegCloseKey(key);
   if (st != ERROR_SUCCESS) {
     Log(L"dock", L"login toggle failed err=%lu", static_cast<unsigned long>(st));
+  } else if (exists) {
+    Log(L"dock", L"login removed name=%s legacy=%s", name.c_str(), legacy.c_str());
   } else {
-    Log(L"dock", L"login %s name=%s", exists ? L"removed" : L"added", name.c_str());
+    Log(L"dock", L"login added name=%s cmd=%s", name.c_str(), command.c_str());
   }
 }
 
@@ -1068,7 +1137,7 @@ class DockSubmenuContent : public PopupContent {
     const std::wstring login_name = LoginRunValueName(app);
     const std::wstring login_cmd = LoginRunCommand(app);
     if (!login_name.empty() && !login_cmd.empty()) {
-      rows_.push_back({kToggleLoginCommand, std::wstring(L"로그인 시 열기"), false, LoginValueExists(login_name)});
+      rows_.push_back({kToggleLoginCommand, std::wstring(L"로그인 시 열기"), false, LoginItemPresent(app)});
     }
     if (!app.exe_path.empty() && app.exe_path.find(L'"') == std::wstring::npos) {
       rows_.push_back({kShowInFolderCommand, std::wstring(L"파일 위치 열기")});
