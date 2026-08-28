@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,7 @@ class Spotlight {
   bool visible() const { return visible_; }
 
   enum class Kind {
+    Header,
     App,
     Setting,
     File,
@@ -62,6 +64,9 @@ class Spotlight {
   static LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
   LRESULT HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam);
+  LRESULT HandleImeMessage(HWND edit, UINT msg, WPARAM wparam, LPARAM lparam);
+  void HandleImeComposition(LPARAM lparam);
+  void ClearIme();
   bool EnsureWindow(HWND owner);
   bool EnsureRenderer();
   bool EnsureLayer(int width, int height);
@@ -72,6 +77,8 @@ class Spotlight {
   void DestroyFileIcons();
   HICON EnsureIcon(const Match& match);
   void QueryFiles(const std::wstring& needle);
+  void AcceptFileHits(void* payload);
+  void WaitForFileSearches();
   void RebuildMatches();
   void LayoutWindow();
   void RebuildRows();
@@ -81,9 +88,12 @@ class Spotlight {
   void ApplyFilter();
   void UpdateHot(POINT client);
   void MoveHot(int delta);
-  void ActivateMatch(const Match& match);
+  void ActivateMatch(const Match& match, bool reveal = false);
   void ActivateHot();
   void LaunchPath(const std::wstring& path);
+  void RevealPath(const std::wstring& path);
+  int RowHeight(const Match& match) const;
+  int VisibleCount() const;
   const Row* HitTest(POINT client) const;
   bool Selectable(const Row& row) const;
   int FirstSelectable() const;
@@ -105,6 +115,7 @@ class Spotlight {
   RECT search_rect_{};
   ULONGLONG apps_loaded_at_ = 0;
   UINT font_dpi_ = 0;
+  UINT edit_font_dpi_ = 0;
   bool visible_ = false;
   bool dark_ = true;
   bool closing_ = false;
@@ -112,6 +123,11 @@ class Spotlight {
   int hot_ = -1;
   int rows_visible_ = 0;
   std::wstring filter_;
+  std::wstring ime_comp_;
+  LONG ime_cursor_ = 0;
+  bool swallow_ime_commit_ = false;
+  std::atomic<uint64_t> search_gen_{0};
+  std::atomic<uint32_t> search_inflight_{0};
   std::vector<AppEntry> apps_;
   std::vector<FileHit> files_;
   std::vector<Match> matches_;
@@ -123,6 +139,7 @@ class Spotlight {
   Microsoft::WRL::ComPtr<IDWriteTextFormat> format_;
   Microsoft::WRL::ComPtr<IDWriteTextFormat> search_format_;
   Microsoft::WRL::ComPtr<IDWriteTextFormat> meta_format_;
+  Microsoft::WRL::ComPtr<IDWriteTextFormat> header_format_;
   Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> rt_;
 };
 

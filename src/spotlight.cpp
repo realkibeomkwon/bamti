@@ -1,6 +1,7 @@
 #include "spotlight.hpp"
 
 #include "dwm.hpp"
+#include "log.hpp"
 #include "theme.hpp"
 
 #include <d2d1helper.h>
@@ -16,27 +17,33 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 
 namespace bamti {
 namespace {
 
-constexpr int kWidthDip = 640;
+constexpr int kWidthDip = 680;
 constexpr int kShadowDip = 18;
 constexpr int kPadDip = 12;
-constexpr int kSearchHeightDip = 52;
-constexpr int kCardRadiusDip = 16;
+constexpr int kSearchHeightDip = 48;
+constexpr int kCardRadiusDip = 18;
 constexpr int kSearchRadiusDip = 12;
-constexpr int kRowHeightDip = 40;
-constexpr int kIconDip = 24;
-constexpr int kMaxRows = 9;
-constexpr int kMaxApps = 5;
-constexpr int kMaxSettings = 4;
-constexpr int kMaxFiles = 6;
+constexpr int kRowHeightDip = 36;
+constexpr int kHeaderHeightDip = 24;
+constexpr int kMaxListDip = 420;
+constexpr int kIconDip = 28;
+constexpr int kMaxApps = 4;
+constexpr int kMaxSettings = 3;
+constexpr int kMaxFolders = 4;
+constexpr int kMaxDocuments = 4;
 constexpr int kGlyphDip = 18;
 constexpr UINT_PTR kFileSearchTimer = 1;
-constexpr UINT kFileSearchDelayMs = 140;
+constexpr UINT kFileSearchDoneMsg = WM_APP + 40;
+constexpr UINT kFileSearchDelayMs = 40;
+constexpr ULONGLONG kWalkBudgetMs = 45;
 constexpr ULONGLONG kAppReloadMs = 60000;
 constexpr COLORREF kSearchFillLight = RGB(255, 255, 255);
 constexpr COLORREF kSearchFillDark = RGB(48, 48, 48);
@@ -107,22 +114,161 @@ std::wstring LowerCopy(std::wstring text) {
   return text;
 }
 
+std::wstring TrimCopy(std::wstring text) {
+  while (!text.empty() && (text.front() == L' ' || text.front() == L'\t')) {
+    text.erase(text.begin());
+  }
+  while (!text.empty() && (text.back() == L' ' || text.back() == L'\t')) {
+    text.pop_back();
+  }
+  return text;
+}
+
+bool WordBreak(wchar_t ch) {
+  return ch == L' ' || ch == L'-' || ch == L'_' || ch == L'.' || ch == L'\\' || ch == L'/' || ch == L'[' ||
+         ch == L'(' || ch == L'+';
+}
+
 int MatchScore(std::wstring hay, const std::wstring& needle) {
   if (needle.empty()) {
     return -1;
   }
   hay = LowerCopy(std::move(hay));
-  if (hay.size() >= needle.size() && hay.compare(0, needle.size(), needle) == 0) {
+  if (hay == needle) {
     return 0;
   }
-  const size_t pos = hay.find(needle);
-  if (pos == std::wstring::npos) {
+  if (hay.size() >= needle.size() && hay.compare(0, needle.size(), needle) == 0) {
+    return 1;
+  }
+  size_t pos = hay.find(needle);
+  while (pos != std::wstring::npos) {
+    if (pos > 0 && WordBreak(hay[pos - 1])) {
+      return 2;
+    }
+    pos = hay.find(needle, pos + 1);
+  }
+  if (hay.find(needle) == std::wstring::npos) {
     return -1;
   }
-  if (pos > 0 && hay[pos - 1] != L' ' && hay[pos - 1] != L'-') {
-    return 2;
+  if (needle.size() <= 2) {
+    return -1;
   }
-  return 1;
+  return 4;
+}
+
+int MatchQuery(const std::wstring& hay, const std::wstring& needle) {
+  const int direct = MatchScore(hay, needle);
+  if (direct >= 0) {
+    return direct;
+  }
+  int worst = 0;
+  bool any = false;
+  std::wstring token;
+  for (const wchar_t ch : needle) {
+    if (ch == L' ' || ch == L'\t') {
+      if (!token.empty()) {
+        const int part = MatchScore(hay, token);
+        if (part < 0) {
+          return -1;
+        }
+        worst = (std::max)(worst, part);
+        any = true;
+        token.clear();
+      }
+    } else {
+      token.push_back(ch);
+    }
+  }
+  if (!token.empty()) {
+    const int part = MatchScore(hay, token);
+    if (part < 0) {
+      return -1;
+    }
+    worst = (std::max)(worst, part);
+    any = true;
+  }
+  return any ? 6 + worst : -1;
+}
+
+bool LooksLikeHangul(const std::wstring& text) {
+  for (const wchar_t ch : text) {
+    if ((ch >= 0xAC00 && ch <= 0xD7A3) || (ch >= 0x1100 && ch <= 0x11FF) || (ch >= 0x3130 && ch <= 0x318F)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::wstring IndexedSearchQuery(const std::wstring& needle) {
+  std::wstring query;
+  std::wstring token;
+  auto flush = [&]() {
+    if (token.empty()) {
+      return;
+    }
+    std::wstring escaped;
+    escaped.reserve(token.size() + 4);
+    for (const wchar_t ch : token) {
+      if (ch == L'"') {
+        escaped.append(L"\"\"");
+      } else {
+        escaped.push_back(ch);
+      }
+    }
+    if (!query.empty()) {
+      query += L" AND ";
+    }
+    query += L"System.FileName:~~\"";
+    query += escaped;
+    query += L"\"";
+    token.clear();
+  };
+  for (const wchar_t ch : needle) {
+    if (ch == L' ' || ch == L'\t') {
+      flush();
+    } else {
+      token.push_back(ch);
+    }
+  }
+  flush();
+  return query;
+}
+
+std::wstring FileLeaf(const std::wstring& path) {
+  const size_t slash = path.find_last_of(L"\\/");
+  return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+bool FilenameContains(const Spotlight::FileHit& hit, const std::wstring& needle) {
+  const std::wstring lower_needle = LowerCopy(needle);
+  if (LowerCopy(hit.title).find(lower_needle) != std::wstring::npos) {
+    return true;
+  }
+  return LowerCopy(FileLeaf(hit.path)).find(lower_needle) != std::wstring::npos;
+}
+
+int FileHitScore(const Spotlight::FileHit& hit, const std::wstring& needle) {
+  const int title = MatchQuery(hit.title, needle);
+  if (title >= 0) {
+    return title;
+  }
+  return MatchQuery(FileLeaf(hit.path), needle);
+}
+
+bool SamePath(const std::wstring& a, const std::wstring& b) {
+  return lstrcmpiW(a.c_str(), b.c_str()) == 0;
+}
+
+void AppendUniqueHit(std::vector<Spotlight::FileHit>& out, Spotlight::FileHit&& hit) {
+  if (hit.path.empty()) {
+    return;
+  }
+  for (const auto& existing : out) {
+    if (SamePath(existing.path, hit.path)) {
+      return;
+    }
+  }
+  out.push_back(std::move(hit));
 }
 
 bool EndsWithIgnoreCase(const std::wstring& text, const wchar_t* suffix) {
@@ -139,8 +285,28 @@ bool SkipShortcut(const std::wstring& name) {
 }
 
 bool SkipWalkDir(const wchar_t* name) {
-  return lstrcmpiW(name, L"node_modules") == 0 || lstrcmpiW(name, L".git") == 0 ||
-         lstrcmpiW(name, L"AppData") == 0;
+  static constexpr const wchar_t* kSkip[] = {
+      L"node_modules",
+      L".git",
+      L"AppData",
+      L"Windows",
+      L"Windows.old",
+      L"Program Files",
+      L"Program Files (x86)",
+      L"ProgramData",
+      L"$Recycle.Bin",
+      L"System Volume Information",
+      L"Recovery",
+      L"PerfLogs",
+      L"$WINDOWS.~BT",
+      L"$WINDOWS.~WS",
+  };
+  for (const wchar_t* skip : kSkip) {
+    if (lstrcmpiW(name, skip) == 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::wstring StemFromFile(const std::wstring& name) {
@@ -170,6 +336,23 @@ std::wstring KnownFolder(REFKNOWNFOLDERID id) {
   return out;
 }
 
+std::vector<std::wstring> FixedDriveRoots() {
+  std::vector<std::wstring> roots;
+  const DWORD mask = GetLogicalDrives();
+  wchar_t root[] = L"A:\\";
+  for (int i = 0; i < 26; ++i) {
+    if ((mask & (1u << i)) == 0) {
+      continue;
+    }
+    root[0] = static_cast<wchar_t>(L'A' + i);
+    if (GetDriveTypeW(root) != DRIVE_FIXED) {
+      continue;
+    }
+    roots.emplace_back(root);
+  }
+  return roots;
+}
+
 std::wstring ParentName(const std::wstring& path) {
   size_t end = path.find_last_not_of(L"\\/");
   if (end == std::wstring::npos) {
@@ -186,16 +369,50 @@ std::wstring ParentName(const std::wstring& path) {
 
 const wchar_t* KindLabel(Spotlight::Kind kind) {
   switch (kind) {
+    case Spotlight::Kind::Header:
+      return L"";
     case Spotlight::Kind::App:
-      return L"앱";
+      return L"응용 프로그램";
     case Spotlight::Kind::Setting:
-      return L"설정";
+      return L"시스템 설정";
     case Spotlight::Kind::File:
-      return L"파일";
+      return L"문서";
     case Spotlight::Kind::Folder:
       return L"폴더";
   }
   return L"";
+}
+
+const wchar_t* SectionTitle(int index) {
+  switch (index) {
+    case 0:
+      return L"최고 순위";
+    case 1:
+      return L"응용 프로그램";
+    case 2:
+      return L"시스템 설정";
+    case 3:
+      return L"폴더";
+    case 4:
+      return L"문서";
+    default:
+      return L"";
+  }
+}
+
+int KindRank(Spotlight::Kind kind) {
+  switch (kind) {
+    case Spotlight::Kind::App:
+      return 0;
+    case Spotlight::Kind::Folder:
+      return 1;
+    case Spotlight::Kind::Setting:
+      return 2;
+    case Spotlight::Kind::File:
+      return 3;
+    default:
+      return 9;
+  }
 }
 
 HICON LoadStockIcon(SHSTOCKICONID id) {
@@ -223,20 +440,25 @@ bool ShouldRefreshSearchVisual(UINT msg, WPARAM wparam) {
     case WM_CHAR:
     case WM_DEADCHAR:
     case WM_UNICHAR:
-    case WM_KEYDOWN:
-    case WM_KEYUP:
     case WM_LBUTTONDOWN:
     case WM_LBUTTONUP:
     case WM_LBUTTONDBLCLK:
-    case WM_IME_COMPOSITION:
-    case WM_IME_STARTCOMPOSITION:
-    case WM_IME_ENDCOMPOSITION:
-    case WM_IME_CHAR:
     case WM_PASTE:
     case WM_CUT:
     case WM_CLEAR:
     case WM_UNDO:
       return true;
+    case WM_KEYDOWN:
+      switch (wparam) {
+        case VK_LEFT:
+        case VK_RIGHT:
+        case VK_HOME:
+        case VK_END:
+        case VK_DELETE:
+          return true;
+        default:
+          return false;
+      }
     case WM_MOUSEMOVE:
       return (wparam & MK_LBUTTON) != 0;
     default:
@@ -265,7 +487,7 @@ struct EditView {
   UINT32 caret = 0;
 };
 
-EditView ReadEditView(HWND edit) {
+EditView ReadEditView(HWND edit, const std::wstring& ime_comp, LONG ime_cursor) {
   EditView view;
   if (edit == nullptr) {
     return view;
@@ -288,43 +510,37 @@ EditView ReadEditView(HWND edit) {
     end = start;
   }
   view.caret = end;
-
-  const HIMC himc = ImmGetContext(edit);
-  if (himc == nullptr) {
-    return view;
-  }
-  const LONG bytes = ImmGetCompositionStringW(himc, GCS_COMPSTR, nullptr, 0);
-  LONG cursor = 0;
-  if (bytes > 0) {
-    std::wstring comp(static_cast<size_t>(bytes / sizeof(wchar_t)), L'\0');
-    ImmGetCompositionStringW(himc, GCS_COMPSTR, comp.data(), bytes);
-    cursor = ImmGetCompositionStringW(himc, GCS_CURSORPOS, nullptr, 0);
+  if (!ime_comp.empty()) {
+    if (start > view.text.size()) {
+      start = static_cast<DWORD>(view.text.size());
+    }
+    view.text.replace(start, end - start, ime_comp);
+    LONG cursor = ime_cursor;
     if (cursor < 0) {
-      cursor = static_cast<LONG>(comp.size());
+      cursor = static_cast<LONG>(ime_comp.size());
     }
-
-    bool already = false;
-    if (end > start && view.text.compare(start, end - start, comp) == 0) {
-      already = true;
-      view.caret = start + static_cast<UINT32>(cursor);
-    } else if (start >= comp.size() &&
-               view.text.compare(start - static_cast<DWORD>(comp.size()), comp.size(), comp) == 0) {
-      already = true;
-      view.caret = start - static_cast<UINT32>(comp.size()) + static_cast<UINT32>(cursor);
-    } else if (start + comp.size() <= view.text.size() && view.text.compare(start, comp.size(), comp) == 0) {
-      already = true;
-      view.caret = start + static_cast<UINT32>(cursor);
+    if (cursor > static_cast<LONG>(ime_comp.size())) {
+      cursor = static_cast<LONG>(ime_comp.size());
     }
-    if (!already) {
-      view.text.replace(start, end - start, comp);
-      view.caret = start + static_cast<UINT32>(cursor);
-    }
+    view.caret = start + static_cast<UINT32>(cursor);
   }
-  ImmReleaseContext(edit, himc);
   if (view.caret > view.text.size()) {
     view.caret = static_cast<UINT32>(view.text.size());
   }
   return view;
+}
+
+std::wstring CompositionString(HIMC himc, DWORD index) {
+  const LONG bytes = ImmGetCompositionStringW(himc, index, nullptr, 0);
+  if (bytes <= 0) {
+    return {};
+  }
+  std::wstring text(static_cast<size_t>(bytes / sizeof(wchar_t)), L'\0');
+  ImmGetCompositionStringW(himc, index, text.data(), bytes);
+  while (!text.empty() && text.back() == L'\0') {
+    text.pop_back();
+  }
+  return text;
 }
 
 void CollectFolder(const std::wstring& root, std::vector<std::pair<std::wstring, std::wstring>>& out,
@@ -366,8 +582,8 @@ void CollectFolder(const std::wstring& root, std::vector<std::pair<std::wstring,
 }
 
 void WalkNamed(const std::wstring& dir, const std::wstring& needle, std::vector<Spotlight::FileHit>& out, int depth,
-               int& remaining) {
-  if (remaining <= 0 || dir.empty() || depth < 0) {
+               int& remaining, bool folders_only, ULONGLONG deadline) {
+  if (remaining <= 0 || dir.empty() || depth < 0 || GetTickCount64() >= deadline) {
     return;
   }
   WIN32_FIND_DATAW fd{};
@@ -376,7 +592,7 @@ void WalkNamed(const std::wstring& dir, const std::wstring& needle, std::vector<
     return;
   }
   do {
-    if (remaining <= 0) {
+    if (remaining <= 0 || GetTickCount64() >= deadline) {
       break;
     }
     if (fd.cFileName[0] == L'.' &&
@@ -392,7 +608,10 @@ void WalkNamed(const std::wstring& dir, const std::wstring& needle, std::vector<
     }
     const std::wstring full = dir + L'\\' + fd.cFileName;
     if (is_dir && depth > 0) {
-      WalkNamed(full, needle, out, depth - 1, remaining);
+      WalkNamed(full, needle, out, depth - 1, remaining, folders_only, deadline);
+    }
+    if (folders_only && !is_dir) {
+      continue;
     }
     const std::wstring lower = LowerCopy(fd.cFileName);
     if (lower.find(needle) == std::wstring::npos) {
@@ -403,13 +622,151 @@ void WalkNamed(const std::wstring& dir, const std::wstring& needle, std::vector<
     hit.path = full;
     hit.folder = is_dir;
     hit.detail = ParentName(full);
-    out.push_back(std::move(hit));
-    --remaining;
+    const size_t before = out.size();
+    AppendUniqueHit(out, std::move(hit));
+    if (out.size() > before) {
+      --remaining;
+    }
   } while (FindNextFileW(find, &fd) != FALSE);
   FindClose(find);
 }
 
-bool QueryIndexedFiles(const std::wstring& query, std::vector<Spotlight::FileHit>& out) {
+void TryAddExistingPath(const std::wstring& full, std::vector<Spotlight::FileHit>& out) {
+  if (full.empty()) {
+    return;
+  }
+  const DWORD attr = GetFileAttributesW(full.c_str());
+  if (attr == INVALID_FILE_ATTRIBUTES) {
+    return;
+  }
+  Spotlight::FileHit hit;
+  hit.title = FileLeaf(full);
+  hit.path = full;
+  hit.folder = (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+  hit.detail = ParentName(full);
+  AppendUniqueHit(out, std::move(hit));
+}
+
+void ProbeExactLocations(const std::wstring& name, std::vector<Spotlight::FileHit>& out) {
+  if (name.empty() || name.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) {
+    return;
+  }
+  const KNOWNFOLDERID ids[] = {FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Profile};
+  for (const KNOWNFOLDERID& id : ids) {
+    const std::wstring root = KnownFolder(id);
+    if (!root.empty()) {
+      TryAddExistingPath(root + L'\\' + name, out);
+    }
+  }
+  for (const std::wstring& drive : FixedDriveRoots()) {
+    TryAddExistingPath(drive + name, out);
+    WIN32_FIND_DATAW fd{};
+    const HANDLE find = FindFirstFileW((drive + L"*").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) {
+      continue;
+    }
+    do {
+      if (fd.cFileName[0] == L'.' &&
+          (fd.cFileName[1] == L'\0' || (fd.cFileName[1] == L'.' && fd.cFileName[2] == L'\0'))) {
+        continue;
+      }
+      if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+          (fd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0 || SkipWalkDir(fd.cFileName)) {
+        continue;
+      }
+      TryAddExistingPath(drive + fd.cFileName + L'\\' + name, out);
+    } while (FindNextFileW(find, &fd) != FALSE);
+    FindClose(find);
+  }
+}
+
+std::vector<Spotlight::FileHit> RankFileHits(std::vector<Spotlight::FileHit> mixed, const std::wstring& needle) {
+  std::vector<Spotlight::FileHit> folders;
+  std::vector<Spotlight::FileHit> files;
+  folders.reserve(mixed.size());
+  files.reserve(mixed.size());
+  for (auto& hit : mixed) {
+    if (hit.folder) {
+      folders.push_back(std::move(hit));
+    } else {
+      files.push_back(std::move(hit));
+    }
+  }
+
+  auto by_name = [&](const Spotlight::FileHit& a, const Spotlight::FileHit& b) {
+    const int sa = FileHitScore(a, needle);
+    const int sb = FileHitScore(b, needle);
+    if (sa != sb) {
+      return sa < sb;
+    }
+    if (a.title.size() != b.title.size()) {
+      return a.title.size() < b.title.size();
+    }
+    return a.path < b.path;
+  };
+  std::sort(folders.begin(), folders.end(), by_name);
+  std::sort(files.begin(), files.end(), by_name);
+
+  std::vector<Spotlight::FileHit> out;
+  out.reserve(folders.size() + files.size());
+  for (auto& hit : folders) {
+    AppendUniqueHit(out, std::move(hit));
+  }
+  for (auto& hit : files) {
+    AppendUniqueHit(out, std::move(hit));
+  }
+  return out;
+}
+
+std::vector<Spotlight::FileHit> CollectQuickHits(const std::wstring& needle) {
+  const std::wstring query = TrimCopy(needle);
+  if (query.empty()) {
+    return {};
+  }
+  std::vector<Spotlight::FileHit> mixed;
+  ProbeExactLocations(query, mixed);
+  const std::wstring lower = LowerCopy(query);
+  const ULONGLONG deadline = GetTickCount64() + 25;
+  int remaining = 8;
+  const KNOWNFOLDERID roots[] = {FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads};
+  for (const KNOWNFOLDERID& id : roots) {
+    WalkNamed(KnownFolder(id), lower, mixed, 2, remaining, true, deadline);
+    if (remaining <= 0 || GetTickCount64() >= deadline) {
+      break;
+    }
+  }
+  return RankFileHits(std::move(mixed), lower);
+}
+
+bool QueryIndexedHits(const std::wstring& aqs, const std::wstring& needle, bool filename_only, bool folders_only,
+                      std::vector<Spotlight::FileHit>& out, int max_items);
+
+std::vector<Spotlight::FileHit> CollectSlowHits(const std::wstring& needle, std::vector<Spotlight::FileHit> mixed) {
+  const std::wstring query = TrimCopy(needle);
+  if (query.empty()) {
+    return RankFileHits(std::move(mixed), query);
+  }
+  const std::wstring lower = LowerCopy(query);
+  QueryIndexedHits(IndexedSearchQuery(query), query, true, false, mixed, 12);
+  const ULONGLONG deadline = GetTickCount64() + kWalkBudgetMs;
+  int remaining = 8;
+  for (const std::wstring& drive : FixedDriveRoots()) {
+    if (GetTickCount64() >= deadline) {
+      break;
+    }
+    WalkNamed(drive, lower, mixed, 1, remaining, false, deadline);
+    if (remaining <= 0) {
+      break;
+    }
+  }
+  return RankFileHits(std::move(mixed), lower);
+}
+
+bool QueryIndexedHits(const std::wstring& aqs, const std::wstring& needle, bool filename_only, bool folders_only,
+                      std::vector<Spotlight::FileHit>& out, int max_items) {
+  if (aqs.empty() || max_items <= 0) {
+    return false;
+  }
   Microsoft::WRL::ComPtr<IQueryParserManager> manager;
   if (FAILED(CoCreateInstance(__uuidof(QueryParserManager), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&manager))) ||
       !manager) {
@@ -422,7 +779,7 @@ bool QueryIndexedFiles(const std::wstring& query, std::vector<Spotlight::FileHit
     return false;
   }
   Microsoft::WRL::ComPtr<IQuerySolution> solution;
-  if (FAILED(parser->Parse(query.c_str(), nullptr, &solution)) || !solution) {
+  if (FAILED(parser->Parse(aqs.c_str(), nullptr, &solution)) || !solution) {
     return false;
   }
   Microsoft::WRL::ComPtr<ICondition> condition;
@@ -438,7 +795,8 @@ bool QueryIndexedFiles(const std::wstring& query, std::vector<Spotlight::FileHit
   factory->SetCondition(condition.Get());
 
   Microsoft::WRL::ComPtr<IShellItem> profile;
-  if (SUCCEEDED(SHGetKnownFolderItem(FOLDERID_Profile, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&profile))) && profile) {
+  if (SUCCEEDED(SHGetKnownFolderItem(FOLDERID_Profile, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&profile))) &&
+      profile) {
     Microsoft::WRL::ComPtr<IShellItemArray> scope;
     if (SUCCEEDED(SHCreateShellItemArrayFromShellItem(profile.Get(), IID_PPV_ARGS(&scope))) && scope) {
       factory->SetScope(scope.Get());
@@ -454,7 +812,8 @@ bool QueryIndexedFiles(const std::wstring& query, std::vector<Spotlight::FileHit
     return false;
   }
 
-  for (int n = 0; n < 12; ++n) {
+  const size_t before = out.size();
+  for (int n = 0; n < 32 && static_cast<int>(out.size()) < max_items; ++n) {
     Microsoft::WRL::ComPtr<IShellItem> item;
     ULONG fetched = 0;
     if (enumer->Next(1, item.GetAddressOf(), &fetched) != S_OK || fetched == 0 || !item) {
@@ -480,6 +839,9 @@ bool QueryIndexedFiles(const std::wstring& query, std::vector<Spotlight::FileHit
     if (hit.title.empty() || hit.path.empty()) {
       continue;
     }
+    if (filename_only && !FilenameContains(hit, needle)) {
+      continue;
+    }
     const std::wstring lower_path = LowerCopy(hit.path);
     if (lower_path.find(L"\\start menu\\") != std::wstring::npos) {
       continue;
@@ -488,11 +850,20 @@ bool QueryIndexedFiles(const std::wstring& query, std::vector<Spotlight::FileHit
     if (SUCCEEDED(item->GetAttributes(SFGAO_FOLDER, &attr)) && (attr & SFGAO_FOLDER) != 0) {
       hit.folder = true;
     }
+    if (folders_only && !hit.folder) {
+      continue;
+    }
     hit.detail = ParentName(hit.path);
-    out.push_back(std::move(hit));
+    AppendUniqueHit(out, std::move(hit));
   }
-  return !out.empty();
+  return out.size() > before;
 }
+
+struct FileSearchPayload {
+  uint64_t gen = 0;
+  std::wstring needle;
+  std::vector<Spotlight::FileHit> hits;
+};
 
 D2D1_COLOR_F FillColor(bool dark) {
   return dark ? D2D1::ColorF(0.14f, 0.14f, 0.14f, 1.0f) : D2D1::ColorF(0.97f, 0.97f, 0.97f, 1.0f);
@@ -525,6 +896,7 @@ void DrawMagnifier(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, D2D1_POIN
 }  // namespace
 
 Spotlight::~Spotlight() {
+  WaitForFileSearches();
   Hide();
   DestroyAppIcons();
   DestroyFileIcons();
@@ -541,6 +913,7 @@ Spotlight::~Spotlight() {
     DeleteObject(edit_font_);
     edit_font_ = nullptr;
   }
+  edit_font_dpi_ = 0;
   if (search_brush_ != nullptr) {
     DeleteObject(search_brush_);
     search_brush_ = nullptr;
@@ -584,6 +957,8 @@ void Spotlight::Toggle(HWND owner, bool dark) {
   DestroyFileIcons();
   files_.clear();
   matches_.clear();
+  ClearIme();
+  search_gen_.fetch_add(1, std::memory_order_acq_rel);
   if (edit_ != nullptr) {
     SetWindowTextW(edit_, L"");
   }
@@ -612,6 +987,7 @@ void Spotlight::Toggle(HWND owner, bool dark) {
 }
 
 void Spotlight::Hide() {
+  search_gen_.fetch_add(1, std::memory_order_acq_rel);
   if (hwnd_ != nullptr) {
     KillTimer(hwnd_, kFileSearchTimer);
   }
@@ -624,9 +1000,98 @@ void Spotlight::Hide() {
   visible_ = false;
   closing_ = false;
   hot_ = -1;
+  ClearIme();
   if (hwnd_ != nullptr) {
     ShowWindow(hwnd_, SW_HIDE);
   }
+}
+
+void Spotlight::ClearIme() {
+  ime_comp_.clear();
+  ime_cursor_ = 0;
+  swallow_ime_commit_ = false;
+}
+
+LRESULT Spotlight::HandleImeMessage(HWND edit, UINT msg, WPARAM wparam, LPARAM lparam) {
+  switch (msg) {
+    case WM_IME_SETCONTEXT:
+      lparam &= ~ISC_SHOWUICOMPOSITIONWINDOW;
+      return CallWindowProcW(edit_prev_, edit, msg, wparam, lparam);
+    case WM_IME_STARTCOMPOSITION:
+      ime_comp_.clear();
+      ime_cursor_ = 0;
+      Present();
+      return 0;
+    case WM_IME_ENDCOMPOSITION:
+      if (!ime_comp_.empty()) {
+        ime_comp_.clear();
+        ime_cursor_ = 0;
+        ApplyFilter();
+      } else {
+        Present();
+      }
+      return 0;
+    case WM_IME_COMPOSITION:
+      HandleImeComposition(lparam);
+      return 0;
+    case WM_IME_CHAR:
+      return 0;
+    case WM_IME_REQUEST:
+      if (wparam == IMR_COMPOSITIONWINDOW && lparam != 0) {
+        auto* form = reinterpret_cast<COMPOSITIONFORM*>(lparam);
+        form->dwStyle = CFS_RECT;
+        form->ptCurrentPos = {0, 0};
+        form->rcArea = {0, 0, 0, 0};
+        return 1;
+      }
+      break;
+    case WM_IME_NOTIFY:
+      if (wparam == IMN_SETCOMPOSITIONWINDOW) {
+        return 0;
+      }
+      break;
+    default:
+      break;
+  }
+  return CallWindowProcW(edit_prev_, edit, msg, wparam, lparam);
+}
+
+void Spotlight::HandleImeComposition(LPARAM lparam) {
+  if (edit_ == nullptr) {
+    return;
+  }
+  const HIMC himc = ImmGetContext(edit_);
+  if (himc == nullptr) {
+    return;
+  }
+  if ((lparam & GCS_RESULTSTR) != 0) {
+    const std::wstring result = CompositionString(himc, GCS_RESULTSTR);
+    ime_comp_.clear();
+    ime_cursor_ = 0;
+    swallow_ime_commit_ = true;
+    if (!result.empty()) {
+      DWORD start = 0;
+      DWORD end = 0;
+      SendMessageW(edit_, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+      SendMessageW(edit_, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(result.c_str()));
+      const DWORD pos = start + static_cast<DWORD>(result.size());
+      SendMessageW(edit_, EM_SETSEL, pos, pos);
+    }
+  }
+  if ((lparam & GCS_COMPSTR) != 0) {
+    ime_comp_ = CompositionString(himc, GCS_COMPSTR);
+    LONG cursor = ImmGetCompositionStringW(himc, GCS_CURSORPOS, nullptr, 0);
+    if (cursor < 0 || static_cast<size_t>(cursor) > ime_comp_.size() ||
+        (cursor == 0 && LooksLikeHangul(ime_comp_))) {
+      cursor = static_cast<LONG>(ime_comp_.size());
+    }
+    ime_cursor_ = cursor;
+  } else if ((lparam & GCS_RESULTSTR) != 0) {
+    ime_comp_.clear();
+    ime_cursor_ = 0;
+  }
+  ImmReleaseContext(edit_, himc);
+  ApplyFilter();
 }
 
 LRESULT CALLBACK Spotlight::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -688,6 +1153,24 @@ LRESULT CALLBACK Spotlight::EditProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
       return 0;
     }
   }
+  if (msg == WM_CHAR && self->swallow_ime_commit_) {
+    self->swallow_ime_commit_ = false;
+    if (wparam > 0x7F) {
+      return 0;
+    }
+  }
+  switch (msg) {
+    case WM_IME_SETCONTEXT:
+    case WM_IME_STARTCOMPOSITION:
+    case WM_IME_ENDCOMPOSITION:
+    case WM_IME_COMPOSITION:
+    case WM_IME_CHAR:
+    case WM_IME_REQUEST:
+    case WM_IME_NOTIFY:
+      return self->HandleImeMessage(hwnd, msg, wparam, lparam);
+    default:
+      break;
+  }
   const LRESULT result = CallWindowProcW(self->edit_prev_, hwnd, msg, wparam, lparam);
   if (ShouldApplyFilter(msg)) {
     self->ApplyFilter();
@@ -712,9 +1195,10 @@ LRESULT Spotlight::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (wparam == kFileSearchTimer) {
         KillTimer(hwnd_, kFileSearchTimer);
         QueryFiles(filter_);
-        RebuildMatches();
-        LayoutWindow();
       }
+      return 0;
+    case kFileSearchDoneMsg:
+      AcceptFileHits(reinterpret_cast<void*>(lparam));
       return 0;
     case WM_MOUSEMOVE: {
       const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
@@ -741,8 +1225,15 @@ LRESULT Spotlight::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     }
     case WM_MOUSEWHEEL:
       if (!matches_.empty()) {
-        const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
-        scroll_ -= (delta / WHEEL_DELTA) * Dip(kRowHeightDip);
+        const int delta = GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA;
+        scroll_ -= delta;
+        if (scroll_ < 0) {
+          scroll_ = 0;
+        }
+        const int last = (std::max)(0, static_cast<int>(matches_.size()) - 1);
+        if (scroll_ > last) {
+          scroll_ = last;
+        }
         RebuildRows();
         Present();
       }
@@ -874,11 +1365,12 @@ bool Spotlight::EnsureRenderer() {
       return false;
     }
   }
-  if (!format_ || !search_format_ || !meta_format_ || font_dpi_ != Dpi()) {
+  if (!format_ || !search_format_ || !meta_format_ || !header_format_ || font_dpi_ != Dpi()) {
     font_dpi_ = Dpi();
     format_.Reset();
     search_format_.Reset();
     meta_format_.Reset();
+    header_format_.Reset();
     wchar_t locale[LOCALE_NAME_MAX_LENGTH]{};
     if (GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH) == 0) {
       wcscpy_s(locale, L"en-US");
@@ -887,10 +1379,10 @@ bool Spotlight::EnsureRenderer() {
     const float search_size = 18.0f * static_cast<float>(font_dpi_) / 96.0f;
     const float meta_size = 11.0f * static_cast<float>(font_dpi_) / 96.0f;
     const wchar_t* families[] = {L"Segoe UI Variable", L"Segoe UI"};
-    auto make_format = [&](float size, IDWriteTextFormat** out) -> HRESULT {
+    auto make_format = [&](float size, DWRITE_FONT_WEIGHT weight, IDWriteTextFormat** out) -> HRESULT {
       HRESULT hr = E_FAIL;
       for (const wchar_t* family : families) {
-        hr = dwrite_->CreateTextFormat(family, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+        hr = dwrite_->CreateTextFormat(family, nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
                                        DWRITE_FONT_STRETCH_NORMAL, size, locale, out);
         if (SUCCEEDED(hr)) {
           break;
@@ -898,13 +1390,19 @@ bool Spotlight::EnsureRenderer() {
       }
       return hr;
     };
-    if (FAILED(make_format(row_size, format_.ReleaseAndGetAddressOf())) || !format_) {
+    if (FAILED(make_format(row_size, DWRITE_FONT_WEIGHT_NORMAL, format_.ReleaseAndGetAddressOf())) || !format_) {
       return false;
     }
-    if (FAILED(make_format(search_size, search_format_.ReleaseAndGetAddressOf())) || !search_format_) {
+    if (FAILED(make_format(search_size, DWRITE_FONT_WEIGHT_NORMAL, search_format_.ReleaseAndGetAddressOf())) ||
+        !search_format_) {
       return false;
     }
-    if (FAILED(make_format(meta_size, meta_format_.ReleaseAndGetAddressOf())) || !meta_format_) {
+    if (FAILED(make_format(meta_size, DWRITE_FONT_WEIGHT_NORMAL, meta_format_.ReleaseAndGetAddressOf())) ||
+        !meta_format_) {
+      return false;
+    }
+    if (FAILED(make_format(meta_size, DWRITE_FONT_WEIGHT_SEMI_BOLD, header_format_.ReleaseAndGetAddressOf())) ||
+        !header_format_) {
       return false;
     }
     format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -916,6 +1414,9 @@ bool Spotlight::EnsureRenderer() {
     meta_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     meta_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     meta_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+    header_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    header_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    header_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
   }
   if (!rt_) {
     const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
@@ -1024,6 +1525,8 @@ void Spotlight::EnsureApps() {
 
 HICON Spotlight::EnsureIcon(const Match& match) {
   switch (match.kind) {
+    case Kind::Header:
+      break;
     case Kind::App:
       if (match.index >= 0 && match.index < static_cast<int>(apps_.size())) {
         AppEntry& entry = apps_[static_cast<size_t>(match.index)];
@@ -1069,21 +1572,62 @@ HICON Spotlight::EnsureIcon(const Match& match) {
 }
 
 void Spotlight::QueryFiles(const std::wstring& needle) {
-  DestroyFileIcons();
-  files_.clear();
-  if (needle.empty()) {
+  if (needle.empty() || hwnd_ == nullptr) {
     return;
   }
-  if (!QueryIndexedFiles(needle, files_)) {
-    int remaining = 12;
-    const std::wstring lower = LowerCopy(needle);
-    const KNOWNFOLDERID folders[] = {FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Pictures,
-                                     FOLDERID_Videos,  FOLDERID_Music};
-    for (const KNOWNFOLDERID& id : folders) {
-      WalkNamed(KnownFolder(id), lower, files_, 2, remaining);
-      if (remaining <= 0) {
-        break;
+  const uint64_t gen = search_gen_.load(std::memory_order_acquire);
+  const HWND hwnd = hwnd_;
+  search_inflight_.fetch_add(1, std::memory_order_acq_rel);
+  std::thread([this, gen, needle, hwnd]() {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool com_ok = SUCCEEDED(com) || com == S_FALSE;
+    auto post = [&](std::vector<FileHit> hits) {
+      if (search_gen_.load(std::memory_order_acquire) != gen) {
+        return false;
       }
+      auto* payload = new FileSearchPayload;
+      payload->gen = gen;
+      payload->needle = needle;
+      payload->hits = std::move(hits);
+      if (!PostMessageW(hwnd, kFileSearchDoneMsg, 0, reinterpret_cast<LPARAM>(payload))) {
+        delete payload;
+        return false;
+      }
+      return true;
+    };
+    auto hits = CollectQuickHits(needle);
+    if (post(hits)) {
+      if (com_ok) {
+        post(CollectSlowHits(needle, std::move(hits)));
+      }
+    }
+    if (com_ok) {
+      CoUninitialize();
+    }
+    search_inflight_.fetch_sub(1, std::memory_order_acq_rel);
+  }).detach();
+}
+
+void Spotlight::AcceptFileHits(void* payload) {
+  std::unique_ptr<FileSearchPayload> owned(static_cast<FileSearchPayload*>(payload));
+  if (!owned || !visible_ || owned->gen != search_gen_.load(std::memory_order_acquire) ||
+      owned->needle != filter_) {
+    return;
+  }
+  DestroyFileIcons();
+  files_ = std::move(owned->hits);
+  LayoutWindow();
+}
+
+void Spotlight::WaitForFileSearches() {
+  search_gen_.fetch_add(1, std::memory_order_acq_rel);
+  while (search_inflight_.load(std::memory_order_acquire) != 0) {
+    Sleep(10);
+  }
+  if (hwnd_ != nullptr) {
+    MSG msg{};
+    while (PeekMessageW(&msg, hwnd_, kFileSearchDoneMsg, kFileSearchDoneMsg, PM_REMOVE) != FALSE) {
+      delete reinterpret_cast<FileSearchPayload*>(msg.lParam);
     }
   }
 }
@@ -1093,13 +1637,17 @@ void Spotlight::RebuildMatches() {
   if (filter_.empty()) {
     return;
   }
-  const std::wstring needle = LowerCopy(filter_);
+  const std::wstring needle = LowerCopy(TrimCopy(filter_));
+  if (needle.empty()) {
+    return;
+  }
   std::vector<Match> apps;
   std::vector<Match> settings;
-  std::vector<Match> files;
+  std::vector<Match> folders;
+  std::vector<Match> documents;
 
   for (int i = 0; i < static_cast<int>(apps_.size()); ++i) {
-    const int score = MatchScore(apps_[static_cast<size_t>(i)].name, needle);
+    const int score = MatchQuery(apps_[static_cast<size_t>(i)].name, needle);
     if (score >= 0) {
       apps.push_back(Match{Kind::App, i, score});
     }
@@ -1108,24 +1656,133 @@ void Spotlight::RebuildMatches() {
     std::wstring hay = kSettings[i].title;
     hay.push_back(L' ');
     hay += kSettings[i].aliases;
-    const int score = MatchScore(std::move(hay), needle);
+    const int score = MatchQuery(std::move(hay), needle);
     if (score >= 0) {
       settings.push_back(Match{Kind::Setting, i, score});
     }
   }
   for (int i = 0; i < static_cast<int>(files_.size()); ++i) {
-    const Kind kind = files_[static_cast<size_t>(i)].folder ? Kind::Folder : Kind::File;
-    files.push_back(Match{kind, i, 1});
+    const int score = FileHitScore(files_[static_cast<size_t>(i)], needle);
+    if (score < 0) {
+      continue;
+    }
+    if (files_[static_cast<size_t>(i)].folder) {
+      folders.push_back(Match{Kind::Folder, i, score});
+    } else {
+      documents.push_back(Match{Kind::File, i, score});
+    }
   }
 
-  auto by_score = [](const Match& a, const Match& b) {
+  auto title_of = [&](const Match& match) -> std::wstring {
+    switch (match.kind) {
+      case Kind::App:
+        if (match.index >= 0 && match.index < static_cast<int>(apps_.size())) {
+          return apps_[static_cast<size_t>(match.index)].name;
+        }
+        break;
+      case Kind::Setting:
+        if (match.index >= 0 &&
+            match.index < static_cast<int>(sizeof(kSettings) / sizeof(kSettings[0]))) {
+          return kSettings[match.index].title;
+        }
+        break;
+      case Kind::File:
+      case Kind::Folder:
+        if (match.index >= 0 && match.index < static_cast<int>(files_.size())) {
+          return files_[static_cast<size_t>(match.index)].title;
+        }
+        break;
+      default:
+        break;
+    }
+    return {};
+  };
+  auto path_of = [&](const Match& match) -> std::wstring {
+    switch (match.kind) {
+      case Kind::App:
+        if (match.index >= 0 && match.index < static_cast<int>(apps_.size())) {
+          return apps_[static_cast<size_t>(match.index)].path;
+        }
+        break;
+      case Kind::File:
+      case Kind::Folder:
+        if (match.index >= 0 && match.index < static_cast<int>(files_.size())) {
+          return files_[static_cast<size_t>(match.index)].path;
+        }
+        break;
+      default:
+        break;
+    }
+    return {};
+  };
+  auto by_score = [&](const Match& a, const Match& b) {
     if (a.score != b.score) {
       return a.score < b.score;
     }
-    return a.index < b.index;
+    const std::wstring ta = title_of(a);
+    const std::wstring tb = title_of(b);
+    if (ta.size() != tb.size()) {
+      return ta.size() < tb.size();
+    }
+    return path_of(a) < path_of(b);
   };
   std::sort(apps.begin(), apps.end(), by_score);
   std::sort(settings.begin(), settings.end(), by_score);
+  std::sort(folders.begin(), folders.end(), by_score);
+  std::sort(documents.begin(), documents.end(), by_score);
+
+  Match top{};
+  bool has_top = false;
+  auto consider = [&](const Match& match) {
+    if (!has_top) {
+      top = match;
+      has_top = true;
+      return;
+    }
+    if (match.score != top.score) {
+      if (match.score < top.score) {
+        top = match;
+      }
+      return;
+    }
+    if (KindRank(match.kind) != KindRank(top.kind)) {
+      if (KindRank(match.kind) < KindRank(top.kind)) {
+        top = match;
+      }
+      return;
+    }
+    const std::wstring pa = LowerCopy(path_of(match));
+    const std::wstring pb = LowerCopy(path_of(top));
+    const bool da = pa.find(L"\\desktop\\") != std::wstring::npos;
+    const bool db = pb.find(L"\\desktop\\") != std::wstring::npos;
+    if (da != db) {
+      if (da) {
+        top = match;
+      }
+      return;
+    }
+    if (title_of(match).size() != title_of(top).size()) {
+      if (title_of(match).size() < title_of(top).size()) {
+        top = match;
+      }
+      return;
+    }
+    if (pa < pb) {
+      top = match;
+    }
+  };
+  for (const auto& match : apps) {
+    consider(match);
+  }
+  for (const auto& match : settings) {
+    consider(match);
+  }
+  for (const auto& match : folders) {
+    consider(match);
+  }
+  for (const auto& match : documents) {
+    consider(match);
+  }
 
   if (apps.size() > static_cast<size_t>(kMaxApps)) {
     apps.resize(static_cast<size_t>(kMaxApps));
@@ -1133,12 +1790,47 @@ void Spotlight::RebuildMatches() {
   if (settings.size() > static_cast<size_t>(kMaxSettings)) {
     settings.resize(static_cast<size_t>(kMaxSettings));
   }
-  if (files.size() > static_cast<size_t>(kMaxFiles)) {
-    files.resize(static_cast<size_t>(kMaxFiles));
+  if (folders.size() > static_cast<size_t>(kMaxFolders)) {
+    folders.resize(static_cast<size_t>(kMaxFolders));
   }
-  matches_.insert(matches_.end(), apps.begin(), apps.end());
-  matches_.insert(matches_.end(), settings.begin(), settings.end());
-  matches_.insert(matches_.end(), files.begin(), files.end());
+  if (documents.size() > static_cast<size_t>(kMaxDocuments)) {
+    documents.resize(static_cast<size_t>(kMaxDocuments));
+  }
+
+  auto append_section = [&](int section, const std::vector<Match>& items) {
+    if (items.empty()) {
+      return;
+    }
+    matches_.push_back(Match{Kind::Header, section, 0});
+    matches_.insert(matches_.end(), items.begin(), items.end());
+  };
+  if (has_top) {
+    matches_.push_back(Match{Kind::Header, 0, 0});
+    matches_.push_back(top);
+  }
+  append_section(1, apps);
+  append_section(2, settings);
+  append_section(3, folders);
+  append_section(4, documents);
+}
+
+int Spotlight::RowHeight(const Match& match) const {
+  return Dip(match.kind == Kind::Header ? kHeaderHeightDip : kRowHeightDip);
+}
+
+int Spotlight::VisibleCount() const {
+  int list_h = 0;
+  int count = 0;
+  const int budget = Dip(kMaxListDip);
+  for (int i = scroll_; i < static_cast<int>(matches_.size()); ++i) {
+    const int h = RowHeight(matches_[static_cast<size_t>(i)]);
+    if (count > 0 && list_h + h > budget) {
+      break;
+    }
+    list_h += h;
+    ++count;
+  }
+  return count;
 }
 
 void Spotlight::LayoutWindow() {
@@ -1146,15 +1838,23 @@ void Spotlight::LayoutWindow() {
     return;
   }
   RebuildMatches();
+  if (scroll_ < 0 || scroll_ >= static_cast<int>(matches_.size())) {
+    scroll_ = 0;
+  }
   const UINT dpi = Dpi();
   const int shadow = DipToPx(kShadowDip, dpi);
   const int width = DipToPx(kWidthDip, dpi) + shadow * 2;
   const int pad = DipToPx(kPadDip, dpi);
   const int search_h = DipToPx(kSearchHeightDip, dpi);
-  const int row_h = DipToPx(kRowHeightDip, dpi);
 
-  rows_visible_ = (std::min)(static_cast<int>(matches_.size()), kMaxRows);
-  const int list_h = rows_visible_ > 0 ? pad / 2 + rows_visible_ * row_h : 0;
+  rows_visible_ = VisibleCount();
+  int list_h = 0;
+  for (int i = 0; i < rows_visible_ && scroll_ + i < static_cast<int>(matches_.size()); ++i) {
+    list_h += RowHeight(matches_[static_cast<size_t>(scroll_ + i)]);
+  }
+  if (list_h > 0) {
+    list_h += pad / 2;
+  }
   const int height = shadow * 2 + pad + search_h + list_h + pad;
 
   POINT cursor{};
@@ -1179,31 +1879,57 @@ void Spotlight::LayoutWindow() {
     y = (std::max)(info.rcWork.top, info.rcWork.bottom - height);
   }
 
-  SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+  DWORD sel_start = 0;
+  DWORD sel_end = 0;
+  if (edit_ != nullptr) {
+    SendMessageW(edit_, EM_GETSEL, reinterpret_cast<WPARAM>(&sel_start), reinterpret_cast<LPARAM>(&sel_end));
+  }
+
+  RECT current{};
+  GetWindowRect(hwnd_, &current);
+  if (current.left != x || current.top != y || current.right != x + width || current.bottom != y + height) {
+    SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+  } else {
+    SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  }
 
   search_rect_ = {shadow + pad, shadow + pad, width - shadow - pad, shadow + pad + search_h};
 
-  if (edit_font_ != nullptr) {
-    DeleteObject(edit_font_);
-    edit_font_ = nullptr;
-  }
-  LOGFONTW lf{};
-  lf.lfHeight = -DipToPx(18, dpi);
-  lf.lfWeight = FW_NORMAL;
-  lf.lfQuality = CLEARTYPE_QUALITY;
-  lf.lfCharSet = DEFAULT_CHARSET;
-  wcscpy_s(lf.lfFaceName, L"Segoe UI Variable");
-  edit_font_ = CreateFontIndirectW(&lf);
-  if (edit_font_ != nullptr) {
-    SendMessageW(edit_, WM_SETFONT, reinterpret_cast<WPARAM>(edit_font_), TRUE);
+  if (edit_font_ == nullptr || edit_font_dpi_ != dpi) {
+    if (edit_font_ != nullptr) {
+      DeleteObject(edit_font_);
+      edit_font_ = nullptr;
+    }
+    LOGFONTW lf{};
+    lf.lfHeight = -DipToPx(18, dpi);
+    lf.lfWeight = FW_NORMAL;
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    wcscpy_s(lf.lfFaceName, L"Segoe UI Variable");
+    edit_font_ = CreateFontIndirectW(&lf);
+    edit_font_dpi_ = dpi;
+    if (edit_font_ != nullptr) {
+      SendMessageW(edit_, WM_SETFONT, reinterpret_cast<WPARAM>(edit_font_), FALSE);
+    }
   }
 
   const int glyph = DipToPx(kGlyphDip, dpi);
   const int inset_x = DipToPx(12, dpi) + glyph + DipToPx(10, dpi);
   const int inset_y = DipToPx(4, dpi);
-  SetWindowPos(edit_, nullptr, search_rect_.left + inset_x, search_rect_.top + inset_y,
-               search_rect_.right - search_rect_.left - inset_x - DipToPx(12, dpi), search_h - inset_y * 2,
-               SWP_NOZORDER | SWP_NOACTIVATE);
+  const int edit_x = search_rect_.left + inset_x;
+  const int edit_y = search_rect_.top + inset_y;
+  const int edit_w = search_rect_.right - search_rect_.left - inset_x - DipToPx(12, dpi);
+  const int edit_h = search_h - inset_y * 2;
+  RECT edit_now{};
+  if (edit_ != nullptr) {
+    GetWindowRect(edit_, &edit_now);
+    MapWindowPoints(nullptr, hwnd_, reinterpret_cast<POINT*>(&edit_now), 2);
+    if (edit_now.left != edit_x || edit_now.top != edit_y || edit_now.right != edit_x + edit_w ||
+        edit_now.bottom != edit_y + edit_h) {
+      SetWindowPos(edit_, nullptr, edit_x, edit_y, edit_w, edit_h, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    SendMessageW(edit_, EM_SETSEL, sel_start, sel_end);
+  }
 
   RebuildRows();
   Present();
@@ -1219,34 +1945,33 @@ void Spotlight::RebuildRows() {
   const int shadow = Dip(kShadowDip);
   const int pad = Dip(kPadDip);
   const int search_h = Dip(kSearchHeightDip);
-  const int row_h = Dip(kRowHeightDip);
   const int icon = Dip(kIconDip);
   const int header_bottom = shadow + pad + search_h + pad / 2;
 
-  const int max_rows = (std::max)(0, rows_visible_);
-  const int max_scroll = (std::max)(0, static_cast<int>(matches_.size()) - max_rows) * row_h;
-  if (scroll_ > max_scroll) {
-    scroll_ = max_scroll;
-  }
-  if (scroll_ < 0) {
+  if (scroll_ < 0 || scroll_ >= static_cast<int>(matches_.size())) {
     scroll_ = 0;
   }
-  scroll_ = row_h > 0 ? (scroll_ / row_h) * row_h : 0;
-
-  const int first = row_h > 0 ? scroll_ / row_h : 0;
+  rows_visible_ = VisibleCount();
   int y = header_bottom;
-  for (int i = 0; i < max_rows && first + i < static_cast<int>(matches_.size()); ++i) {
+  for (int i = 0; i < rows_visible_ && scroll_ + i < static_cast<int>(matches_.size()); ++i) {
+    const Match& match = matches_[static_cast<size_t>(scroll_ + i)];
+    const int row_h = RowHeight(match);
     Row row{};
     row.rect = {shadow + pad, y, client.right - shadow - pad, y + row_h};
-    row.match = matches_[static_cast<size_t>(first + i)];
-    const int icon_y = y + (row_h - icon) / 2;
-    row.icon_rect = {shadow + pad + Dip(10), icon_y, shadow + pad + Dip(10) + icon, icon_y + icon};
+    row.match = match;
+    if (match.kind != Kind::Header) {
+      const int icon_y = y + (row_h - icon) / 2;
+      row.icon_rect = {shadow + pad + Dip(10), icon_y, shadow + pad + Dip(10) + icon, icon_y + icon};
+    }
     rows_.push_back(row);
     y += row_h;
   }
 
   if (hot_ >= static_cast<int>(rows_.size())) {
     hot_ = rows_.empty() ? -1 : static_cast<int>(rows_.size()) - 1;
+  }
+  if (hot_ >= 0 && hot_ < static_cast<int>(rows_.size()) && !Selectable(rows_[static_cast<size_t>(hot_)])) {
+    hot_ = FirstSelectable();
   }
   if (hot_ < 0 && !rows_.empty()) {
     hot_ = FirstSelectable();
@@ -1321,7 +2046,7 @@ void Spotlight::Present() {
     const float tw = static_cast<float>(text_rc.right - text_rc.left);
     const float th = static_cast<float>(text_rc.bottom - text_rc.top);
     if (tw > 1.0f && th > 1.0f) {
-      const EditView typed = ReadEditView(edit_);
+      const EditView typed = ReadEditView(edit_, ime_comp_, ime_cursor_);
       const bool cue = typed.text.empty();
       const wchar_t* label = cue ? L"검색" : typed.text.c_str();
       const UINT32 label_len = static_cast<UINT32>(cue ? wcslen(label) : typed.text.size());
@@ -1343,6 +2068,17 @@ void Spotlight::Present() {
           brush->SetColor(TextColor(dark_));
           rt_->FillRectangle(D2D1::RectF(x0, y0, x0 + 1.5f, y0 + caret_h), brush.Get());
           SetCaretPos(static_cast<int>(cx + 0.5f), static_cast<int>(cy + 0.5f));
+          if (const HIMC himc = ImmGetContext(edit_)) {
+            CANDIDATEFORM cand{};
+            cand.dwIndex = 0;
+            cand.dwStyle = CFS_EXCLUDE;
+            cand.ptCurrentPos.x = static_cast<int>(cx + 0.5f);
+            cand.ptCurrentPos.y = static_cast<int>(cy + 0.5f);
+            cand.rcArea = text_rc;
+            MapWindowPoints(hwnd_, edit_, reinterpret_cast<POINT*>(&cand.rcArea), 2);
+            ImmSetCandidateWindow(himc, &cand);
+            ImmReleaseContext(edit_, himc);
+          }
         }
       }
     }
@@ -1358,6 +2094,23 @@ void Spotlight::Present() {
 
   for (size_t i = 0; i < rows_.size(); ++i) {
     const Row& row = rows_[i];
+    if (row.match.kind == Kind::Header) {
+      if (header_format_ && brush) {
+        const wchar_t* title = SectionTitle(row.match.index);
+        const float text_l = static_cast<float>(row.rect.left + Dip(12));
+        const float text_r = static_cast<float>(row.rect.right - Dip(12));
+        const float h = static_cast<float>(row.rect.bottom - row.rect.top);
+        Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+        if (title != nullptr && title[0] != L'\0' &&
+            SUCCEEDED(dwrite_->CreateTextLayout(title, static_cast<UINT32>(wcslen(title)), header_format_.Get(),
+                                                (std::max)(8.0f, text_r - text_l), h, layout.GetAddressOf()))) {
+          brush->SetColor(CueColor(dark_));
+          rt_->DrawTextLayout(D2D1::Point2F(text_l, static_cast<float>(row.rect.top)), layout.Get(), brush.Get(),
+                              D2D1_DRAW_TEXT_OPTIONS_NO_SNAP);
+        }
+      }
+      continue;
+    }
     if (static_cast<int>(i) == hot_ && Selectable(row) && brush) {
       brush->SetColor(MenuItemHoverFill(dark_, false));
       const D2D1_ROUNDED_RECT hover{
@@ -1370,16 +2123,20 @@ void Spotlight::Present() {
     std::wstring label;
     std::wstring detail;
     switch (row.match.kind) {
+      case Kind::Header:
+        break;
       case Kind::App:
         if (row.match.index >= 0 && row.match.index < static_cast<int>(apps_.size())) {
           label = apps_[static_cast<size_t>(row.match.index)].name;
         }
+        detail = KindLabel(Kind::App);
         break;
       case Kind::Setting:
         if (row.match.index >= 0 &&
             row.match.index < static_cast<int>(sizeof(kSettings) / sizeof(kSettings[0]))) {
           label = kSettings[row.match.index].title;
         }
+        detail = KindLabel(Kind::Setting);
         break;
       case Kind::File:
       case Kind::Folder:
@@ -1387,13 +2144,13 @@ void Spotlight::Present() {
           label = files_[static_cast<size_t>(row.match.index)].title;
           detail = files_[static_cast<size_t>(row.match.index)].detail;
         }
+        if (detail.empty()) {
+          detail = KindLabel(row.match.kind);
+        }
         break;
     }
-    if (detail.empty()) {
-      detail = KindLabel(row.match.kind);
-    }
     if (!label.empty() && format_ && brush) {
-      const float meta_w = static_cast<float>(Dip(72));
+      const float meta_w = static_cast<float>(Dip(128));
       const float text_l = static_cast<float>(row.icon_rect.right + Dip(10));
       const float text_r = static_cast<float>(row.rect.right - Dip(12));
       const float h = static_cast<float>(row.rect.bottom - row.rect.top);
@@ -1473,10 +2230,12 @@ void Spotlight::ApplyChrome() {
 }
 
 void Spotlight::ApplyFilter() {
+  const ULONGLONG started = GetTickCount64();
   filter_.clear();
   if (edit_ != nullptr) {
-    filter_ = ReadEditView(edit_).text;
+    filter_ = ReadEditView(edit_, ime_comp_, ime_cursor_).text;
   }
+  search_gen_.fetch_add(1, std::memory_order_acq_rel);
   if (hwnd_ != nullptr) {
     KillTimer(hwnd_, kFileSearchTimer);
   }
@@ -1487,6 +2246,10 @@ void Spotlight::ApplyFilter() {
   LayoutWindow();
   if (hwnd_ != nullptr && !filter_.empty()) {
     SetTimer(hwnd_, kFileSearchTimer, kFileSearchDelayMs, nullptr);
+  }
+  const unsigned ms = static_cast<unsigned>(GetTickCount64() - started);
+  if (ms > 50) {
+    Log(L"spotlight", L"query len=%zu results=%zu %ums", filter_.size(), matches_.size(), ms);
   }
 }
 
@@ -1514,48 +2277,68 @@ void Spotlight::UpdateHot(POINT client) {
 }
 
 void Spotlight::MoveHot(int delta) {
-  if (matches_.empty()) {
-    hot_ = -1;
+  if (matches_.empty() || delta == 0) {
     return;
   }
-  const int row_h = Dip(kRowHeightDip);
-  const int visible = (std::max)(1, rows_visible_);
-  int first = row_h > 0 ? scroll_ / row_h : 0;
-  int index = first + (hot_ < 0 ? (delta > 0 ? -1 : 0) : hot_);
-  index += delta;
-  if (index < 0) {
-    index = 0;
+  int index = scroll_ + (hot_ < 0 ? 0 : hot_);
+  const int n = static_cast<int>(matches_.size());
+  for (int step = 0; step < n; ++step) {
+    index += delta;
+    if (index < 0) {
+      index = n - 1;
+    } else if (index >= n) {
+      index = 0;
+    }
+    if (matches_[static_cast<size_t>(index)].kind != Kind::Header) {
+      break;
+    }
   }
-  if (index >= static_cast<int>(matches_.size())) {
-    index = static_cast<int>(matches_.size()) - 1;
+  if (matches_[static_cast<size_t>(index)].kind == Kind::Header) {
+    return;
   }
-  if (index < first) {
-    first = index;
-  } else if (index >= first + visible) {
-    first = index - visible + 1;
+  if (index < scroll_) {
+    scroll_ = index;
+  } else {
+    while (scroll_ < index) {
+      const int shown = VisibleCount();
+      if (index < scroll_ + shown) {
+        break;
+      }
+      ++scroll_;
+    }
   }
-  scroll_ = first * row_h;
   RebuildRows();
-  hot_ = index - first;
+  hot_ = index - scroll_;
   Present();
 }
 
-void Spotlight::ActivateMatch(const Match& match) {
+void Spotlight::ActivateMatch(const Match& match, bool reveal) {
   switch (match.kind) {
+    case Kind::Header:
+      return;
     case Kind::App:
       if (match.index >= 0 && match.index < static_cast<int>(apps_.size())) {
-        LaunchPath(apps_[static_cast<size_t>(match.index)].path);
+        if (reveal) {
+          RevealPath(apps_[static_cast<size_t>(match.index)].path);
+        } else {
+          LaunchPath(apps_[static_cast<size_t>(match.index)].path);
+        }
       }
       break;
     case Kind::Setting:
-      if (match.index >= 0 && match.index < static_cast<int>(sizeof(kSettings) / sizeof(kSettings[0]))) {
+      if (!reveal && match.index >= 0 &&
+          match.index < static_cast<int>(sizeof(kSettings) / sizeof(kSettings[0]))) {
         LaunchPath(kSettings[match.index].uri);
       }
       break;
     case Kind::File:
     case Kind::Folder:
       if (match.index >= 0 && match.index < static_cast<int>(files_.size())) {
-        LaunchPath(files_[static_cast<size_t>(match.index)].path);
+        if (reveal) {
+          RevealPath(files_[static_cast<size_t>(match.index)].path);
+        } else {
+          LaunchPath(files_[static_cast<size_t>(match.index)].path);
+        }
       }
       break;
   }
@@ -1567,13 +2350,14 @@ void Spotlight::ActivateHot() {
     return;
   }
   int index = hot_;
-  if (index < 0 || index >= static_cast<int>(rows_.size())) {
+  if (index < 0 || index >= static_cast<int>(rows_.size()) || !Selectable(rows_[static_cast<size_t>(index)])) {
     index = FirstSelectable();
   }
   if (index < 0 || index >= static_cast<int>(rows_.size())) {
     return;
   }
-  ActivateMatch(rows_[static_cast<size_t>(index)].match);
+  const bool reveal = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+  ActivateMatch(rows_[static_cast<size_t>(index)].match, reveal);
 }
 
 void Spotlight::LaunchPath(const std::wstring& path) {
@@ -1589,6 +2373,23 @@ void Spotlight::LaunchPath(const std::wstring& path) {
   ShellExecuteExW(&info);
 }
 
+void Spotlight::RevealPath(const std::wstring& path) {
+  if (path.empty()) {
+    return;
+  }
+  std::wstring param = L"/select,\"";
+  param += path;
+  param += L'"';
+  SHELLEXECUTEINFOW info{};
+  info.cbSize = sizeof(info);
+  info.fMask = SEE_MASK_FLAG_NO_UI;
+  info.lpVerb = L"open";
+  info.lpFile = L"explorer.exe";
+  info.lpParameters = param.c_str();
+  info.nShow = SW_SHOWNORMAL;
+  ShellExecuteExW(&info);
+}
+
 const Spotlight::Row* Spotlight::HitTest(POINT client) const {
   for (const auto& row : rows_) {
     if (PtInRect(&row.rect, client)) {
@@ -1598,12 +2399,17 @@ const Spotlight::Row* Spotlight::HitTest(POINT client) const {
   return nullptr;
 }
 
-bool Spotlight::Selectable(const Row&) const {
-  return true;
+bool Spotlight::Selectable(const Row& row) const {
+  return row.match.kind != Kind::Header;
 }
 
 int Spotlight::FirstSelectable() const {
-  return rows_.empty() ? -1 : 0;
+  for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
+    if (Selectable(rows_[static_cast<size_t>(i)])) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 UINT Spotlight::Dpi() const {
