@@ -244,6 +244,7 @@ bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode)
                 (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
   press_inside_ = false;
   saw_mousemove_ = false;
+  tick_ = 0;
   ApplyChrome();
   // Hidden windows do not receive WM_PAINT from UpdateWindow, so show first and
   // paint immediately afterwards. A one-frame flash beats a second of black.
@@ -305,8 +306,11 @@ void PopupSurface::Place(SIZE size, POINT anchor_screen, Anchor mode) {
   MONITORINFO info{};
   info.cbSize = sizeof(info);
   GetMonitorInfoW(MonitorFromPoint(anchor_screen, MONITOR_DEFAULTTONEAREST), &info);
-  int x = anchor_screen.x;
-  int y = mode == Anchor::AboveAt ? anchor_screen.y - size.cy : anchor_screen.y;
+  const UINT dpi = Dpi();
+  const int gap = MulDiv(4, static_cast<int>(dpi), 96);
+  const int inset = MulDiv(8, static_cast<int>(dpi), 96);
+  int x = anchor_screen.x - inset;
+  int y = mode == Anchor::AboveAt ? anchor_screen.y - size.cy - gap : anchor_screen.y + gap;
   if (x + size.cx > info.rcWork.right) {
     x = info.rcWork.right - size.cx;
   }
@@ -391,6 +395,11 @@ void PopupSurface::OnGuardTimer() {
     press_inside_ = false;
   }
   mouse_down_ = mouse;
+
+  ++tick_;
+  if (tick_ % 20 == 0) {
+    Log(L"popup", L"alive tick=%u hot=%d inside=%d", tick_, hot_, inside ? 1 : 0);
+  }
 
   if (content_ != nullptr) {
     int hot = -1;

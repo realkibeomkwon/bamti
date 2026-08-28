@@ -82,6 +82,7 @@ class PopupSurface {
   bool saw_mousemove_ = false;
   bool dark_ = true;
   int hot_ = -1;
+  unsigned tick_ = 0;
   Anchor mode_ = Anchor::AboveAt;
   POINT anchor_{};
   Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
