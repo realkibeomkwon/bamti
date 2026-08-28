@@ -108,8 +108,8 @@ std::wstring ClockRenderer::CurrentTimeText() const {
   return text;
 }
 
-bool ClockRenderer::Draw(HDC hdc, const RECT& client, bool dark, const BarLayoutResult& layout, BarLayout* text,
-                         bool start_hot, bool start_pressed) {
+bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool dark, const BarLayoutResult& layout,
+                         BarLayout* text, bool start_hot, bool start_pressed) {
   if (!d2d_ || !hdc || text == nullptr) {
     return false;
   }
@@ -125,7 +125,7 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, bool dark, const BarLayout
     }
   }
 
-  HRESULT hr = rt_->BindDC(hdc, &client);
+  HRESULT hr = rt_->BindDC(hdc, &dirty);
   if (FAILED(hr)) {
     rt_.Reset();
     return false;
@@ -143,8 +143,14 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, bool dark, const BarLayout
 
   rt_->BeginDraw();
   rt_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+  rt_->SetTransform(D2D1::Matrix3x2F::Translation(-static_cast<float>(dirty.left - client.left) / px,
+                                                  -static_cast<float>(dirty.top - client.top) / px));
 
   for (const BarSegment& seg : layout.segments) {
+    RECT overlap{};
+    if (IntersectRect(&overlap, &seg.rect, &dirty) == FALSE) {
+      continue;
+    }
     if (seg.kind == SegmentKind::kStart) {
       DrawStartButton(brush.Get(), dark, start_hot, start_pressed, height_dip, client, seg.rect);
       continue;

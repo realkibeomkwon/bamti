@@ -24,6 +24,8 @@ constexpr UINT kToggleStartMsg = WM_APP + 7;
 constexpr UINT kToggleSpotlightMsg = WM_APP + 8;
 constexpr UINT kFullscreenWatchMsg = WM_APP + 9;
 constexpr UINT_PTR kClockTimerId = 1;
+constexpr UINT_PTR kRepaintTimerId = 2;
+constexpr UINT kRepaintCoalesceMs = 16;
 constexpr int kBarHeightDip = 32;
 constexpr UINT kExitCommand = 1;
 
@@ -129,6 +131,17 @@ int DipToPx(int dip, UINT dpi) {
 
 void InvalidateArea(HWND hwnd, RECT rc) {
   InvalidateRect(hwnd, &rc, FALSE);
+}
+
+double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
+  static LARGE_INTEGER freq{};
+  if (freq.QuadPart == 0) {
+    QueryPerformanceFrequency(&freq);
+  }
+  if (freq.QuadPart == 0) {
+    return 0.0;
+  }
+  return (end.QuadPart - start.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
 }
 
 std::string WideToUtf8(std::wstring_view wide) {
@@ -462,22 +475,19 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       Paint();
       return 0;
     case WM_TIMER:
+      if (wparam == kRepaintTimerId) {
+        KillTimer(hwnd_, kRepaintTimerId);
+        repaint_armed_ = false;
+        RefreshLayout();
+        return 0;
+      }
       if (wparam == kClockTimerId) {
         if (status_popup_.IsOpen()) {
           status_popup_.Tick();
         }
         status_.DropStale();
         taskbar_.EnsureHidden();
-        const std::wstring clock = clock_.CurrentTimeText();
-        if (clock != last_clock_text_) {
-          last_clock_text_ = clock;
-          const RECT clock_rect = ClockRect();
-          if (clock_rect.right > clock_rect.left) {
-            InvalidateRect(hwnd_, &clock_rect, FALSE);
-          } else {
-            InvalidateRect(hwnd_, nullptr, FALSE);
-          }
-        }
+        RefreshLayout();
       }
       return 0;
     case kFullscreenWatchMsg:
@@ -485,13 +495,14 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       return 0;
     case kStatusChangedMsg:
       NotePostedStorm(L"status", g_status_msg_count, g_status_msg_window);
-      InvalidateRect(hwnd_, nullptr, FALSE);
+      ArmRepaint();
       return 0;
     case WM_DPICHANGED:
       layout_.SetDpi(HIWORD(wparam));
       clock_.SetDpi(HIWORD(wparam));
       ApplyBackdrop();
       Layout();
+      InvalidateRect(hwnd_, nullptr, FALSE);
       return 0;
     case WM_DISPLAYCHANGE:
     case WM_SETTINGCHANGE:
@@ -503,6 +514,8 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           status_popup_.SetDark(dark_);
         }
       }
+      layout_.SetDpi(Dpi());
+      clock_.SetDpi(Dpi());
       Layout();
       InvalidateRect(hwnd_, nullptr, FALSE);
       return 0;
@@ -644,6 +657,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_ENDSESSION:
       if (wparam) {
         KillTimer(hwnd_, kClockTimerId);
+        KillTimer(hwnd_, kRepaintTimerId);
         StopFullscreenWatch(hwnd_);
         status_.Stop();
         taskbar_.Restore();
@@ -653,6 +667,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_DESTROY:
       RemoveWinHook();
       KillTimer(hwnd_, kClockTimerId);
+      KillTimer(hwnd_, kRepaintTimerId);
       StopFullscreenWatch(hwnd_);
       status_.Stop();
       status_popup_.Destroy();
@@ -748,6 +763,69 @@ void MenuBar::ApplyBackdrop() {
   DwmExtendFrameIntoClientArea(hwnd_, &margins);
 }
 
+void MenuBar::ArmRepaint() {
+  if (repaint_armed_ || hwnd_ == nullptr) {
+    return;
+  }
+  repaint_armed_ = true;
+  SetTimer(hwnd_, kRepaintTimerId, kRepaintCoalesceMs, nullptr);
+}
+
+void MenuBar::RefreshLayout() {
+  if (hwnd_ == nullptr) {
+    return;
+  }
+  const BarLayoutResult before = layout_.last();
+  RECT client{};
+  GetClientRect(hwnd_, &client);
+  layout_.SetDpi(Dpi());
+  LARGE_INTEGER t0{};
+  LARGE_INTEGER t1{};
+  QueryPerformanceCounter(&t0);
+  const BarLayoutResult& after =
+      layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), status_.Snapshot());
+  QueryPerformanceCounter(&t1);
+  perf_compute_ms_ = QpcMs(t0, t1);
+
+  if (before.segments.size() != after.segments.size() || before.dpi != after.dpi ||
+      EqualRect(&before.client, &after.client) == FALSE) {
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    return;
+  }
+  for (size_t i = 0; i < after.segments.size(); ++i) {
+    const BarSegment& a = before.segments[i];
+    const BarSegment& b = after.segments[i];
+    if (a.kind != b.kind || a.id != b.id || EqualRect(&a.rect, &b.rect) == FALSE) {
+      InvalidateRect(hwnd_, nullptr, FALSE);
+      return;
+    }
+    if (a.text != b.text || a.accent != b.accent) {
+      InvalidateRect(hwnd_, &b.rect, FALSE);
+    }
+  }
+}
+
+void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, const RECT& client) {
+  perf_compute_ms_ = compute_ms;
+  if (EqualRect(&dirty, &client) != FALSE) {
+    perf_full_ms_ = draw_ms;
+  } else {
+    perf_seg_ms_ = draw_ms;
+  }
+  ++perf_frames_;
+  if (EqualRect(&dirty, &client) == FALSE && perf_partial_logs_ < 3) {
+    ++perf_partial_logs_;
+    Log(L"perf", L"partial rcPaint=%ld,%ld,%ld,%ld client=%ld,%ld,%ld,%ld", dirty.left, dirty.top, dirty.right,
+        dirty.bottom, client.left, client.top, client.right, client.bottom);
+  }
+  if (perf_frames_ % 100 == 0) {
+    const BarLayoutResult& last = layout_.last();
+    Log(L"perf", L"bar full=%.1fms seg=%.1fms compute=%.1fms segments=%u overflow=%u rcPaint=%ld,%ld,%ld,%ld",
+        perf_full_ms_, perf_seg_ms_, perf_compute_ms_, static_cast<unsigned>(last.segments.size()),
+        static_cast<unsigned>(last.overflow.size()), dirty.left, dirty.top, dirty.right, dirty.bottom);
+  }
+}
+
 void MenuBar::Paint() {
   WatchdogStage(L"bar.paint");
   PAINTSTRUCT ps{};
@@ -755,18 +833,34 @@ void MenuBar::Paint() {
   RECT client{};
   GetClientRect(hwnd_, &client);
 
-  BP_PAINTPARAMS params{};
-  params.cbSize = sizeof(params);
-  params.dwFlags = BPPF_ERASE;
-  HDC buffer_dc = nullptr;
-  const HPAINTBUFFER buffer = BeginBufferedPaint(hdc, &client, BPBF_TOPDOWNDIB, &params, &buffer_dc);
-  if (buffer != nullptr && buffer_dc != nullptr) {
-    BufferedPaintClear(buffer, &client);
-    layout_.SetDpi(Dpi());
-    layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), status_.Snapshot());
-    clock_.Draw(buffer_dc, client, dark_, layout_.last(), &layout_, start_hot_ || start_menu_.visible(),
-                start_pressed_ || start_menu_.visible());
-    EndBufferedPaint(buffer, TRUE);
+  RECT dirty = ps.rcPaint;
+  if (IsRectEmpty(&dirty) == FALSE) {
+    if (layout_.last().dpi != Dpi() || EqualRect(&layout_.last().client, &client) == FALSE) {
+      layout_.SetDpi(Dpi());
+      LARGE_INTEGER t0{};
+      LARGE_INTEGER t1{};
+      QueryPerformanceCounter(&t0);
+      layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), status_.Snapshot());
+      QueryPerformanceCounter(&t1);
+      perf_compute_ms_ = QpcMs(t0, t1);
+    }
+
+    BP_PAINTPARAMS params{};
+    params.cbSize = sizeof(params);
+    params.dwFlags = BPPF_ERASE;
+    HDC buffer_dc = nullptr;
+    const HPAINTBUFFER buffer = BeginBufferedPaint(hdc, &dirty, BPBF_TOPDOWNDIB, &params, &buffer_dc);
+    if (buffer != nullptr && buffer_dc != nullptr) {
+      BufferedPaintClear(buffer, &dirty);
+      LARGE_INTEGER t0{};
+      LARGE_INTEGER t1{};
+      QueryPerformanceCounter(&t0);
+      clock_.Draw(buffer_dc, client, dirty, dark_, layout_.last(), &layout_,
+                  start_hot_ || start_menu_.visible(), start_pressed_ || start_menu_.visible());
+      QueryPerformanceCounter(&t1);
+      NotePerf(perf_compute_ms_, QpcMs(t0, t1), dirty, client);
+      EndBufferedPaint(buffer, TRUE);
+    }
   }
   EndPaint(hwnd_, &ps);
 }

@@ -13,8 +13,8 @@ class ClockRenderer {
  public:
   bool Initialize();
   void SetDpi(UINT dpi);
-  bool Draw(HDC hdc, const RECT& client, bool dark, const BarLayoutResult& layout, BarLayout* text,
-            bool start_hot, bool start_pressed);
+  bool Draw(HDC hdc, const RECT& client, const RECT& dirty, bool dark, const BarLayoutResult& layout,
+            BarLayout* text, bool start_hot, bool start_pressed);
   std::wstring CurrentTimeText() const;
 
  private:

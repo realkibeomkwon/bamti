@@ -43,6 +43,9 @@ class MenuBar {
   void Layout();
   void ApplyBackdrop();
   void Paint();
+  void RefreshLayout();
+  void ArmRepaint();
+  void NotePerf(double compute_ms, double draw_ms, const RECT& dirty, const RECT& client);
   void ShowContextMenu(POINT screen);
   void RefreshFullscreenState();
   void SetFullscreenOccluded(bool occluded);
@@ -70,7 +73,12 @@ class MenuBar {
   bool dark_ = true;
   bool start_hot_ = false;
   bool start_pressed_ = false;
-  std::wstring last_clock_text_;
+  bool repaint_armed_ = false;
+  unsigned perf_frames_ = 0;
+  unsigned perf_partial_logs_ = 0;
+  double perf_full_ms_ = 0.0;
+  double perf_seg_ms_ = 0.0;
+  double perf_compute_ms_ = 0.0;
   BarLayout layout_;
   ClockRenderer clock_;
   PipeServer status_;
