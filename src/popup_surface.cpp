@@ -16,6 +16,16 @@ namespace {
 constexpr UINT_PTR kPopupGuardTimer = 1;
 constexpr UINT kPopupGuardMs = 50;
 
+struct AsyncKey {
+  bool down = false;
+  bool pressed_since = false;
+};
+
+AsyncKey ReadAsyncKey(int vk) {
+  const SHORT s = GetAsyncKeyState(vk);
+  return {(s & 0x8000) != 0, (s & 0x0001) != 0};
+}
+
 const wchar_t* MouseMsgName(UINT msg) {
   switch (msg) {
     case WM_LBUTTONDOWN:
@@ -367,19 +377,22 @@ void PopupSurface::Tick(const wchar_t* src) {
   } guard(ticking_);
   static_cast<void>(guard);
 
-  const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-  if (esc && !esc_down_) {
+  const AsyncKey esc = ReadAsyncKey(VK_ESCAPE);
+  const bool esc_hit = esc.down || esc.pressed_since;
+  if (esc_hit && !esc_down_) {
     Dismiss(-1, DismissReason::kEscape);
     return;
   }
-  esc_down_ = esc;
+  esc_down_ = esc.down;
 
-  const bool win = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
-  if (win && !win_down_) {
+  const AsyncKey lwin = ReadAsyncKey(VK_LWIN);
+  const AsyncKey rwin = ReadAsyncKey(VK_RWIN);
+  const bool win_hit = lwin.down || lwin.pressed_since || rwin.down || rwin.pressed_since;
+  if (win_hit && !win_down_) {
     Dismiss(-1, DismissReason::kWinKey);
     return;
   }
-  win_down_ = win;
+  win_down_ = lwin.down || rwin.down;
 
   // WS_EX_NOACTIVATE windows do not receive mouse messages, even over the
   // popup itself. Drive click and hover from the same poll that already works.
@@ -388,9 +401,13 @@ void PopupSurface::Tick(const wchar_t* src) {
   const bool got_cursor = GetCursorPos(&cursor) != FALSE && GetWindowRect(hwnd_, &window) != FALSE;
   const bool inside = got_cursor && PtInRect(&window, cursor);
 
-  const bool mouse = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 ||
-                     (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
-  if (mouse && !mouse_down_) {
+  const AsyncKey left = ReadAsyncKey(VK_LBUTTON);
+  const AsyncKey right = ReadAsyncKey(VK_RBUTTON);
+  const AsyncKey middle = ReadAsyncKey(VK_MBUTTON);
+  const bool down = left.down || right.down || middle.down;
+  const bool pressed_since = left.pressed_since || right.pressed_since || middle.pressed_since;
+  const bool saw_press = down || pressed_since;
+  if (saw_press && !mouse_down_) {
     if (armed_ && got_cursor && !inside) {
       Dismiss(-1, DismissReason::kOutsidePoll);
       return;
@@ -398,7 +415,8 @@ void PopupSurface::Tick(const wchar_t* src) {
     if (inside) {
       press_inside_ = true;
     }
-  } else if (!mouse && mouse_down_) {
+  }
+  if (!down && (mouse_down_ || (pressed_since && press_inside_))) {
     if (armed_ && press_inside_ && inside && content_ != nullptr) {
       POINT client = cursor;
       ScreenToClient(hwnd_, &client);
@@ -413,8 +431,8 @@ void PopupSurface::Tick(const wchar_t* src) {
     }
     press_inside_ = false;
   }
-  mouse_down_ = mouse;
-  if (!mouse) {
+  mouse_down_ = down;
+  if (!down) {
     armed_ = true;
   }
 

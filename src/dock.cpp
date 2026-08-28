@@ -70,6 +70,7 @@ constexpr UINT kHideCommand = 5;
 constexpr UINT kWindowCommandBase = 100;
 
 HWND g_notify = nullptr;
+ULONGLONG g_rbutton_down_at = 0;
 std::atomic<bool> g_rebuild_posted{false};
 std::atomic<bool> g_tray_posted{false};
 
@@ -1237,7 +1238,14 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         pressed_ = -1;
       }
       return 0;
+    case WM_RBUTTONDOWN:
+      g_rbutton_down_at = GetTickCount64();
+      Log(L"dock", L"rbutton down");
+      return DefWindowProcW(hwnd_, msg, wparam, lparam);
     case WM_RBUTTONUP: {
+      const unsigned since_down =
+          g_rbutton_down_at == 0 ? 0 : static_cast<unsigned>(GetTickCount64() - g_rbutton_down_at);
+      Log(L"dock", L"rbutton up %ums since down", since_down);
       const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       const int index = HitTest(pt);
       if (index >= 0) {
