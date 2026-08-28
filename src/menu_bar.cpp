@@ -127,6 +127,10 @@ int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
 }
 
+void InvalidateArea(HWND hwnd, RECT rc) {
+  InvalidateRect(hwnd, &rc, FALSE);
+}
+
 std::string WideToUtf8(std::wstring_view wide) {
   if (wide.empty()) {
     return {};
@@ -378,7 +382,7 @@ bool MenuBar::Create(HINSTANCE instance) {
     return false;
   }
 
-  if (!clock_.Initialize()) {
+  if (!layout_.Initialize() || !clock_.Initialize()) {
     return false;
   }
 
@@ -390,6 +394,7 @@ bool MenuBar::Create(HINSTANCE instance) {
     return false;
   }
 
+  layout_.SetDpi(Dpi());
   clock_.SetDpi(Dpi());
   ApplyBackdrop();
   if (!RegisterAppBar()) {
@@ -466,8 +471,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         const std::wstring clock = clock_.CurrentTimeText();
         if (clock != last_clock_text_) {
           last_clock_text_ = clock;
-          if (clock_rect_.right > clock_rect_.left) {
-            InvalidateRect(hwnd_, &clock_rect_, FALSE);
+          const RECT clock_rect = ClockRect();
+          if (clock_rect.right > clock_rect.left) {
+            InvalidateRect(hwnd_, &clock_rect, FALSE);
           } else {
             InvalidateRect(hwnd_, nullptr, FALSE);
           }
@@ -482,6 +488,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       InvalidateRect(hwnd_, nullptr, FALSE);
       return 0;
     case WM_DPICHANGED:
+      layout_.SetDpi(HIWORD(wparam));
       clock_.SetDpi(HIWORD(wparam));
       ApplyBackdrop();
       Layout();
@@ -518,7 +525,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         POINT pt{};
         GetCursorPos(&pt);
         ScreenToClient(hwnd_, &pt);
-        if (HitStart(pt) || HitTest(pt) != nullptr) {
+        if (HitStart(pt) || HitTest(pt)) {
           SetCursor(LoadCursorW(nullptr, IDC_HAND));
           return TRUE;
         }
@@ -534,7 +541,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (start_hot_ || start_pressed_) {
         start_hot_ = false;
         start_pressed_ = false;
-        InvalidateRect(hwnd_, &start_rect_, FALSE);
+        InvalidateArea(hwnd_, StartRect());
       }
       return 0;
     case WM_LBUTTONDOWN: {
@@ -543,7 +550,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         status_popup_.Close();
         start_pressed_ = true;
         SetCapture(hwnd_);
-        InvalidateRect(hwnd_, &start_rect_, FALSE);
+        InvalidateArea(hwnd_, StartRect());
         return 0;
       }
       if (start_menu_.visible()) {
@@ -554,7 +561,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_CAPTURECHANGED:
       if (start_pressed_) {
         start_pressed_ = false;
-        InvalidateRect(hwnd_, &start_rect_, FALSE);
+        InvalidateArea(hwnd_, StartRect());
       }
       return 0;
     case WM_LBUTTONUP: {
@@ -563,22 +570,21 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (start_pressed_) {
         start_pressed_ = false;
         ReleaseCapture();
-        InvalidateRect(hwnd_, &start_rect_, FALSE);
+        InvalidateArea(hwnd_, StartRect());
       }
       if (start_click) {
         ToggleStartMenu();
         return 0;
       }
-      if (const StatusHit* hit = HitTest(pt)) {
-        const StatusHit copy = *hit;
-        status_.SendClick(copy.id, "left");
-        OpenStatusPanel(copy);
+      if (const auto hit = HitTest(pt)) {
+        status_.SendClick(hit->id, "left");
+        OpenStatusPanel(*hit);
       }
       return 0;
     }
     case WM_RBUTTONUP: {
       POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-      if (const StatusHit* hit = HitTest(pt)) {
+      if (const auto hit = HitTest(pt)) {
         status_.SendClick(hit->id, "right");
         return 0;
       }
@@ -596,7 +602,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         if (HitStart(pt)) {
           tooltip_text_ = L"시작";
           info->lpszText = tooltip_text_.data();
-        } else if (const StatusHit* hit = HitTest(pt)) {
+        } else if (const auto hit = HitTest(pt)) {
           tooltip_text_ = hit->tooltip.empty() ? std::wstring(hit->id.begin(), hit->id.end()) : hit->tooltip;
           info->lpszText = tooltip_text_.data();
         } else {
@@ -756,25 +762,49 @@ void MenuBar::Paint() {
   const HPAINTBUFFER buffer = BeginBufferedPaint(hdc, &client, BPBF_TOPDOWNDIB, &params, &buffer_dc);
   if (buffer != nullptr && buffer_dc != nullptr) {
     BufferedPaintClear(buffer, &client);
-    const auto items = status_.Snapshot();
-        clock_.Draw(buffer_dc, client, dark_, taskbar_.warning(), items, &hits_, &start_rect_,
-                    start_hot_ || start_menu_.visible(), start_pressed_ || start_menu_.visible(), &clock_rect_);
+    layout_.SetDpi(Dpi());
+    layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), status_.Snapshot());
+    clock_.Draw(buffer_dc, client, dark_, layout_.last(), &layout_, start_hot_ || start_menu_.visible(),
+                start_pressed_ || start_menu_.visible());
     EndBufferedPaint(buffer, TRUE);
   }
   EndPaint(hwnd_, &ps);
 }
 
-const StatusHit* MenuBar::HitTest(POINT client) const {
-  for (const auto& hit : hits_) {
-    if (PtInRect(&hit.rect, client)) {
-      return &hit;
+RECT MenuBar::StartRect() const {
+  for (const BarSegment& seg : layout_.last().segments) {
+    if (seg.kind == SegmentKind::kStart) {
+      return seg.rect;
     }
   }
-  return nullptr;
+  return {};
+}
+
+RECT MenuBar::ClockRect() const {
+  for (const BarSegment& seg : layout_.last().segments) {
+    if (seg.kind == SegmentKind::kClock) {
+      return seg.rect;
+    }
+  }
+  return {};
+}
+
+std::optional<StatusHit> MenuBar::HitTest(POINT client) const {
+  for (const BarSegment& seg : layout_.last().segments) {
+    if (seg.kind == SegmentKind::kStatus && PtInRect(&seg.rect, client) != FALSE) {
+      StatusHit hit;
+      hit.id = seg.id;
+      hit.rect = seg.rect;
+      hit.tooltip = seg.tooltip;
+      return hit;
+    }
+  }
+  return std::nullopt;
 }
 
 bool MenuBar::HitStart(POINT client) const {
-  return PtInRect(&start_rect_, client) != FALSE;
+  const RECT start = StartRect();
+  return PtInRect(&start, client) != FALSE;
 }
 
 void MenuBar::UpdateStartChrome(POINT client) {
@@ -784,7 +814,7 @@ void MenuBar::UpdateStartChrome(POINT client) {
     return;
   }
   start_hot_ = hot;
-  InvalidateRect(hwnd_, &start_rect_, FALSE);
+  InvalidateArea(hwnd_, StartRect());
 }
 
 void MenuBar::ArmMouseLeave() {
@@ -803,7 +833,7 @@ void MenuBar::ToggleStartMenu(bool from_keyboard) {
   if (spotlight_.visible()) {
     spotlight_.Hide();
   }
-  RECT start = start_rect_;
+  RECT start = StartRect();
   if (start.right <= start.left) {
     RECT client{};
     GetClientRect(hwnd_, &client);
@@ -812,7 +842,7 @@ void MenuBar::ToggleStartMenu(bool from_keyboard) {
   }
   MapWindowPoints(hwnd_, nullptr, reinterpret_cast<LPPOINT>(&start), 2);
   start_menu_.Toggle(hwnd_, start, dark_, from_keyboard);
-  InvalidateRect(hwnd_, &start_rect_, FALSE);
+  InvalidateArea(hwnd_, StartRect());
 }
 
 void MenuBar::ToggleSpotlight() {
@@ -822,7 +852,7 @@ void MenuBar::ToggleSpotlight() {
   status_popup_.Close();
   if (start_menu_.visible()) {
     start_menu_.Hide();
-    InvalidateRect(hwnd_, &start_rect_, FALSE);
+    InvalidateArea(hwnd_, StartRect());
   }
   spotlight_.Toggle(hwnd_, dark_);
 }
@@ -844,7 +874,7 @@ void MenuBar::OpenStatusPanel(const StatusHit& hit) {
   }
   if (start_menu_.visible()) {
     start_menu_.Hide();
-    InvalidateRect(hwnd_, &start_rect_, FALSE);
+    InvalidateArea(hwnd_, StartRect());
   }
   if (spotlight_.visible()) {
     spotlight_.Hide();

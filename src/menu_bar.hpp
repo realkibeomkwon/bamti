@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bar_layout.hpp"
 #include "clock_renderer.hpp"
 #include "pipe_server.hpp"
 #include "popup_surface.hpp"
@@ -11,6 +12,7 @@
 #include <windows.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -45,7 +47,9 @@ class MenuBar {
   void RefreshFullscreenState();
   void SetFullscreenOccluded(bool occluded);
   bool CreateTooltip();
-  const StatusHit* HitTest(POINT client) const;
+  RECT StartRect() const;
+  RECT ClockRect() const;
+  std::optional<StatusHit> HitTest(POINT client) const;
   bool HitStart(POINT client) const;
   void UpdateStartChrome(POINT client);
   void ArmMouseLeave();
@@ -66,9 +70,8 @@ class MenuBar {
   bool dark_ = true;
   bool start_hot_ = false;
   bool start_pressed_ = false;
-  RECT start_rect_{};
-  RECT clock_rect_{};
   std::wstring last_clock_text_;
+  BarLayout layout_;
   ClockRenderer clock_;
   PipeServer status_;
   TaskbarController taskbar_;
@@ -76,7 +79,6 @@ class MenuBar {
   Spotlight spotlight_;
   PopupSurface status_popup_;
   std::unique_ptr<StatusPanelContent> status_panel_;
-  std::vector<StatusHit> hits_;
   std::wstring tooltip_text_;
 };
 
