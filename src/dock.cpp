@@ -50,6 +50,8 @@ constexpr int kMenuSepDip = 8;
 constexpr int kMenuMinWidthDip = 168;
 constexpr int kMenuMaxWidthDip = 280;
 constexpr int kMenuTextPadDip = 12;
+constexpr int kMenuCheckDip = 16;
+constexpr int kMenuArrowDip = 14;
 constexpr UINT kHideDelayMs = 100;
 constexpr UINT kRebuildDelayMs = 300;
 constexpr UINT_PTR kHideTimerId = 1;
@@ -702,6 +704,8 @@ struct DockMenuRow {
   UINT id = 0;
   std::wstring text;
   bool separator = false;
+  bool checked = false;
+  bool submenu = false;
 };
 
 class DockMenuContent : public PopupContent {
@@ -781,6 +785,8 @@ class DockMenuContent : public PopupContent {
     const int row_h = DipToPx(kMenuRowDip, dpi);
     const int sep_h = DipToPx(kMenuSepDip, dpi);
     const int text_pad = DipToPx(kMenuTextPadDip, dpi);
+    const int check_w = DipToPx(kMenuCheckDip, dpi);
+    const int arrow_w = DipToPx(kMenuArrowDip, dpi);
     int text_w = 0;
     for (const DockMenuRow& row : rows_) {
       if (row.separator || row.text.empty()) {
@@ -788,7 +794,7 @@ class DockMenuContent : public PopupContent {
       }
       text_w = (std::max)(text_w, static_cast<int>(PopupTextWidth(dpi, row.text) + 0.5f));
     }
-    int width = text_w + pad * 2 + text_pad * 2;
+    int width = text_w + pad * 2 + text_pad * 2 + check_w + arrow_w;
     width = (std::max)(width, DipToPx(kMenuMinWidthDip, dpi));
     width = (std::min)(width, DipToPx(kMenuMaxWidthDip, dpi));
     int height = pad * 2;
@@ -815,6 +821,8 @@ class DockMenuContent : public PopupContent {
     target->CreateSolidColorBrush(hover_c, hover.GetAddressOf());
     target->CreateSolidColorBrush(D2D1::ColorF(line_c.r, line_c.g, line_c.b, line_c.a), line.GetAddressOf());
     const int text_pad = DipToPx(kMenuTextPadDip, dpi);
+    const int check_w = DipToPx(kMenuCheckDip, dpi);
+    const int arrow_w = DipToPx(kMenuArrowDip, dpi);
     for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
       const DockMenuRow& row = rows_[static_cast<size_t>(i)];
       const RECT rc = RowRect(i, dpi, client.right);
@@ -834,10 +842,22 @@ class DockMenuContent : public PopupContent {
             hover.Get());
       }
       if (text) {
+        if (row.checked) {
+          DrawPopupText(target, dpi, L"\u2713",
+                        D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
+                                    static_cast<float>(rc.left + check_w), static_cast<float>(rc.bottom)),
+                        text.Get());
+        }
         DrawPopupText(target, dpi, row.text,
-                      D2D1::RectF(static_cast<float>(rc.left + text_pad), static_cast<float>(rc.top),
-                                  static_cast<float>(rc.right - text_pad), static_cast<float>(rc.bottom)),
+                      D2D1::RectF(static_cast<float>(rc.left + check_w), static_cast<float>(rc.top),
+                                  static_cast<float>(rc.right - arrow_w), static_cast<float>(rc.bottom)),
                       text.Get());
+        if (row.submenu) {
+          DrawPopupText(target, dpi, L"\u203A",
+                        D2D1::RectF(static_cast<float>(rc.right - arrow_w), static_cast<float>(rc.top),
+                                    static_cast<float>(rc.right - text_pad / 4), static_cast<float>(rc.bottom)),
+                        text.Get());
+        }
       }
     }
   }
