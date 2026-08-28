@@ -581,6 +581,7 @@ void PipeServer::DropStale() {
   if (closed) {
     // ClientLoop removes items and notifies the UI when ReadFile unblocks.
   }
+  ReapDead();
   if (sink_ != nullptr) {
     sink_->Flush();
   }
@@ -1067,6 +1068,31 @@ size_t PipeServer::CountLiveLocked() const {
     }
   }
   return n;
+}
+
+void PipeServer::ReapDead() {
+  std::vector<std::unique_ptr<Client>> dead;
+  std::vector<std::thread> join;
+  {
+    std::lock_guard lock(mu_);
+    for (auto it = clients_.begin(); it != clients_.end();) {
+      if (*it && !(*it)->alive.load()) {
+        if ((*it)->thread.joinable() && (*it)->thread.get_id() != std::this_thread::get_id()) {
+          join.push_back(std::move((*it)->thread));
+        }
+        dead.push_back(std::move(*it));
+        it = clients_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    if (!dead.empty()) {
+      Log(L"pipe", L"reap dead=%zu live=%zu stored=%zu", dead.size(), CountLiveLocked(), clients_.size());
+    }
+  }
+  for (auto& t : join) {
+    t.join();
+  }
 }
 
 void PipeServer::CloseClientPipe(Client* client) {

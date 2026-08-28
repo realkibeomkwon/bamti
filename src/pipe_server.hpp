@@ -45,6 +45,7 @@ class PipeServer : public StatusSource {
   void CloseClientPipe(Client* client);
   bool WriteLine(Client* client, std::string_view line);
   size_t CountLiveLocked() const;
+  void ReapDead();
 
   StatusSink* sink_ = nullptr;
   HANDLE stop_event_ = nullptr;
