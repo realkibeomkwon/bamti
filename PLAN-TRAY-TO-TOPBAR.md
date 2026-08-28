@@ -286,7 +286,7 @@ class StatusSource {
 
 이 단계의 상세 지시서는 `TASK-TRAY-PROBE.md`에 따로 있습니다. 구현 시 그 문서를 따르고, 아래 요약은 무엇을 재는지에 대한 개요로만 읽으십시오.
 
-`bamti.exe --probe-tray` 스위치를 추가하고, 결과를 표준 출력과 `%LOCALAPPDATA%\bamti\logs`에 남깁니다. 이 코드는 진단 전용이므로 `src/tray_probe.cpp`에 격리하고 상주 경로에서는 호출하지 않습니다.
+`bamti.exe --probe-tray` 스위치를 추가하고, 결과를 표준 출력과 `%USERPROFILE%\.bamti\logs`에 남깁니다. 이 코드는 진단 전용이므로 `src/tray_probe.cpp`에 격리하고 상주 경로에서는 호출하지 않습니다.
 
 측정 항목은 다음과 같습니다.
 
@@ -294,7 +294,7 @@ class StatusSource {
 2. 트리에서 `ToolbarWindow32`를 찾고, 찾을 때마다 `TB_BUTTONCOUNT`를 보냅니다. 결과가 0보다 크면 레거시 백엔드가 가능합니다. `NotifyIconOverflowWindow`와 `TopLevelWindowForOverflowXamlIsland`도 최상위 창에서 각각 찾습니다.
 3. 버튼이 있으면 `VirtualAllocEx`로 대상 프로세스에 버퍼를 잡고 `TB_GETBUTTON`, `TB_GETBUTTONTEXTW`를 보낸 뒤 `ReadProcessMemory`로 읽어 `TBBUTTON.dwData`가 가리키는 구조를 덤프합니다. `hWnd`, `uID`, `uCallbackMessage`, `hIcon`이 그럴듯한 값인지 확인합니다.
 4. UI Automation으로 태스크바 아래의 `ToolBar` 및 `Button` 요소를 열거하고, 각 요소의 `Name`, `AutomationId`, `BoundingRectangle`, 지원 패턴(`Invoke`, `LegacyIAccessible`)을 남깁니다.
-5. `PrintWindow(tray_hwnd, dc, PW_RENDERFULLCONTENT)`로 알림 영역을 캡처해 `%LOCALAPPDATA%\bamti\probe-tray.png`로 저장합니다. 태스크바가 화면 밖에 주차된 상태에서도 픽셀이 나오는지 확인하는 것이 목적입니다.
+5. `PrintWindow(tray_hwnd, dc, PW_RENDERFULLCONTENT)`로 알림 영역을 캡처해 `%USERPROFILE%\.bamti\probe-tray.png`로 저장합니다. 태스크바가 화면 밖에 주차된 상태에서도 픽셀이 나오는지 확인하는 것이 목적입니다.
 
 **이 단계의 산출물은 코드가 아니라 측정 결과입니다.** 결과를 `PROBE-TRAY.md`에 붙여 넣고, 그 결과로 5단계에서 **무엇을 구현할지** 결정합니다. 판정 표는 5-0절에 있습니다. 요약하면 3번이 성공하면 레거시 백엔드를 만들고, 실패하면 레거시 백엔드는 아예 만들지 않은 채 UIA 백엔드만 만들며, 4번과 5번까지 실패하면 5-5절의 축소 대안으로 갑니다.
 
@@ -721,7 +721,7 @@ class UsageProvider {
 
 ### 7단계: 설정과 마무리
 
-상단바 항목이 늘어나면 사용자가 무엇을 보일지 고를 수 있어야 합니다. 설정 저장소는 `%LOCALAPPDATA%\bamti\settings.json` 한 파일이며, 읽기와 쓰기는 UI 스레드가 아닌 곳에서만 합니다.
+상단바 항목이 늘어나면 사용자가 무엇을 보일지 고를 수 있어야 합니다. 설정 저장소는 `%USERPROFILE%\.bamti\settings.json` 한 파일이며, 읽기와 쓰기는 UI 스레드가 아닌 곳에서만 합니다.
 
 ```json
 {

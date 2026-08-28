@@ -9,8 +9,8 @@
 ## 0. 완료 조건
 
 - `bamti.exe --probe-tray`가 실행되고 30초 안에 끝납니다.
-- `%LOCALAPPDATA%\bamti\probe-tray.txt`에 보고서가 생성됩니다.
-- `%LOCALAPPDATA%\bamti\probe-tray.png`에 알림 영역 캡처가 생성됩니다.
+- `%USERPROFILE%\.bamti\probe-tray.txt`에 보고서가 생성됩니다.
+- `%USERPROFILE%\.bamti\probe-tray.png`에 알림 영역 캡처가 생성됩니다.
 - 실행 전후로 태스크바와 알림 영역의 상태가 조금도 변하지 않습니다.
 - `/W4` 경고 없이 Debug와 Release 모두 빌드됩니다.
 
