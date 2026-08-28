@@ -1109,6 +1109,10 @@ LRESULT Dock::HandleHot(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
 LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
   WatchdogStage(L"dock.msg");
+  if (popup_.IsOpen() && GetTickCount64() - last_popup_tick_ >= 100) {
+    last_popup_tick_ = GetTickCount64();
+    popup_.Tick();
+  }
   switch (msg) {
     case WM_ERASEBKGND:
       return 1;
