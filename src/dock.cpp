@@ -713,6 +713,7 @@ HICON QueryWindowIcon(HWND hwnd) {
 }
 
 constexpr wchar_t kRunSubkey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t kApprovedSubkey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 constexpr wchar_t kRunNamePrefix[] = L"bamti-dock-";
 constexpr size_t kMaxRunValueName = 240;
 
@@ -800,13 +801,61 @@ bool LoginValueExists(const std::wstring& name) {
   return st == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ);
 }
 
+bool IsBamtiDockRunName(const std::wstring& name) {
+  const size_t prefix_n = sizeof(kRunNamePrefix) / sizeof(kRunNamePrefix[0]) - 1;
+  return name.size() >= prefix_n && name.compare(0, prefix_n, kRunNamePrefix) == 0;
+}
+
+bool StartupApprovedAllows(const std::wstring& name) {
+  if (name.empty()) {
+    return false;
+  }
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, kApprovedSubkey, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+    return true;
+  }
+  DWORD type = 0;
+  DWORD size = 0;
+  LONG st = RegQueryValueExW(key, name.c_str(), nullptr, &type, nullptr, &size);
+  if (st != ERROR_SUCCESS || type != REG_BINARY || size == 0) {
+    RegCloseKey(key);
+    return true;
+  }
+  std::vector<BYTE> data(size);
+  st = RegQueryValueExW(key, name.c_str(), nullptr, &type, data.data(), &size);
+  RegCloseKey(key);
+  if (st != ERROR_SUCCESS || size == 0) {
+    return true;
+  }
+  return (data[0] & 1u) == 0;
+}
+
+bool LoginValueEnabled(const std::wstring& name) {
+  return LoginValueExists(name) && StartupApprovedAllows(name);
+}
+
 bool LoginItemPresent(const DockApp& app) {
   const std::wstring name = LoginRunValueName(app);
   const std::wstring legacy = LoginRunValueNameLegacy(app);
-  if (LoginValueExists(name)) {
+  if (LoginValueEnabled(name)) {
     return true;
   }
-  return legacy != name && LoginValueExists(legacy);
+  return legacy != name && LoginValueEnabled(legacy);
+}
+
+void DeleteApprovedValue(const std::wstring& name) {
+  if (!IsBamtiDockRunName(name)) {
+    return;
+  }
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, kApprovedSubkey, 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS) {
+    return;
+  }
+  const LONG st = RegDeleteValueW(key, name.c_str());
+  RegCloseKey(key);
+  if (st != ERROR_SUCCESS && st != ERROR_FILE_NOT_FOUND) {
+    Log(L"dock", L"login approved delete failed name=%s err=%lu", name.c_str(), static_cast<unsigned long>(st));
+  }
 }
 
 LONG DeleteRunValue(HKEY key, const std::wstring& name) {
@@ -841,9 +890,14 @@ void ToggleLoginItem(const DockApp& app) {
     if (st == ERROR_SUCCESS) {
       st = DeleteRunValue(key, legacy);
     }
+    DeleteApprovedValue(name);
+    DeleteApprovedValue(legacy);
   } else {
     const DWORD bytes = static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t));
     st = RegSetValueExW(key, name.c_str(), 0, REG_SZ, reinterpret_cast<const BYTE*>(command.c_str()), bytes);
+    if (st == ERROR_SUCCESS) {
+      DeleteApprovedValue(name);
+    }
   }
   RegCloseKey(key);
   if (st != ERROR_SUCCESS) {
