@@ -51,6 +51,8 @@ class MenuBar {
   void ShowContextMenu(POINT screen);
   void RefreshFullscreenState();
   void SetFullscreenOccluded(bool occluded);
+  void UpdateProviderActive();
+  void UnregisterSessionWatch();
   bool CreateTooltip();
   RECT StartRect() const;
   RECT ClockRect() const;
@@ -74,6 +76,11 @@ class MenuBar {
   HWND tooltip_ = nullptr;
   bool appbar_registered_ = false;
   bool fullscreen_occluded_ = false;
+  bool session_locked_ = false;
+  bool display_on_ = true;
+  bool providers_active_ = true;
+  bool session_notify_ = false;
+  HPOWERNOTIFY display_notify_ = nullptr;
   bool dark_ = true;
   bool start_hot_ = false;
   bool start_pressed_ = false;

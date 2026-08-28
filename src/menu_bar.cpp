@@ -11,6 +11,7 @@
 #include <shellapi.h>
 #include <uxtheme.h>
 #include <windowsx.h>
+#include <wtsapi32.h>
 
 #include <algorithm>
 #include <memory>
@@ -195,6 +196,8 @@ bool MenuBar::Create(HINSTANCE instance) {
   if (!status_.StartAll()) {
     return false;
   }
+  session_notify_ = WTSRegisterSessionNotification(hwnd_, NOTIFY_FOR_THIS_SESSION) != FALSE;
+  display_notify_ = RegisterPowerSettingNotification(hwnd_, &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
   if (!status_popup_.Create(instance, hwnd_)) {
     return false;
   }
@@ -466,8 +469,25 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         widgets_.NotePowerEvent(false);
       } else if (wparam == PBT_APMRESUMEAUTOMATIC || wparam == PBT_APMRESUMESUSPEND) {
         widgets_.NotePowerEvent(true);
+      } else if (wparam == PBT_POWERSETTINGCHANGE) {
+        const auto* setting = reinterpret_cast<POWERBROADCAST_SETTING*>(lparam);
+        if (setting != nullptr && setting->PowerSetting == GUID_CONSOLE_DISPLAY_STATE &&
+            setting->DataLength >= sizeof(DWORD)) {
+          const DWORD state = *reinterpret_cast<const DWORD*>(setting->Data);
+          display_on_ = state != 0;
+          UpdateProviderActive();
+        }
       }
       return TRUE;
+    case WM_WTSSESSION_CHANGE:
+      if (wparam == WTS_SESSION_LOCK) {
+        session_locked_ = true;
+        UpdateProviderActive();
+      } else if (wparam == WTS_SESSION_UNLOCK) {
+        session_locked_ = false;
+        UpdateProviderActive();
+      }
+      return 0;
     case WM_QUERYENDSESSION:
       return TRUE;
     case WM_ENDSESSION:
@@ -476,6 +496,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         KillTimer(hwnd_, kRepaintTimerId);
         KillTimer(hwnd_, kToggleTimerId);
         StopFullscreenWatch(hwnd_);
+        UnregisterSessionWatch();
         status_.StopAll();
         taskbar_.Restore();
         UnregisterAppBar();
@@ -487,6 +508,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kRepaintTimerId);
       KillTimer(hwnd_, kToggleTimerId);
       StopFullscreenWatch(hwnd_);
+      UnregisterSessionWatch();
       status_.StopAll();
       status_popup_.Destroy();
       taskbar_.Restore();
@@ -997,12 +1019,32 @@ void MenuBar::RefreshFullscreenState() {
   SetFullscreenOccluded(IsTrueFullscreen(hwnd_));
 }
 
+void MenuBar::UpdateProviderActive() {
+  const bool active = !fullscreen_occluded_ && !session_locked_ && display_on_;
+  if (active == providers_active_) {
+    return;
+  }
+  providers_active_ = active;
+  status_.SetActive(active);
+}
+
+void MenuBar::UnregisterSessionWatch() {
+  if (session_notify_ && hwnd_ != nullptr) {
+    WTSUnRegisterSessionNotification(hwnd_);
+    session_notify_ = false;
+  }
+  if (display_notify_ != nullptr) {
+    UnregisterPowerSettingNotification(display_notify_);
+    display_notify_ = nullptr;
+  }
+}
+
 void MenuBar::SetFullscreenOccluded(bool occluded) {
   if (fullscreen_occluded_ == occluded) {
     return;
   }
   fullscreen_occluded_ = occluded;
-  status_.SetActive(!occluded);
+  UpdateProviderActive();
   if (occluded) {
     start_menu_.Hide();
     spotlight_.Hide();

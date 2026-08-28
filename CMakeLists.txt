@@ -85,6 +85,7 @@ target_link_libraries(bamti PRIVATE
   delayimp
   uiautomationcore
   iphlpapi
+  wtsapi32
 )
 
 set_property(TARGET bamti PROPERTY VS_DPI_AWARE "PerMonitor")
