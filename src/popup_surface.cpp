@@ -244,6 +244,7 @@ bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode)
                 (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
   press_inside_ = false;
   saw_mousemove_ = false;
+  armed_ = false;
   tick_ = 0;
   ApplyChrome();
   // Hidden windows do not receive WM_PAINT from UpdateWindow, so show first and
@@ -284,6 +285,7 @@ void PopupSurface::Dismiss(int invoke_index, DismissReason reason) {
   open_ = false;
   hot_ = -1;
   press_inside_ = false;
+  armed_ = false;
   if (hwnd_ != nullptr && GetCapture() == hwnd_) {
     ReleaseCapture();
   }
@@ -372,7 +374,7 @@ void PopupSurface::OnGuardTimer() {
   const bool mouse = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 ||
                      (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
   if (mouse && !mouse_down_) {
-    if (got_cursor && !inside) {
+    if (armed_ && got_cursor && !inside) {
       Dismiss(-1, DismissReason::kOutsidePoll);
       return;
     }
@@ -380,7 +382,7 @@ void PopupSurface::OnGuardTimer() {
       press_inside_ = true;
     }
   } else if (!mouse && mouse_down_) {
-    if (press_inside_ && inside && content_ != nullptr) {
+    if (armed_ && press_inside_ && inside && content_ != nullptr) {
       POINT client = cursor;
       ScreenToClient(hwnd_, &client);
       const int row = content_->HitTest(client, Dpi());
@@ -395,6 +397,9 @@ void PopupSurface::OnGuardTimer() {
     press_inside_ = false;
   }
   mouse_down_ = mouse;
+  if (!mouse) {
+    armed_ = true;
+  }
 
   ++tick_;
   if (tick_ % 20 == 0) {
@@ -562,7 +567,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       if (!open_) {
         return 0;
       }
-      if (!inside) {
+      if (armed_ && !inside) {
         Dismiss(-1, DismissReason::kOutsideClick);
       }
       return 0;
@@ -574,7 +579,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       GetClientRect(hwnd_, &client);
       const int inside = PtInRect(&client, pt) ? 1 : 0;
       Log(L"popup", L"msg=%s pt=%d,%d inside=%d", MouseMsgName(msg), pt.x, pt.y, inside);
-      if (!open_ || content_ == nullptr) {
+      if (!open_ || content_ == nullptr || !armed_) {
         return 0;
       }
       const int index = inside ? content_->HitTest(pt, Dpi()) : -1;

@@ -80,6 +80,7 @@ class PopupSurface {
   bool mouse_down_ = false;
   bool press_inside_ = false;
   bool saw_mousemove_ = false;
+  bool armed_ = false;
   bool dark_ = true;
   int hot_ = -1;
   unsigned tick_ = 0;

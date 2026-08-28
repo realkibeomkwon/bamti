@@ -1774,6 +1774,10 @@ void Dock::OpenDockMenu(POINT screen, int index) {
     return;
   }
   const ULONGLONG started = GetTickCount64();
+  if (last_menu_open_ != 0 && started - last_menu_open_ < 100) {
+    Log(L"dock", L"menu reopen storm %ums since last", static_cast<unsigned>(started - last_menu_open_));
+  }
+  last_menu_open_ = started;
   popup_.Close();
   CancelHideTimer();
   if (tooltip_ != nullptr) {

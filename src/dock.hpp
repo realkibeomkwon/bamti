@@ -107,6 +107,7 @@ class Dock {
   std::unique_ptr<DockMenuContent> menu_content_;
   std::wstring last_collect_snap_;
   uint64_t last_window_fp_ = 0;
+  ULONGLONG last_menu_open_ = 0;
 };
 
 }  // namespace bamti
