@@ -115,3 +115,27 @@ while b"\n" in buf:
 | 1 | `fix: 예제 티커가 수신 버퍼의 모든 줄을 처리하게 한다` |
 | 2 | `docs: 클라이언트 수신 규약과 hello 도착 순서를 명세에 적는다` |
 | 3 이후 | 결함 B를 확정했다면 그 원인에 맞는 커밋. 확정하지 못했다면 관측 결과만 문서로 남깁니다 |
+
+---
+
+## 5. 결함 B 재시험 관측 (원인 미확정, 코드 변경 없음)
+
+시험 시각: 2026-08-29 01:27–01:31. bamti pid 13220 (`build\Release\bamti.exe`, 12:55:58 기동). `examples/ticker.py`를 붙여 둔 채 진행.
+
+### 방법
+
+1. 클라이언트 A를 유지한 채 클라이언트 B를 붙였다 끊기 50회. 제한 8초, 재시도 간격 0.15초.
+2. A와 B를 유지한 채 클라이언트 C를 50회.
+3. 실패 시 `[pipe] listen armed` / `listen create failed err=` 와 시각을 대조.
+4. 추가로 `CreateFileW`와 파이썬 `open()`의 첫 오류, 동시 두 연결 경합, `open()` 직후 재연결을 기록.
+
+### 관측
+
+- `[pipe] listen create failed err=` 는 로그 전체에서 0회.
+- accept 직후 `listen armed` 간격은 같은 밀리초(0–1ms). 8초 공백 없음.
+- `CreateFileW`로 A 유지 + B 50회, A+B 유지 + C 50회: **실패 0, 재시도 0, 전부 첫 시도 즉시 성공.** 첫 시도 `WaitNamedPipe(0)` 도 성공.
+- 두 스레드가 동시에 `CreateFileW`: 20/20회 한쪽만 성공, 다른 쪽은 `ERROR_PIPE_BUSY`(231). `ERROR_FILE_NOT_FOUND`(2) 는 한 번도 없음.
+- 파이썬 `open(r"\\.\pipe\bamti-status", "r+b", buffering=0)` 으로 ticker가 붙은 채 50회, 끊은 뒤 즉시 재시도: 48/50이 첫 시도에서 `errno=22 Invalid argument`, `winerror=None`. 0.15초 뒤 두 번째 시도는 모두 성공. 8초 동안 실패한 회차는 0.
+- 같은 파이썬 `open()` 이어도 끊은 뒤 20ms를 쉬면 49/50이 첫 시도 성공.
+- 따라서 파이썬 `open()` 의 errno 22는 수신 인스턴스가 없는 8초 `FILE_NOT_FOUND` 가 아니라, 직전 연결을 닫은 직후 짧은 구간의 `ERROR_PIPE_BUSY` 가 CRT에 `EINVAL`(winerror 없음)으로 보이는 쪽에 가깝습니다.
+- 보고하신 8초 `ERROR_FILE_NOT_FOUND` 는 이 동시 연결 조건에서도 재현되지 않았습니다. 원인을 확정하지 못해 bamti 파이프 서버는 고치지 않았습니다.
