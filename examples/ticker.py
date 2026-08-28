@@ -98,17 +98,18 @@ def main() -> int:
             if not chunk:
                 break
             buf += chunk
-            if b"\n" not in buf:
-                continue
-            raw, buf = buf.split(b"\n", 1)
-            try:
-                ev = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            if ev.get("event") == "toggle" and ev.get("row_id") == "alerts":
-                alerts = bool(ev.get("on"))
-                with lock:
-                    send(pipe, {"v": 2, "op": "patch", "id": ITEM_ID, "panel": item(price, alerts)["panel"]})
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                if not raw:
+                    continue
+                try:
+                    ev = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if ev.get("event") == "toggle" and ev.get("row_id") == "alerts":
+                    alerts = bool(ev.get("on"))
+                    with lock:
+                        send(pipe, {"v": 2, "op": "patch", "id": ITEM_ID, "panel": item(price, alerts)["panel"]})
     except (KeyboardInterrupt, OSError):
         pass
     stop.set()
