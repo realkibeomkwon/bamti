@@ -42,6 +42,7 @@ constexpr int kMaxDocuments = 4;
 constexpr int kGlyphDip = 18;
 constexpr UINT_PTR kFileSearchTimer = 1;
 constexpr UINT kFileSearchDoneMsg = WM_APP + 40;
+constexpr UINT kIconReadyMsg = WM_APP + 41;
 constexpr UINT kFileSearchDelayMs = 40;
 constexpr ULONGLONG kWalkBudgetMs = 45;
 constexpr ULONGLONG kAppReloadMs = 60000;
@@ -865,6 +866,50 @@ struct FileSearchPayload {
   std::vector<Spotlight::FileHit> hits;
 };
 
+struct IconPayload {
+  uint64_t gen = 0;
+  std::wstring path;
+  HICON icon = nullptr;
+};
+
+HICON ExtractShellIcon(const std::wstring& path, bool overlay) {
+  if (path.empty()) {
+    return nullptr;
+  }
+  const ULONGLONG started = GetTickCount64();
+  SHFILEINFOW info{};
+  UINT flags = SHGFI_ICON | SHGFI_LARGEICON;
+  if (overlay) {
+    flags |= SHGFI_ADDOVERLAYS;
+  }
+  HICON icon = nullptr;
+  if (SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info), flags) != 0) {
+    icon = info.hIcon;
+  }
+  const unsigned ms = static_cast<unsigned>(GetTickCount64() - started);
+  if (ms > 10) {
+    Log(L"spotlight", L"icon %ums path=%s", ms, path.c_str());
+  }
+  return icon;
+}
+
+void DiscardHitIcons(std::vector<Spotlight::FileHit>& hits) {
+  for (auto& hit : hits) {
+    if (hit.icon != nullptr) {
+      DestroyIcon(hit.icon);
+      hit.icon = nullptr;
+    }
+  }
+}
+
+void ExtractHitIcons(std::vector<Spotlight::FileHit>& hits) {
+  for (auto& hit : hits) {
+    if (hit.icon == nullptr && !hit.path.empty()) {
+      hit.icon = ExtractShellIcon(hit.path, true);
+    }
+  }
+}
+
 D2D1_COLOR_F FillColor(bool dark) {
   return dark ? D2D1::ColorF(0.14f, 0.14f, 0.14f, 1.0f) : D2D1::ColorF(0.97f, 0.97f, 0.97f, 1.0f);
 }
@@ -900,6 +945,7 @@ Spotlight::~Spotlight() {
   Hide();
   DestroyAppIcons();
   DestroyFileIcons();
+  DestroyIconCache();
   if (settings_icon_ != nullptr) {
     DestroyIcon(settings_icon_);
     settings_icon_ = nullptr;
@@ -1200,6 +1246,9 @@ LRESULT Spotlight::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case kFileSearchDoneMsg:
       AcceptFileHits(reinterpret_cast<void*>(lparam));
       return 0;
+    case kIconReadyMsg:
+      AcceptIcon(reinterpret_cast<void*>(lparam));
+      return 0;
     case WM_MOUSEMOVE: {
       const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       UpdateHot(pt);
@@ -1495,6 +1544,123 @@ void Spotlight::DestroyFileIcons() {
   }
 }
 
+void Spotlight::DestroyIconCache() {
+  for (auto& entry : icon_cache_) {
+    if (entry.second != nullptr) {
+      DestroyIcon(entry.second);
+    }
+  }
+  icon_cache_.clear();
+  icon_pending_.clear();
+}
+
+std::wstring Spotlight::PathForMatch(const Match& match) const {
+  switch (match.kind) {
+    case Kind::App:
+      if (match.index >= 0 && match.index < static_cast<int>(apps_.size())) {
+        return apps_[static_cast<size_t>(match.index)].path;
+      }
+      break;
+    case Kind::File:
+    case Kind::Folder:
+      if (match.index >= 0 && match.index < static_cast<int>(files_.size())) {
+        return files_[static_cast<size_t>(match.index)].path;
+      }
+      break;
+    case Kind::Header:
+    case Kind::Setting:
+      break;
+  }
+  return {};
+}
+
+HICON Spotlight::LookupIcon(const Match& match) const {
+  switch (match.kind) {
+    case Kind::Setting:
+      return settings_icon_;
+    case Kind::Folder: {
+      const std::wstring path = PathForMatch(match);
+      if (!path.empty()) {
+        const auto it = icon_cache_.find(path);
+        if (it != icon_cache_.end() && it->second != nullptr) {
+          return it->second;
+        }
+      }
+      return folder_icon_;
+    }
+    case Kind::App:
+    case Kind::File: {
+      const std::wstring path = PathForMatch(match);
+      if (path.empty()) {
+        return nullptr;
+      }
+      const auto it = icon_cache_.find(path);
+      return it != icon_cache_.end() ? it->second : nullptr;
+    }
+    case Kind::Header:
+      break;
+  }
+  return nullptr;
+}
+
+void Spotlight::RequestIcon(const std::wstring& path, bool overlay) {
+  if (path.empty() || hwnd_ == nullptr) {
+    return;
+  }
+  if (icon_cache_.find(path) != icon_cache_.end() || icon_pending_.find(path) != icon_pending_.end()) {
+    return;
+  }
+  icon_pending_.insert(path);
+  const uint64_t gen = search_gen_.load(std::memory_order_acquire);
+  const HWND hwnd = hwnd_;
+  icon_inflight_.fetch_add(1, std::memory_order_acq_rel);
+  std::thread([this, gen, path, overlay, hwnd]() {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool com_ok = SUCCEEDED(com) || com == S_FALSE;
+    HICON icon = ExtractShellIcon(path, overlay);
+    auto* payload = new IconPayload;
+    payload->gen = gen;
+    payload->path = path;
+    payload->icon = icon;
+    if (!PostMessageW(hwnd, kIconReadyMsg, 0, reinterpret_cast<LPARAM>(payload))) {
+      if (icon != nullptr) {
+        DestroyIcon(icon);
+      }
+      delete payload;
+    }
+    if (com_ok) {
+      CoUninitialize();
+    }
+    icon_inflight_.fetch_sub(1, std::memory_order_acq_rel);
+  }).detach();
+}
+
+void Spotlight::AcceptIcon(void* payload) {
+  std::unique_ptr<IconPayload> owned(static_cast<IconPayload*>(payload));
+  if (!owned) {
+    return;
+  }
+  icon_pending_.erase(owned->path);
+  if (!visible_ || owned->gen != search_gen_.load(std::memory_order_acquire)) {
+    if (owned->icon != nullptr) {
+      DestroyIcon(owned->icon);
+    }
+    return;
+  }
+  if (icon_cache_.find(owned->path) != icon_cache_.end()) {
+    if (owned->icon != nullptr) {
+      DestroyIcon(owned->icon);
+    }
+    return;
+  }
+  icon_cache_.emplace(owned->path, owned->icon);
+  const bool ready = owned->icon != nullptr;
+  owned->icon = nullptr;
+  if (ready) {
+    Present();
+  }
+}
+
 void Spotlight::ReloadApps() {
   DestroyAppIcons();
   apps_.clear();
@@ -1523,54 +1689,6 @@ void Spotlight::EnsureApps() {
   }
 }
 
-HICON Spotlight::EnsureIcon(const Match& match) {
-  switch (match.kind) {
-    case Kind::Header:
-      break;
-    case Kind::App:
-      if (match.index >= 0 && match.index < static_cast<int>(apps_.size())) {
-        AppEntry& entry = apps_[static_cast<size_t>(match.index)];
-        if (entry.icon == nullptr && !entry.path.empty()) {
-          SHFILEINFOW info{};
-          if (SHGetFileInfoW(entry.path.c_str(), 0, &info, sizeof(info), SHGFI_ICON | SHGFI_LARGEICON) != 0) {
-            entry.icon = info.hIcon;
-          }
-        }
-        return entry.icon;
-      }
-      break;
-    case Kind::Setting:
-      return settings_icon_;
-    case Kind::Folder:
-      if (match.index >= 0 && match.index < static_cast<int>(files_.size())) {
-        FileHit& hit = files_[static_cast<size_t>(match.index)];
-        if (hit.icon == nullptr && !hit.path.empty()) {
-          SHFILEINFOW info{};
-          if (SHGetFileInfoW(hit.path.c_str(), 0, &info, sizeof(info), SHGFI_ICON | SHGFI_LARGEICON | SHGFI_ADDOVERLAYS) !=
-              0) {
-            hit.icon = info.hIcon;
-          }
-        }
-        return hit.icon != nullptr ? hit.icon : folder_icon_;
-      }
-      return folder_icon_;
-    case Kind::File:
-      if (match.index >= 0 && match.index < static_cast<int>(files_.size())) {
-        FileHit& hit = files_[static_cast<size_t>(match.index)];
-        if (hit.icon == nullptr && !hit.path.empty()) {
-          SHFILEINFOW info{};
-          if (SHGetFileInfoW(hit.path.c_str(), 0, &info, sizeof(info), SHGFI_ICON | SHGFI_LARGEICON | SHGFI_ADDOVERLAYS) !=
-              0) {
-            hit.icon = info.hIcon;
-          }
-        }
-        return hit.icon;
-      }
-      break;
-  }
-  return nullptr;
-}
-
 void Spotlight::QueryFiles(const std::wstring& needle) {
   if (needle.empty() || hwnd_ == nullptr) {
     return;
@@ -1583,13 +1701,16 @@ void Spotlight::QueryFiles(const std::wstring& needle) {
     const bool com_ok = SUCCEEDED(com) || com == S_FALSE;
     auto post = [&](std::vector<FileHit> hits) {
       if (search_gen_.load(std::memory_order_acquire) != gen) {
+        DiscardHitIcons(hits);
         return false;
       }
+      ExtractHitIcons(hits);
       auto* payload = new FileSearchPayload;
       payload->gen = gen;
       payload->needle = needle;
       payload->hits = std::move(hits);
       if (!PostMessageW(hwnd, kFileSearchDoneMsg, 0, reinterpret_cast<LPARAM>(payload))) {
+        DiscardHitIcons(payload->hits);
         delete payload;
         return false;
       }
@@ -1612,9 +1733,27 @@ void Spotlight::AcceptFileHits(void* payload) {
   std::unique_ptr<FileSearchPayload> owned(static_cast<FileSearchPayload*>(payload));
   if (!owned || !visible_ || owned->gen != search_gen_.load(std::memory_order_acquire) ||
       owned->needle != filter_) {
+    if (owned) {
+      DiscardHitIcons(owned->hits);
+    }
     return;
   }
   DestroyFileIcons();
+  for (auto& hit : owned->hits) {
+    if (hit.path.empty()) {
+      if (hit.icon != nullptr) {
+        DestroyIcon(hit.icon);
+        hit.icon = nullptr;
+      }
+      continue;
+    }
+    if (icon_cache_.find(hit.path) == icon_cache_.end()) {
+      icon_cache_.emplace(hit.path, hit.icon);
+    } else if (hit.icon != nullptr) {
+      DestroyIcon(hit.icon);
+    }
+    hit.icon = nullptr;
+  }
   files_ = std::move(owned->hits);
   LayoutWindow();
 }
@@ -1624,12 +1763,29 @@ void Spotlight::WaitForFileSearches() {
   while (search_inflight_.load(std::memory_order_acquire) != 0) {
     Sleep(10);
   }
+  while (icon_inflight_.load(std::memory_order_acquire) != 0) {
+    Sleep(10);
+  }
   if (hwnd_ != nullptr) {
     MSG msg{};
     while (PeekMessageW(&msg, hwnd_, kFileSearchDoneMsg, kFileSearchDoneMsg, PM_REMOVE) != FALSE) {
-      delete reinterpret_cast<FileSearchPayload*>(msg.lParam);
+      auto* payload = reinterpret_cast<FileSearchPayload*>(msg.lParam);
+      if (payload != nullptr) {
+        DiscardHitIcons(payload->hits);
+        delete payload;
+      }
+    }
+    while (PeekMessageW(&msg, hwnd_, kIconReadyMsg, kIconReadyMsg, PM_REMOVE) != FALSE) {
+      auto* payload = reinterpret_cast<IconPayload*>(msg.lParam);
+      if (payload != nullptr) {
+        if (payload->icon != nullptr) {
+          DestroyIcon(payload->icon);
+        }
+        delete payload;
+      }
     }
   }
+  icon_pending_.clear();
 }
 
 void Spotlight::RebuildMatches() {
@@ -1982,6 +2138,7 @@ void Spotlight::Present() {
   if (hwnd_ == nullptr || !EnsureRenderer()) {
     return;
   }
+  const ULONGLONG started = GetTickCount64();
   RECT window{};
   GetWindowRect(hwnd_, &window);
   const int width = window.right - window.left;
@@ -2181,9 +2338,21 @@ void Spotlight::Present() {
   }
 
   for (const Row& row : rows_) {
-    if (HICON icon = EnsureIcon(row.match)) {
+    if (row.match.kind == Kind::Header) {
+      continue;
+    }
+    const std::wstring path = PathForMatch(row.match);
+    if (!path.empty() && icon_cache_.find(path) == icon_cache_.end()) {
+      RequestIcon(path, row.match.kind != Kind::App);
+    }
+    if (HICON icon = LookupIcon(row.match)) {
       const int sz = row.icon_rect.bottom - row.icon_rect.top;
       DrawIconEx(layer_dc_, row.icon_rect.left, row.icon_rect.top, icon, sz, sz, 0, nullptr, DI_NORMAL);
+    } else {
+      const COLORREF fill = dark_ ? RGB(72, 72, 72) : RGB(180, 180, 180);
+      const HBRUSH placeholder = CreateSolidBrush(fill);
+      FillRect(layer_dc_, &row.icon_rect, placeholder);
+      DeleteObject(placeholder);
     }
   }
 
@@ -2194,6 +2363,10 @@ void Spotlight::Present() {
   blend.SourceConstantAlpha = 255;
   blend.AlphaFormat = AC_SRC_ALPHA;
   UpdateLayeredWindow(hwnd_, nullptr, nullptr, &size, layer_dc_, &src, 0, &blend, ULW_ALPHA);
+  const unsigned ms = static_cast<unsigned>(GetTickCount64() - started);
+  if (ms > 16) {
+    Log(L"spotlight", L"paint rows=%zu %ums", rows_.size(), ms);
+  }
 }
 
 void Spotlight::PaintEdit(HWND edit) {

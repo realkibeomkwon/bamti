@@ -6,7 +6,9 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <map>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace bamti {
@@ -75,7 +77,11 @@ class Spotlight {
   void EnsureApps();
   void DestroyAppIcons();
   void DestroyFileIcons();
-  HICON EnsureIcon(const Match& match);
+  void DestroyIconCache();
+  std::wstring PathForMatch(const Match& match) const;
+  HICON LookupIcon(const Match& match) const;
+  void RequestIcon(const std::wstring& path, bool overlay);
+  void AcceptIcon(void* payload);
   void QueryFiles(const std::wstring& needle);
   void AcceptFileHits(void* payload);
   void WaitForFileSearches();
@@ -128,6 +134,9 @@ class Spotlight {
   bool swallow_ime_commit_ = false;
   std::atomic<uint64_t> search_gen_{0};
   std::atomic<uint32_t> search_inflight_{0};
+  std::atomic<uint32_t> icon_inflight_{0};
+  std::map<std::wstring, HICON> icon_cache_;
+  std::unordered_set<std::wstring> icon_pending_;
   std::vector<AppEntry> apps_;
   std::vector<FileHit> files_;
   std::vector<Match> matches_;
