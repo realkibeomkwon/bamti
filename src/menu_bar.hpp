@@ -21,6 +21,7 @@ namespace bamti {
 inline constexpr wchar_t kMenuBarClass[] = L"bamti.MenuBar";
 
 class StatusPanelContent;
+class OverflowContent;
 
 class MenuBar {
  public:
@@ -59,12 +60,15 @@ class MenuBar {
   void ToggleStartMenu(bool from_keyboard = false);
   void ToggleSpotlight();
   void OpenStatusPanel(const StatusHit& hit);
+  void OpenOverflow();
+  const BarSegment* HitSegment(POINT client) const;
   bool InstallWinHook();
   void RemoveWinHook();
   UINT Dpi() const;
   int BarHeightPx() const;
 
   friend class StatusPanelContent;
+  friend class OverflowContent;
 
   HWND hwnd_ = nullptr;
   HWND tooltip_ = nullptr;
@@ -87,6 +91,7 @@ class MenuBar {
   Spotlight spotlight_;
   PopupSurface status_popup_;
   std::unique_ptr<StatusPanelContent> status_panel_;
+  std::unique_ptr<OverflowContent> overflow_panel_;
   std::wstring tooltip_text_;
 };
 

@@ -13,6 +13,7 @@ constexpr float kItemGapDip = 14.0f;
 constexpr float kStartPadLeftDip = 4.0f;
 constexpr float kStartHitWidthDip = 34.0f;
 constexpr size_t kLayoutCacheMax = 64;
+constexpr wchar_t kOverflowGlyph[] = L"\u2039";  // ‹
 
 std::wstring StatusBarText(const StatusItem& item) {
   if (item.icon_glyph.empty()) {
@@ -194,7 +195,11 @@ const BarLayoutResult& BarLayout::Compute(const RECT& client, const std::wstring
   });
 
   std::vector<BarSegment> status;
-  for (const StatusItem& item : ordered) {
+  std::vector<StatusItem> visible;
+  std::vector<float> status_x;
+  bool overflowed = false;
+  for (size_t i = 0; i < ordered.size(); ++i) {
+    const StatusItem& item = ordered[i];
     const std::wstring label = StatusBarText(item);
     if (label.empty()) {
       continue;
@@ -206,7 +211,13 @@ const BarLayoutResult& BarLayout::Compute(const RECT& client, const std::wstring
     const float width = entry->metrics.widthIncludingTrailingWhitespace;
     const float x = cursor - width;
     if (x < left_limit) {
-      continue;
+      for (size_t j = i; j < ordered.size(); ++j) {
+        if (!StatusBarText(ordered[j]).empty()) {
+          last_.overflow.push_back(ordered[j]);
+        }
+      }
+      overflowed = true;
+      break;
     }
     BarSegment seg;
     seg.kind = SegmentKind::kStatus;
@@ -216,10 +227,51 @@ const BarLayoutResult& BarLayout::Compute(const RECT& client, const std::wstring
     seg.accent = item.accent;
     seg.rect = PixelRect(client, x, width);
     cursor = x - kItemGapDip;
+    status_x.push_back(x);
+    visible.push_back(item);
     status.push_back(std::move(seg));
   }
 
+  BarSegment chevron;
+  if (overflowed || !last_.overflow.empty()) {
+    if (CacheEntry* mark = GetOrCreate(kOverflowGlyph)) {
+      const float width = mark->metrics.widthIncludingTrailingWhitespace;
+      for (int pass = 0; pass < 2; ++pass) {
+        float x = cursor - width;
+        if (!status_x.empty()) {
+          x = status_x.back() - kItemGapDip - width;
+        }
+        if (x >= left_limit) {
+          chevron.kind = SegmentKind::kOverflow;
+          chevron.text = kOverflowGlyph;
+          chevron.tooltip = L"접힌 항목";
+          chevron.rect = PixelRect(client, x, width);
+          break;
+        }
+        if (status.empty()) {
+          break;
+        }
+        last_.overflow.insert(last_.overflow.begin(), visible.back());
+        visible.pop_back();
+        status.pop_back();
+        status_x.pop_back();
+        if (!status_x.empty()) {
+          cursor = status_x.back() - kItemGapDip;
+        } else {
+          cursor = max_width_dip_ - kPadRightDip;
+          if (!clock.text.empty()) {
+            cursor -= static_cast<float>(clock.rect.right - clock.rect.left) * 96.0f / static_cast<float>(dpi_) +
+                      kStatusClockGapDip;
+          }
+        }
+      }
+    }
+  }
+
   last_.segments = std::move(left);
+  if (chevron.kind == SegmentKind::kOverflow) {
+    last_.segments.push_back(std::move(chevron));
+  }
   for (auto it = status.rbegin(); it != status.rend(); ++it) {
     last_.segments.push_back(std::move(*it));
   }

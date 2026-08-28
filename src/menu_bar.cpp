@@ -363,7 +363,108 @@ class StatusPanelContent : public PopupContent {
   std::vector<RECT> action_hits_;
 };
 
-MenuBar::MenuBar() : status_panel_(std::make_unique<StatusPanelContent>()) {}
+std::wstring OverflowLabel(const StatusItem& item) {
+  if (item.icon_glyph.empty()) {
+    return item.text;
+  }
+  if (item.text.empty()) {
+    return item.icon_glyph;
+  }
+  return item.icon_glyph + L" " + item.text;
+}
+
+class OverflowContent : public PopupContent {
+ public:
+  void Reset(MenuBar* owner, std::vector<StatusItem> items) {
+    owner_ = owner;
+    items_ = std::move(items);
+    row_hits_.clear();
+  }
+
+  int RowCount() const override { return static_cast<int>(items_.size()); }
+
+  SIZE Measure(UINT dpi) override {
+    row_hits_.clear();
+    const int pad = DipToPx(kPanelPadDip, dpi);
+    const int row = DipToPx(kPanelActionDip, dpi);
+    int inner = DipToPx(120, dpi);
+    for (const StatusItem& item : items_) {
+      inner = (std::max)(inner, static_cast<int>(PopupTextWidth(dpi, OverflowLabel(item)) + 0.5f));
+    }
+    const int width = inner + pad * 2;
+    int y = pad;
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+      row_hits_.push_back(RECT{pad, y, width - pad, y + row});
+      y += row;
+    }
+    y += pad;
+    return SIZE{width, y};
+  }
+
+  void Render(ID2D1RenderTarget* target, UINT dpi, int hot_index) override {
+    if (target == nullptr || owner_ == nullptr) {
+      return;
+    }
+    const bool dark = owner_->dark_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> text;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover;
+    if (FAILED(target->CreateSolidColorBrush(ClockTextColor(dark), text.GetAddressOf())) ||
+        FAILED(target->CreateSolidColorBrush(MenuItemHoverFill(dark, false), hover.GetAddressOf()))) {
+      return;
+    }
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+      const RECT& rc = row_hits_[static_cast<size_t>(i)];
+      if (i == hot_index) {
+        target->FillRectangle(D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
+                                          static_cast<float>(rc.right), static_cast<float>(rc.bottom)),
+                              hover.Get());
+      }
+      DrawPopupText(target, dpi, OverflowLabel(items_[static_cast<size_t>(i)]),
+                    D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
+                                static_cast<float>(rc.right), static_cast<float>(rc.bottom)),
+                    text.Get());
+    }
+  }
+
+  int HitTest(POINT client, UINT dpi) const override {
+    (void)dpi;
+    for (int i = 0; i < static_cast<int>(row_hits_.size()); ++i) {
+      if (PtInRect(&row_hits_[static_cast<size_t>(i)], client)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  void Invoke(int index) override {
+    if (owner_ == nullptr || index < 0 || index >= static_cast<int>(items_.size())) {
+      return;
+    }
+    const StatusItem& item = items_[static_cast<size_t>(index)];
+    if (item.panel) {
+      StatusHit hit;
+      hit.id = item.id;
+      for (const BarSegment& seg : owner_->layout_.last().segments) {
+        if (seg.kind == SegmentKind::kOverflow) {
+          hit.rect = seg.rect;
+          break;
+        }
+      }
+      owner_->OpenStatusPanel(hit);
+    } else {
+      owner_->status_.SendClick(item.id, "left");
+    }
+  }
+
+ private:
+  MenuBar* owner_ = nullptr;
+  std::vector<StatusItem> items_;
+  std::vector<RECT> row_hits_;
+};
+
+MenuBar::MenuBar()
+    : status_panel_(std::make_unique<StatusPanelContent>()),
+      overflow_panel_(std::make_unique<OverflowContent>()) {}
 
 MenuBar::~MenuBar() {
   RemoveWinHook();
@@ -538,7 +639,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         POINT pt{};
         GetCursorPos(&pt);
         ScreenToClient(hwnd_, &pt);
-        if (HitStart(pt) || HitTest(pt)) {
+        if (HitStart(pt) || HitSegment(pt) != nullptr) {
           SetCursor(LoadCursorW(nullptr, IDC_HAND));
           return TRUE;
         }
@@ -589,6 +690,12 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         ToggleStartMenu();
         return 0;
       }
+      if (const BarSegment* seg = HitSegment(pt)) {
+        if (seg->kind == SegmentKind::kOverflow) {
+          OpenOverflow();
+          return 0;
+        }
+      }
       if (const auto hit = HitTest(pt)) {
         status_.SendClick(hit->id, "left");
         OpenStatusPanel(*hit);
@@ -614,6 +721,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         ScreenToClient(hwnd_, &pt);
         if (HitStart(pt)) {
           tooltip_text_ = L"시작";
+          info->lpszText = tooltip_text_.data();
+        } else if (const BarSegment* seg = HitSegment(pt); seg != nullptr && seg->kind == SegmentKind::kOverflow) {
+          tooltip_text_ = seg->tooltip.empty() ? std::wstring(L"접힌 항목") : seg->tooltip;
           info->lpszText = tooltip_text_.data();
         } else if (const auto hit = HitTest(pt)) {
           tooltip_text_ = hit->tooltip.empty() ? std::wstring(hit->id.begin(), hit->id.end()) : hit->tooltip;
@@ -881,6 +991,41 @@ RECT MenuBar::ClockRect() const {
     }
   }
   return {};
+}
+
+const BarSegment* MenuBar::HitSegment(POINT client) const {
+  for (const BarSegment& seg : layout_.last().segments) {
+    if (PtInRect(&seg.rect, client) != FALSE) {
+      if (seg.kind == SegmentKind::kStatus || seg.kind == SegmentKind::kOverflow) {
+        return &seg;
+      }
+    }
+  }
+  return nullptr;
+}
+
+void MenuBar::OpenOverflow() {
+  if (overflow_panel_ == nullptr || hwnd_ == nullptr || layout_.last().overflow.empty()) {
+    return;
+  }
+  if (start_menu_.visible()) {
+    start_menu_.Hide();
+    InvalidateArea(hwnd_, StartRect());
+  }
+  if (spotlight_.visible()) {
+    spotlight_.Hide();
+  }
+  overflow_panel_->Reset(this, layout_.last().overflow);
+  RECT chevron{};
+  for (const BarSegment& seg : layout_.last().segments) {
+    if (seg.kind == SegmentKind::kOverflow) {
+      chevron = seg.rect;
+      break;
+    }
+  }
+  POINT anchor{chevron.left, chevron.bottom};
+  ClientToScreen(hwnd_, &anchor);
+  status_popup_.Open(overflow_panel_.get(), anchor, PopupSurface::Anchor::BelowAt);
 }
 
 std::optional<StatusHit> MenuBar::HitTest(POINT client) const {
