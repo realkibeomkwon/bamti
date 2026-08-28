@@ -10,6 +10,7 @@
 #include "status_panel.hpp"
 #include "status_registry.hpp"
 #include "taskbar_controller.hpp"
+#include "widgets/builtin.hpp"
 
 #include <windows.h>
 
@@ -110,6 +111,7 @@ class MenuBar {
   BarLayout layout_;
   ClockRenderer clock_;
   PipeServer pipe_;
+  BuiltinWidgets widgets_;
   StatusRegistry status_;
   TaskbarController taskbar_;
   StartMenu start_menu_;

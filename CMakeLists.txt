@@ -11,6 +11,7 @@ add_executable(bamti WIN32
   src/host.cpp
   src/paths.cpp
   src/settings.cpp
+  src/widgets/builtin.cpp
   src/log.cpp
   src/watchdog.cpp
   src/menu_bar.cpp
@@ -83,6 +84,7 @@ target_link_libraries(bamti PRIVATE
   winmm
   delayimp
   uiautomationcore
+  iphlpapi
 )
 
 set_property(TARGET bamti PROPERTY VS_DPI_AWARE "PerMonitor")

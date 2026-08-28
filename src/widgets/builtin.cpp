@@ -1,0 +1,1072 @@
+#include "widgets/builtin.hpp"
+
+#include "log.hpp"
+#include "status_item.hpp"
+
+// netioapi.h (via iphlpapi.h) needs _WS2IPDEF_. Do not include winsock2.h.
+#include <ws2def.h>
+#include <ws2ipdef.h>
+#include <iphlpapi.h>
+#include <objbase.h>
+#include <shellapi.h>
+
+#include <cmath>
+#include <cstring>
+
+namespace bamti {
+namespace {
+
+constexpr char kBatteryId[] = "bamti.widget/battery";
+constexpr char kCpuId[] = "bamti.widget/cpu";
+constexpr char kNetId[] = "bamti.widget/net";
+constexpr char kBoardId[] = "bamti.widget/board";
+
+constexpr int kBatteryPriority = 40;
+constexpr int kCpuPriority = 30;
+constexpr int kNetPriority = 20;
+constexpr int kBoardPriority = 10;
+
+constexpr ULONGLONG kBatteryPeriodMs = 60000;
+constexpr ULONGLONG kCpuPeriodMs = 5000;
+constexpr ULONGLONG kNetPeriodMs = 2000;
+constexpr ULONGLONG kFirstSampleMs = 1000;
+
+constexpr wchar_t kBatteryGlyphs[] = L"▁▃▅▇█";
+constexpr wchar_t kCpuGlyph[] = L"▦";
+constexpr wchar_t kNetGlyph[] = L"⇅";
+constexpr wchar_t kBoardGlyph[] = L"▤";
+
+struct SaveJob {
+  WidgetSettings settings;
+  HANDLE idle = nullptr;
+  LONG* inflight = nullptr;
+};
+
+VOID CALLBACK SaveSettingsCallback(PTP_CALLBACK_INSTANCE instance, PVOID ctx) {
+  (void)instance;
+  auto* job = static_cast<SaveJob*>(ctx);
+  SaveWidgetSettings(job->settings);
+  if (job->inflight != nullptr && InterlockedDecrement(job->inflight) == 0 && job->idle != nullptr) {
+    SetEvent(job->idle);
+  }
+  delete job;
+}
+
+uint64_t FileTimeToU64(const FILETIME& ft) {
+  ULARGE_INTEGER u;
+  u.LowPart = ft.dwLowDateTime;
+  u.HighPart = ft.dwHighDateTime;
+  return u.QuadPart;
+}
+
+std::wstring Truncate(std::wstring text, size_t max_chars) {
+  if (text.size() <= max_chars) {
+    return text;
+  }
+  if (max_chars == 0) {
+    return {};
+  }
+  text.resize(max_chars - 1);
+  text.push_back(L'\u2026');
+  return text;
+}
+
+float ClampUnit(double value) {
+  if (!std::isfinite(value) || value < 0.0) {
+    return 0.0f;
+  }
+  if (value > 1.0) {
+    return 1.0f;
+  }
+  return static_cast<float>(value);
+}
+
+enum class ScaleStyle { kCompact, kBytes, kBytesPerSec };
+
+std::wstring FormatScaled(double n, ScaleStyle style) {
+  if (!std::isfinite(n) || n < 0.0) {
+    n = 0.0;
+  }
+  double v = n;
+  int tier = 0;
+  if (v >= 1000000000.0) {
+    v /= 1000000000.0;
+    tier = 3;
+  } else if (v >= 1000000.0) {
+    v /= 1000000.0;
+    tier = 2;
+  } else if (v >= 1000.0) {
+    v /= 1000.0;
+    tier = 1;
+  }
+  wchar_t num[32]{};
+  if (tier != 0 && v < 10.0) {
+    swprintf_s(num, L"%.1f", v);
+  } else {
+    swprintf_s(num, L"%.0f", v);
+  }
+  std::wstring out = num;
+  if (style == ScaleStyle::kCompact) {
+    static const wchar_t* kSuf[] = {L"", L"K", L"M", L"G"};
+    out += kSuf[tier];
+  } else {
+    static const wchar_t* kSuf[] = {L" B", L" KB", L" MB", L" GB"};
+    out += kSuf[tier];
+    if (style == ScaleStyle::kBytesPerSec) {
+      out += L"/s";
+    }
+  }
+  return out;
+}
+
+std::wstring PercentText(int pct, bool plus) {
+  if (pct < 0) {
+    pct = 0;
+  }
+  if (pct > 100) {
+    pct = 100;
+  }
+  wchar_t buf[16]{};
+  swprintf_s(buf, plus ? L"+%d%%" : L"%d%%", pct);
+  return buf;
+}
+
+std::wstring RemainText(DWORD seconds) {
+  if (seconds == static_cast<DWORD>(-1)) {
+    return {};
+  }
+  const DWORD hours = seconds / 3600;
+  const DWORD mins = (seconds % 3600) / 60;
+  wchar_t buf[64]{};
+  if (hours > 0) {
+    swprintf_s(buf, L"남은 시간 %u시간 %u분", hours, mins);
+  } else {
+    swprintf_s(buf, L"남은 시간 %u분", mins);
+  }
+  return buf;
+}
+
+void SetGlyph(StatusItem* item, const wchar_t* glyph) {
+  item->icon.kind = IconKind::kGlyph;
+  item->icon.glyph = glyph;
+  if (item->icon.glyph.size() > kStatusGlyphMaxChars) {
+    item->icon.glyph.resize(kStatusGlyphMaxChars);
+  }
+  item->icon.cache_key = HashStatusIcon(item->icon);
+}
+
+StatusRow GaugeRow(std::wstring label, float value, std::wstring value_text, std::wstring detail = {}) {
+  StatusRow row;
+  row.type = RowType::kGauge;
+  row.label = Truncate(std::move(label), kStatusPanelTextMaxChars);
+  row.value = ClampUnit(value);
+  row.value_text = Truncate(std::move(value_text), kStatusPanelTextMaxChars);
+  row.detail = Truncate(std::move(detail), kStatusPanelTextMaxChars);
+  return row;
+}
+
+StatusRow KvRow(std::wstring label, std::wstring value) {
+  StatusRow row;
+  row.type = RowType::kKeyValue;
+  row.label = Truncate(std::move(label), kStatusPanelTextMaxChars);
+  row.value_text = Truncate(std::move(value), kStatusPanelTextMaxChars);
+  return row;
+}
+
+StatusRow TextNoteRow(std::wstring text) {
+  StatusRow row;
+  row.type = RowType::kText;
+  row.label = Truncate(std::move(text), kStatusPanelTextMaxChars);
+  row.muted = true;
+  return row;
+}
+
+StatusRow SepRow() {
+  StatusRow row;
+  row.type = RowType::kSeparator;
+  return row;
+}
+
+StatusRow ButtonRow(const char* row_id, std::wstring label) {
+  StatusRow row;
+  row.type = RowType::kButton;
+  row.row_id = row_id;
+  row.label = Truncate(std::move(label), kStatusPanelTextMaxChars);
+  return row;
+}
+
+std::wstring Fingerprint(const StatusItem& item) {
+  std::wstring fp = item.icon.glyph;
+  fp.push_back(L'\x1f');
+  fp += item.text;
+  fp.push_back(L'\x1f');
+  fp += std::to_wstring(static_cast<int>(item.state));
+  fp.push_back(L'\x1f');
+  fp += item.tooltip;
+  if (!item.panel) {
+    return fp;
+  }
+  fp.push_back(L'\x1f');
+  fp += item.panel->title;
+  fp += item.panel->subtitle;
+  fp += item.panel->updated_text;
+  for (const StatusRow& row : item.panel->rows) {
+    fp.push_back(L'\x1f');
+    fp += std::to_wstring(static_cast<int>(row.type));
+    fp.append(row.row_id.begin(), row.row_id.end());
+    fp += row.label;
+    fp += row.value_text;
+    fp += row.detail;
+    fp += row.note;
+  }
+  return fp;
+}
+
+bool ReadCpuTimes(uint64_t* idle, uint64_t* kernel, uint64_t* user) {
+  FILETIME fi{};
+  FILETIME fk{};
+  FILETIME fu{};
+  if (!GetSystemTimes(&fi, &fk, &fu)) {
+    return false;
+  }
+  *idle = FileTimeToU64(fi);
+  *kernel = FileTimeToU64(fk);
+  *user = FileTimeToU64(fu);
+  return true;
+}
+
+struct NetSnap {
+  uint64_t in = 0;
+  uint64_t out = 0;
+  std::wstring alias;
+  std::wstring kind;
+  double enum_ms = 0.0;
+  bool ok = false;
+};
+
+NetSnap ReadNet() {
+  NetSnap snap;
+  LARGE_INTEGER freq{};
+  LARGE_INTEGER t0{};
+  LARGE_INTEGER t1{};
+  QueryPerformanceFrequency(&freq);
+  QueryPerformanceCounter(&t0);
+  MIB_IF_TABLE2* table = nullptr;
+  const DWORD err = GetIfTable2(&table);
+  QueryPerformanceCounter(&t1);
+  if (freq.QuadPart != 0) {
+    snap.enum_ms =
+        static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+  }
+  if (err != NO_ERROR || table == nullptr) {
+    if (table != nullptr) {
+      FreeMibTable(table);
+    }
+    return snap;
+  }
+
+  uint64_t best = 0;
+  for (ULONG i = 0; i < table->NumEntries; ++i) {
+    const MIB_IF_ROW2& row = table->Table[i];
+    if (row.OperStatus != IfOperStatusUp) {
+      continue;
+    }
+    if (row.Type == IF_TYPE_SOFTWARE_LOOPBACK) {
+      continue;
+    }
+    if (row.InterfaceAndOperStatusFlags.FilterInterface) {
+      continue;
+    }
+    const uint64_t in = row.InOctets;
+    const uint64_t out = row.OutOctets;
+    snap.in += in;
+    snap.out += out;
+    const uint64_t total = in + out;
+    if (total >= best) {
+      best = total;
+      snap.alias = row.Alias;
+      if (row.Type == IF_TYPE_IEEE80211 || row.PhysicalMediumType == NdisPhysicalMediumNative802_11) {
+        snap.kind = L"Wi-Fi";
+      } else if (row.Type == IF_TYPE_ETHERNET_CSMACD) {
+        snap.kind = L"이더넷";
+      } else if (!snap.alias.empty()) {
+        snap.kind = snap.alias;
+      } else {
+        snap.kind = L"네트워크";
+      }
+    }
+  }
+  FreeMibTable(table);
+  snap.ok = true;
+  return snap;
+}
+
+void OpenWidgetBoard() {
+  INPUT in[4]{};
+  in[0].type = INPUT_KEYBOARD;
+  in[0].ki.wVk = VK_LWIN;
+  in[1].type = INPUT_KEYBOARD;
+  in[1].ki.wVk = 'W';
+  in[2].type = INPUT_KEYBOARD;
+  in[2].ki.wVk = 'W';
+  in[2].ki.dwFlags = KEYEVENTF_KEYUP;
+  in[3].type = INPUT_KEYBOARD;
+  in[3].ki.wVk = VK_LWIN;
+  in[3].ki.dwFlags = KEYEVENTF_KEYUP;
+  SendInput(4, in, sizeof(INPUT));
+}
+
+INT_PTR ShellOpen(const wchar_t* target) {
+  return reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", target, nullptr, nullptr, SW_SHOWNORMAL));
+}
+
+}  // namespace
+
+BuiltinWidgets::BuiltinWidgets() {
+  stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  wake_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  save_idle_event_ = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+}
+
+BuiltinWidgets::~BuiltinWidgets() {
+  Stop();
+  if (stop_event_ != nullptr) {
+    CloseHandle(stop_event_);
+    stop_event_ = nullptr;
+  }
+  if (wake_event_ != nullptr) {
+    CloseHandle(wake_event_);
+    wake_event_ = nullptr;
+  }
+  if (save_idle_event_ != nullptr) {
+    CloseHandle(save_idle_event_);
+    save_idle_event_ = nullptr;
+  }
+}
+
+const char* BuiltinWidgets::Name() const {
+  return "builtin";
+}
+
+bool BuiltinWidgets::Start(StatusSink* sink) {
+  Stop();
+  std::lock_guard lock(mu_);
+  sink_ = sink;
+  // 메시지 루프 전의 1KB 미만 읽기라 UI 응답성 문제가 없고, 백그라운드로 넘기면 위젯 생성 경합만 생긴다.
+  settings_ = LoadWidgetSettings();
+  reset_pending_ = true;
+  if (settings_.Any()) {
+    StartWorkerLocked();
+  }
+  return true;
+}
+
+void BuiltinWidgets::Stop() {
+  StopWorker();
+  {
+    std::lock_guard lock(mu_);
+    sink_ = nullptr;
+  }
+  if (save_idle_event_ != nullptr) {
+    const DWORD wait = WaitForSingleObject(save_idle_event_, 2000);
+    if (wait == WAIT_TIMEOUT) {
+      Log(L"widget", L"settings save still running at stop");
+    }
+  }
+}
+
+void BuiltinWidgets::StartWorkerLocked() {
+  if (worker_.joinable()) {
+    if (wake_event_ != nullptr) {
+      SetEvent(wake_event_);
+    }
+    return;
+  }
+  if (stop_event_ == nullptr || wake_event_ == nullptr) {
+    Log(L"widget", L"worker events missing");
+    return;
+  }
+  ResetEvent(stop_event_);
+  worker_ = std::thread([this] { WorkerLoop(); });
+}
+
+void BuiltinWidgets::StopWorker() {
+  if (stop_event_ != nullptr) {
+    SetEvent(stop_event_);
+  }
+  std::thread worker;
+  {
+    std::lock_guard lock(mu_);
+    if (worker_.joinable()) {
+      worker = std::move(worker_);
+    }
+  }
+  if (worker.joinable()) {
+    worker.join();
+  }
+}
+
+WidgetSettings BuiltinWidgets::settings() const {
+  std::lock_guard lock(mu_);
+  return settings_;
+}
+
+void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
+  bool stop_worker = false;
+  StatusSink* sink = nullptr;
+  const char* drop[4]{};
+  size_t drop_n = 0;
+  {
+    std::lock_guard lock(mu_);
+    const WidgetSettings prev = settings_;
+    settings_ = next;
+    sink = sink_;
+    auto note_drop = [&](bool was, bool now, const char* id, std::wstring* fp) {
+      if (was && !now) {
+        drop[drop_n++] = id;
+        fp->clear();
+      }
+    };
+    note_drop(prev.battery, next.battery, kBatteryId, &fp_battery_);
+    note_drop(prev.cpu, next.cpu, kCpuId, &fp_cpu_);
+    note_drop(prev.network, next.network, kNetId, &fp_net_);
+    note_drop(prev.widget_board, next.widget_board, kBoardId, &fp_board_);
+    const ULONGLONG now = GetTickCount64();
+    if (!prev.battery && next.battery) {
+      battery_due_ = now;
+      logged_no_battery_ = false;
+    }
+    if (!prev.cpu && next.cpu) {
+      cpu_has_baseline_ = false;
+      cpu_due_ = now;
+    }
+    if (!prev.network && next.network) {
+      net_has_baseline_ = false;
+      net_due_ = now;
+    }
+    if (next.Any()) {
+      StartWorkerLocked();
+    } else if (worker_.joinable()) {
+      stop_worker = true;
+    }
+  }
+  if (sink != nullptr) {
+    for (size_t i = 0; i < drop_n; ++i) {
+      sink->Remove(drop[i]);
+    }
+  }
+  if (stop_worker) {
+    StopWorker();
+  }
+  SubmitSave(next);
+}
+
+void BuiltinWidgets::NotePowerEvent(bool resumed) {
+  {
+    std::lock_guard lock(mu_);
+    if (resumed) {
+      reset_pending_ = true;
+    } else {
+      power_pending_ = true;
+    }
+  }
+  if (wake_event_ != nullptr) {
+    SetEvent(wake_event_);
+  }
+}
+
+void BuiltinWidgets::SetActive(bool active) {
+  {
+    std::lock_guard lock(mu_);
+    if (active_ == active) {
+      return;
+    }
+    active_ = active;
+    if (active) {
+      reset_pending_ = true;
+    }
+  }
+  Log(L"widget", L"active=%d", active ? 1 : 0);
+  if (wake_event_ != nullptr) {
+    SetEvent(wake_event_);
+  }
+}
+
+void BuiltinWidgets::OnEvent(const StatusEvent& ev) {
+  PendingAction action{};
+  bool have = false;
+  if (ev.event == "click" && ev.id == kBoardId && ev.button == "left") {
+    action = PendingAction::kWidgetBoard;
+    have = true;
+  } else if (ev.event == "invoke") {
+    if (ev.row_id == "power_settings") {
+      action = PendingAction::kPowerSettings;
+      have = true;
+    } else if (ev.row_id == "network_settings") {
+      action = PendingAction::kNetworkSettings;
+      have = true;
+    } else if (ev.row_id == "task_manager") {
+      action = PendingAction::kTaskManager;
+      have = true;
+    }
+  }
+  if (!have) {
+    return;
+  }
+  {
+    std::lock_guard lock(mu_);
+    actions_.push_back(action);
+  }
+  if (wake_event_ != nullptr) {
+    SetEvent(wake_event_);
+  }
+}
+
+void BuiltinWidgets::SubmitSave(const WidgetSettings& s) {
+  if (save_idle_event_ == nullptr) {
+    return;
+  }
+  auto* job = new SaveJob();
+  job->settings = s;
+  job->idle = save_idle_event_;
+  job->inflight = &save_inflight_;
+  if (InterlockedIncrement(&save_inflight_) == 1) {
+    ResetEvent(save_idle_event_);
+  }
+  if (!TrySubmitThreadpoolCallback(SaveSettingsCallback, job, nullptr)) {
+    if (InterlockedDecrement(&save_inflight_) == 0) {
+      SetEvent(save_idle_event_);
+    }
+    delete job;
+    Log(L"widget", L"settings save submit failed");
+  }
+}
+
+void BuiltinWidgets::ResetBaselines() {
+  uint64_t idle = 0;
+  uint64_t kernel = 0;
+  uint64_t user = 0;
+  const bool cpu_ok = ReadCpuTimes(&idle, &kernel, &user);
+  const NetSnap net = ReadNet();
+  const ULONGLONG now = GetTickCount64();
+  std::lock_guard lock(mu_);
+  cpu_has_baseline_ = cpu_ok;
+  if (cpu_ok) {
+    cpu_idle_ = idle;
+    cpu_kernel_ = kernel;
+    cpu_user_ = user;
+  }
+  net_has_baseline_ = net.ok;
+  if (net.ok) {
+    net_in_ = net.in;
+    net_out_ = net.out;
+    net_tick_ = now;
+  }
+  cpu_due_ = now + kFirstSampleMs;
+  net_due_ = now + kFirstSampleMs;
+  battery_due_ = now;
+  if (net.enum_ms > 1.0 && !logged_slow_if_) {
+    logged_slow_if_ = true;
+    Log(L"widget", L"GetIfTable2 took %.2f ms", net.enum_ms);
+  }
+}
+
+bool BuiltinWidgets::HasSampleDeadlineLocked() const {
+  return settings_.battery || settings_.cpu || settings_.network;
+}
+
+ULONGLONG BuiltinWidgets::NextDeadlineLocked(ULONGLONG now) const {
+  (void)now;
+  ULONGLONG due = MAXULONGLONG;
+  if (settings_.battery && battery_due_ < due) {
+    due = battery_due_;
+  }
+  if (settings_.cpu && cpu_due_ < due) {
+    due = cpu_due_;
+  }
+  if (settings_.network && net_due_ < due) {
+    due = net_due_;
+  }
+  return due;
+}
+
+void BuiltinWidgets::Publish(StatusItem item) {
+  item.source = "builtin";
+  const std::wstring fp = Fingerprint(item);
+  StatusSink* sink = nullptr;
+  {
+    std::lock_guard lock(mu_);
+    std::wstring* slot = nullptr;
+    if (item.id == kBatteryId) {
+      slot = &fp_battery_;
+    } else if (item.id == kCpuId) {
+      slot = &fp_cpu_;
+    } else if (item.id == kNetId) {
+      slot = &fp_net_;
+    } else if (item.id == kBoardId) {
+      slot = &fp_board_;
+    }
+    if (slot != nullptr && *slot == fp) {
+      return;
+    }
+    sink = sink_;
+    if (sink == nullptr) {
+      return;
+    }
+    if (slot != nullptr) {
+      *slot = fp;
+    }
+  }
+  if (const auto prev = sink->Get(item.id)) {
+    item.revision = prev->revision + 1;
+  } else {
+    item.revision = 1;
+  }
+  sink->Upsert(std::move(item));
+}
+
+void BuiltinWidgets::DropItem(const char* id) {
+  StatusSink* sink = nullptr;
+  {
+    std::lock_guard lock(mu_);
+    if (std::strcmp(id, kBatteryId) == 0) {
+      fp_battery_.clear();
+    } else if (std::strcmp(id, kCpuId) == 0) {
+      fp_cpu_.clear();
+    } else if (std::strcmp(id, kNetId) == 0) {
+      fp_net_.clear();
+    } else if (std::strcmp(id, kBoardId) == 0) {
+      fp_board_.clear();
+    }
+    sink = sink_;
+  }
+  if (sink != nullptr) {
+    sink->Remove(id);
+  }
+}
+
+void BuiltinWidgets::Execute(PendingAction action) {
+  INT_PTR rc = 33;
+  switch (action) {
+    case PendingAction::kPowerSettings:
+      rc = ShellOpen(L"ms-settings:powersleep");
+      break;
+    case PendingAction::kNetworkSettings:
+      rc = ShellOpen(L"ms-settings:network");
+      break;
+    case PendingAction::kTaskManager:
+      rc = ShellOpen(L"taskmgr.exe");
+      break;
+    case PendingAction::kWidgetBoard:
+      OpenWidgetBoard();
+      return;
+  }
+  if (rc <= 32) {
+    Log(L"widget", L"ShellExecute failed rc=%d", static_cast<int>(rc));
+  }
+}
+
+void BuiltinWidgets::PublishBoard() {
+  StatusItem item;
+  item.id = kBoardId;
+  item.priority = kBoardPriority;
+  SetGlyph(&item, kBoardGlyph);
+  item.tooltip = Truncate(L"위젯 보드 열기", kStatusPanelTextMaxChars);
+  Publish(std::move(item));
+}
+
+void BuiltinWidgets::SampleBattery() {
+  SYSTEM_POWER_STATUS status{};
+  const BOOL ok = GetSystemPowerStatus(&status);
+  const ULONGLONG now = GetTickCount64();
+  {
+    std::lock_guard lock(mu_);
+    battery_due_ = now + kBatteryPeriodMs;
+    if (!settings_.battery || !active_ || sink_ == nullptr) {
+      return;
+    }
+  }
+  if (!ok || (status.BatteryFlag & BATTERY_FLAG_NO_BATTERY) != 0 || status.BatteryLifePercent == 255) {
+    bool log_now = false;
+    {
+      std::lock_guard lock(mu_);
+      if (!logged_no_battery_) {
+        logged_no_battery_ = true;
+        log_now = true;
+      }
+    }
+    if (log_now) {
+      Log(L"widget", L"no battery; hiding %hs", kBatteryId);
+    }
+    DropItem(kBatteryId);
+    return;
+  }
+
+  const int pct = static_cast<int>(status.BatteryLifePercent);
+  const bool charging = (status.BatteryFlag & BATTERY_FLAG_CHARGING) != 0 ||
+                        (status.ACLineStatus == 1 && pct < 100);
+  size_t glyph_i = static_cast<size_t>(pct / 20);
+  if (glyph_i > 4) {
+    glyph_i = 4;
+  }
+  wchar_t glyph[2] = {kBatteryGlyphs[glyph_i], 0};
+
+  StatusItem item;
+  item.id = kBatteryId;
+  item.priority = kBatteryPriority;
+  SetGlyph(&item, glyph);
+  item.text = Truncate(PercentText(pct, charging), kStatusTextMaxChars);
+  std::wstring tip = L"배터리 ";
+  tip += PercentText(pct, false);
+  if (charging) {
+    tip += L" · 충전 중";
+  } else {
+    const std::wstring remain = RemainText(status.BatteryLifeTime);
+    if (!remain.empty()) {
+      tip += L" · ";
+      tip += remain;
+    }
+  }
+  item.tooltip = Truncate(std::move(tip), kStatusPanelTextMaxChars);
+  if (!charging && pct <= 10) {
+    item.state = StatusState::kError;
+  } else if (!charging && pct <= 20) {
+    item.state = StatusState::kWarn;
+  } else {
+    item.state = StatusState::kNormal;
+  }
+
+  StatusPanel panel;
+  panel.title = L"배터리";
+  std::wstring ac = L"알 수 없음";
+  if (status.ACLineStatus == 0) {
+    ac = L"배터리 사용 중";
+  } else if (status.ACLineStatus == 1) {
+    ac = L"연결됨";
+  }
+  panel.rows.push_back(GaugeRow(L"잔량", static_cast<float>(pct) / 100.0f, PercentText(pct, false),
+                                charging ? std::wstring{} : RemainText(status.BatteryLifeTime)));
+  panel.rows.push_back(KvRow(L"전원", std::move(ac)));
+  panel.rows.push_back(KvRow(L"절전 모드", (status.SystemStatusFlag & 1) != 0 ? L"켜짐" : L"꺼짐"));
+  panel.rows.push_back(SepRow());
+  panel.rows.push_back(ButtonRow("power_settings", L"전원 설정 열기"));
+  item.panel = std::move(panel);
+  Publish(std::move(item));
+}
+
+void BuiltinWidgets::SampleCpu() {
+  uint64_t idle = 0;
+  uint64_t kernel = 0;
+  uint64_t user = 0;
+  if (!ReadCpuTimes(&idle, &kernel, &user)) {
+    std::lock_guard lock(mu_);
+    cpu_due_ = GetTickCount64() + kCpuPeriodMs;
+    return;
+  }
+
+  double usage = 0.0;
+  double user_share = 0.0;
+  double kernel_share = 0.0;
+  bool publish = false;
+  {
+    std::lock_guard lock(mu_);
+    const ULONGLONG now = GetTickCount64();
+    if (!cpu_has_baseline_) {
+      cpu_idle_ = idle;
+      cpu_kernel_ = kernel;
+      cpu_user_ = user;
+      cpu_has_baseline_ = true;
+      cpu_due_ = now + kFirstSampleMs;
+      return;
+    }
+    const uint64_t idle_d = idle - cpu_idle_;
+    const uint64_t kernel_d = kernel - cpu_kernel_;
+    const uint64_t user_d = user - cpu_user_;
+    cpu_idle_ = idle;
+    cpu_kernel_ = kernel;
+    cpu_user_ = user;
+    cpu_due_ = now + kCpuPeriodMs;
+    if (!settings_.cpu || !active_ || sink_ == nullptr) {
+      return;
+    }
+    const uint64_t total = kernel_d + user_d;
+    if (total > 0) {
+      usage = 1.0 - static_cast<double>(idle_d) / static_cast<double>(total);
+      user_share = static_cast<double>(user_d) / static_cast<double>(total);
+      const uint64_t kernel_only = kernel_d > idle_d ? kernel_d - idle_d : 0;
+      kernel_share = static_cast<double>(kernel_only) / static_cast<double>(total);
+    }
+    if (usage < 0.0) {
+      usage = 0.0;
+    }
+    if (usage > 1.0) {
+      usage = 1.0;
+    }
+    publish = true;
+  }
+  if (!publish) {
+    return;
+  }
+
+  const int pct = static_cast<int>(usage * 100.0);
+  const int user_pct = static_cast<int>(user_share * 100.0);
+  const int kernel_pct = static_cast<int>(kernel_share * 100.0);
+
+  SYSTEM_INFO info{};
+  GetSystemInfo(&info);
+  wchar_t nproc[16]{};
+  swprintf_s(nproc, L"%u", info.dwNumberOfProcessors);
+
+  StatusItem item;
+  item.id = kCpuId;
+  item.priority = kCpuPriority;
+  SetGlyph(&item, kCpuGlyph);
+  item.text = Truncate(PercentText(pct, false), kStatusTextMaxChars);
+  wchar_t tip[128]{};
+  swprintf_s(tip, L"CPU %d%% · 사용자 %d%% · 커널 %d%%", pct, user_pct, kernel_pct);
+  item.tooltip = Truncate(tip, kStatusPanelTextMaxChars);
+  item.state = StatusState::kNormal;
+
+  StatusPanel panel;
+  panel.title = L"CPU";
+  panel.rows.push_back(GaugeRow(L"전체 사용률", static_cast<float>(pct) / 100.0f, PercentText(pct, false)));
+  panel.rows.push_back(KvRow(L"사용자", PercentText(user_pct, false)));
+  panel.rows.push_back(KvRow(L"커널", PercentText(kernel_pct, false)));
+  panel.rows.push_back(KvRow(L"논리 프로세서", nproc));
+  panel.rows.push_back(SepRow());
+  panel.rows.push_back(ButtonRow("task_manager", L"작업 관리자 열기"));
+  item.panel = std::move(panel);
+  Publish(std::move(item));
+}
+
+void BuiltinWidgets::SampleNet() {
+  const NetSnap snap = ReadNet();
+  const ULONGLONG now = GetTickCount64();
+  if (snap.enum_ms > 1.0) {
+    std::lock_guard lock(mu_);
+    if (!logged_slow_if_) {
+      logged_slow_if_ = true;
+      Log(L"widget", L"GetIfTable2 took %.2f ms", snap.enum_ms);
+    }
+  }
+  if (!snap.ok) {
+    std::lock_guard lock(mu_);
+    net_due_ = now + kNetPeriodMs;
+    return;
+  }
+
+  double in_bps = 0.0;
+  double out_bps = 0.0;
+  uint64_t session_in = 0;
+  uint64_t session_out = 0;
+  std::wstring alias;
+  std::wstring kind;
+  bool publish = false;
+  {
+    std::lock_guard lock(mu_);
+    if (!net_has_baseline_) {
+      net_in_ = snap.in;
+      net_out_ = snap.out;
+      net_tick_ = now;
+      net_has_baseline_ = true;
+      net_due_ = now + kFirstSampleMs;
+      return;
+    }
+    uint64_t in_d = 0;
+    uint64_t out_d = 0;
+    if (snap.in < net_in_ || snap.out < net_out_) {
+      in_d = 0;
+      out_d = 0;
+    } else {
+      in_d = snap.in - net_in_;
+      out_d = snap.out - net_out_;
+    }
+    const ULONGLONG elapsed = now > net_tick_ ? now - net_tick_ : 0;
+    net_in_ = snap.in;
+    net_out_ = snap.out;
+    net_tick_ = now;
+    session_in_ += in_d;
+    session_out_ += out_d;
+    net_due_ = now + kNetPeriodMs;
+    if (!settings_.network || !active_ || sink_ == nullptr) {
+      return;
+    }
+    if (elapsed > 0) {
+      const double seconds = static_cast<double>(elapsed) / 1000.0;
+      in_bps = static_cast<double>(in_d) / seconds;
+      out_bps = static_cast<double>(out_d) / seconds;
+    }
+    session_in = session_in_;
+    session_out = session_out_;
+    alias = snap.alias;
+    kind = snap.kind;
+    publish = true;
+  }
+  if (!publish) {
+    return;
+  }
+
+  const std::wstring in_c = FormatScaled(in_bps, ScaleStyle::kCompact);
+  const std::wstring out_c = FormatScaled(out_bps, ScaleStyle::kCompact);
+  std::wstring text = in_c;
+  text += L'/';
+  text += out_c;
+
+  std::wstring tip = L"받기 ";
+  tip += FormatScaled(in_bps, ScaleStyle::kBytesPerSec);
+  tip += L" · 보내기 ";
+  tip += FormatScaled(out_bps, ScaleStyle::kBytesPerSec);
+  if (!kind.empty()) {
+    tip += L" · ";
+    tip += kind;
+  }
+
+  std::wstring since = L"bamti 시작 이후 받기 ";
+  since += FormatScaled(static_cast<double>(session_in), ScaleStyle::kCompact);
+  since += L" · 보내기 ";
+  since += FormatScaled(static_cast<double>(session_out), ScaleStyle::kCompact);
+
+  StatusItem item;
+  item.id = kNetId;
+  item.priority = kNetPriority;
+  SetGlyph(&item, kNetGlyph);
+  item.text = Truncate(std::move(text), kStatusTextMaxChars);
+  item.tooltip = Truncate(std::move(tip), kStatusPanelTextMaxChars);
+  item.state = StatusState::kNormal;
+
+  StatusPanel panel;
+  panel.title = L"네트워크";
+  panel.rows.push_back(KvRow(L"받기", FormatScaled(in_bps, ScaleStyle::kBytesPerSec)));
+  panel.rows.push_back(KvRow(L"보내기", FormatScaled(out_bps, ScaleStyle::kBytesPerSec)));
+  panel.rows.push_back(KvRow(L"인터페이스", alias.empty() ? kind : alias));
+  panel.rows.push_back(TextNoteRow(std::move(since)));
+  panel.rows.push_back(SepRow());
+  panel.rows.push_back(ButtonRow("network_settings", L"네트워크 설정 열기"));
+  item.panel = std::move(panel);
+  Publish(std::move(item));
+}
+
+void BuiltinWidgets::SampleDue(ULONGLONG now) {
+  bool bat = false;
+  bool cpu = false;
+  bool net = false;
+  {
+    std::lock_guard lock(mu_);
+    if (!active_) {
+      return;
+    }
+    bat = settings_.battery && battery_due_ <= now;
+    cpu = settings_.cpu && cpu_due_ <= now;
+    net = settings_.network && net_due_ <= now;
+  }
+  if (bat) {
+    SampleBattery();
+  }
+  if (cpu) {
+    SampleCpu();
+  }
+  if (net) {
+    SampleNet();
+  }
+}
+
+void BuiltinWidgets::WorkerLoop() {
+  const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  Log(L"widget", L"worker start");
+  HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+
+  for (;;) {
+    if (stop_event_ != nullptr && WaitForSingleObject(stop_event_, 0) == WAIT_OBJECT_0) {
+      break;
+    }
+
+    std::vector<PendingAction> acts;
+    bool do_reset = false;
+    bool do_power = false;
+    WidgetSettings s{};
+    bool active = false;
+    {
+      std::lock_guard lock(mu_);
+      acts.swap(actions_);
+      do_reset = reset_pending_;
+      reset_pending_ = false;
+      do_power = power_pending_;
+      power_pending_ = false;
+      s = settings_;
+      active = active_;
+    }
+
+    for (const PendingAction action : acts) {
+      Execute(action);
+    }
+    if (do_reset) {
+      ResetBaselines();
+    }
+    if (s.widget_board) {
+      PublishBoard();
+    }
+    if (active) {
+      if (do_power || do_reset) {
+        if (s.battery) {
+          SampleBattery();
+        }
+      }
+      SampleDue(GetTickCount64());
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    bool has_due = false;
+    ULONGLONG due = 0;
+    uint32_t flush_ms = 0xFFFFFFFFu;
+    StatusSink* sink = nullptr;
+    {
+      std::lock_guard lock(mu_);
+      sink = sink_;
+      if (active_ && HasSampleDeadlineLocked()) {
+        has_due = true;
+        due = NextDeadlineLocked(now);
+      }
+      if (sink_ != nullptr) {
+        flush_ms = sink_->NotifyWaitTimeoutMs();
+      }
+    }
+
+    HANDLE waits[3]{};
+    DWORD n = 0;
+    waits[n++] = stop_event_;
+    waits[n++] = wake_event_;
+    if (has_due && timer != nullptr) {
+      const ULONGLONG delay = due > now ? due - now : 0;
+      LARGE_INTEGER rel{};
+      rel.QuadPart = delay == 0 ? -1LL : -static_cast<LONGLONG>(delay * 10000ull);
+      if (SetWaitableTimerEx(timer, &rel, 0, nullptr, nullptr, nullptr, 200)) {
+        waits[n++] = timer;
+      }
+    }
+
+    const DWORD wait = WaitForMultipleObjects(n, waits, FALSE, flush_ms);
+    if (wait == WAIT_OBJECT_0) {
+      break;
+    }
+    if (wait == WAIT_TIMEOUT) {
+      if (sink != nullptr) {
+        sink->Flush();
+      }
+      continue;
+    }
+    if (wait == WAIT_FAILED) {
+      Log(L"widget", L"wait failed err=%lu", GetLastError());
+      Sleep(50);
+    }
+  }
+
+  if (timer != nullptr) {
+    CloseHandle(timer);
+  }
+  if (SUCCEEDED(co)) {
+    CoUninitialize();
+  }
+  Log(L"widget", L"worker stop");
+}
+
+}  // namespace bamti

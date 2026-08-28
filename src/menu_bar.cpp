@@ -191,6 +191,7 @@ bool MenuBar::Create(HINSTANCE instance) {
   CreateTooltip();
   status_.SetNotify(hwnd_);
   status_.Register(&pipe_);
+  status_.Register(&widgets_);
   if (!status_.StartAll()) {
     return false;
   }
@@ -460,6 +461,13 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           break;
       }
       return 0;
+    case WM_POWERBROADCAST:
+      if (wparam == PBT_APMPOWERSTATUSCHANGE) {
+        widgets_.NotePowerEvent(false);
+      } else if (wparam == PBT_APMRESUMEAUTOMATIC || wparam == PBT_APMRESUMESUSPEND) {
+        widgets_.NotePowerEvent(true);
+      }
+      return TRUE;
     case WM_QUERYENDSESSION:
       return TRUE;
     case WM_ENDSESSION:
