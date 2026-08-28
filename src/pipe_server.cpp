@@ -487,7 +487,23 @@ struct PipeServer::Client {
   std::mutex write_mu;
   std::atomic<ULONGLONG> last_tick{0};
   std::atomic<bool> alive{true};
+  bool logged_reserved = false;
 };
+
+namespace {
+
+bool RejectReservedId(bool* logged_once, const std::string& id) {
+  if (!id.starts_with("bamti.")) {
+    return false;
+  }
+  if (logged_once != nullptr && !*logged_once) {
+    *logged_once = true;
+    Log(L"pipe", L"reserved id prefix rejected");
+  }
+  return true;
+}
+
+}  // namespace
 
 PipeServer::PipeServer() = default;
 
@@ -892,11 +908,17 @@ void PipeServer::HandleV1(Client* client, std::string_view line) {
     if (!id || !ValidId(*id)) {
       return;
     }
+    if (RejectReservedId(&client->logged_reserved, *id)) {
+      return;
+    }
     PublishRemove(*id, client->id);
   } else if (*op == "upsert") {
     const auto id = json::GetString(line, "id");
     const auto text = json::GetString(line, "text");
     if (!id || !text || !ValidId(*id)) {
+      return;
+    }
+    if (RejectReservedId(&client->logged_reserved, *id)) {
       return;
     }
     StatusItem item;
@@ -951,10 +973,16 @@ void PipeServer::HandleV2(Client* client, std::string_view line) {
     if (!id || !ValidId(*id)) {
       return;
     }
+    if (RejectReservedId(&client->logged_reserved, *id)) {
+      return;
+    }
     PublishRemove(*id, client->id);
   } else if (*op == "upsert") {
     const auto id = json::GetString(line, "id");
     if (!id || !ValidId(*id)) {
+      return;
+    }
+    if (RejectReservedId(&client->logged_reserved, *id)) {
       return;
     }
     StatusItem item;
@@ -979,6 +1007,9 @@ void PipeServer::HandleV2(Client* client, std::string_view line) {
   } else if (*op == "patch") {
     const auto id = json::GetString(line, "id");
     if (!id || !ValidId(*id) || sink_ == nullptr) {
+      return;
+    }
+    if (RejectReservedId(&client->logged_reserved, *id)) {
       return;
     }
     {
