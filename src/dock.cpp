@@ -1707,8 +1707,7 @@ void Dock::RenderLayered() {
           rr, rr};
       rt->FillRoundedRectangle(bg, hover_fill.Get());
     }
-    const bool is_dragged = dragging_ && static_cast<int>(i) == drag_index_;
-    draw_icon(i, x, y, is_dragged ? 0.25f : 1.0f);
+    draw_icon(i, x, y, 1.0f);
     if (items_[i].running && indicator) {
       const float dot_w = static_cast<float>(Dip(10));
       const float dot_h = static_cast<float>(Dip(3));
@@ -1717,19 +1716,6 @@ void Dock::RenderLayered() {
       const D2D1_ROUNDED_RECT dot{D2D1::RectF(dx, dy, dx + dot_w, dy + dot_h), dot_h * 0.5f, dot_h * 0.5f};
       rt->FillRoundedRectangle(dot, indicator.Get());
     }
-  }
-
-  if (dragging_ && drag_index_ >= 0 && drag_index_ < static_cast<int>(items_.size())) {
-    const float half = static_cast<float>(icon_px) * 0.5f;
-    float gx = static_cast<float>(drag_cursor_.x) - half;
-    const float max_x = static_cast<float>((std::max)(0, width - icon_px));
-    if (gx < 0.0f) {
-      gx = 0.0f;
-    } else if (gx > max_x) {
-      gx = max_x;
-    }
-    const float gy = static_cast<float>((height - icon_px) / 2 - Dip(4) - Dip(3));
-    draw_icon(static_cast<size_t>(drag_index_), gx, gy, 0.7f);
   }
 
   if (stroke && pinned > 0 && pinned < static_cast<int>(slots_.size())) {
@@ -2102,12 +2088,7 @@ void Dock::BeginDragIfNeeded(POINT client) {
   dragging_ = true;
   drag_index_ = pressed_;
   drop_index_ = pressed_;
-  drag_cursor_ = client;
   hover_ = -1;
-  last_drag_render_ = 0;
-  drag_render_n_ = 0;
-  drag_render_total_us_ = 0;
-  drag_render_max_us_ = 0;
   if (tooltip_ != nullptr) {
     SendMessageW(tooltip_, TTM_POP, 0, 0);
   }
@@ -2125,43 +2106,18 @@ void Dock::UpdateDrag(POINT client) {
   if (!dragging_) {
     return;
   }
-  drag_cursor_ = client;
   const int next = DropIndexAt(client);
-  const bool slot_changed = next >= 0 && next != drop_index_;
-  if (slot_changed) {
-    drop_index_ = next;
-  }
-  const ULONGLONG now = GetTickCount64();
-  if (!slot_changed && last_drag_render_ != 0 && now - last_drag_render_ < 16) {
+  if (next < 0 || next == drop_index_) {
     return;
   }
-  LARGE_INTEGER freq{};
-  LARGE_INTEGER t0{};
-  LARGE_INTEGER t1{};
-  QueryPerformanceFrequency(&freq);
-  QueryPerformanceCounter(&t0);
+  drop_index_ = next;
   RenderLayered();
-  QueryPerformanceCounter(&t1);
-  last_drag_render_ = GetTickCount64();
-  const ULONGLONG us =
-      freq.QuadPart == 0 ? 0 : static_cast<ULONGLONG>(((t1.QuadPart - t0.QuadPart) * 1000000) / freq.QuadPart);
-  ++drag_render_n_;
-  drag_render_total_us_ += us;
-  if (us > drag_render_max_us_) {
-    drag_render_max_us_ = static_cast<UINT>(us);
-  }
 }
 
 void Dock::EndDrag(bool commit) {
   const bool was_dragging = dragging_;
   const int from = drag_index_;
   const int to = drop_index_;
-  if (was_dragging) {
-    const double avg_ms =
-        drag_render_n_ == 0 ? 0.0 : static_cast<double>(drag_render_total_us_) / static_cast<double>(drag_render_n_) / 1000.0;
-    const unsigned max_ms = (drag_render_max_us_ + 500) / 1000;
-    Log(L"perf", L"drag render n=%u avg=%.1fms max=%ums", drag_render_n_, avg_ms, max_ms);
-  }
   dragging_ = false;
   drag_index_ = -1;
   drop_index_ = -1;

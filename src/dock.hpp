@@ -98,11 +98,6 @@ class Dock {
   DockApp pending_menu_app_{};
   std::vector<HWND> pending_menu_windows_;
   POINT drag_origin_{};
-  POINT drag_cursor_{};
-  ULONGLONG last_drag_render_ = 0;
-  ULONGLONG drag_render_total_us_ = 0;
-  UINT drag_render_n_ = 0;
-  UINT drag_render_max_us_ = 0;
   std::vector<DockApp> items_;
   std::vector<std::wstring> pins_;
   std::vector<RECT> slots_;
