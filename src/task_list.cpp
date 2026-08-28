@@ -611,7 +611,67 @@ void LogPinCmpFalse(const wchar_t* branch, const std::wstring& a, const std::wst
       db.c_str(), b.size(), dca.c_str(), ca.size(), dcb.c_str(), cb.size());
 }
 
+std::wstring AppsFolderLaunchLine(const std::wstring& aumid) {
+  if (aumid.empty() || aumid.find(L'"') != std::wstring::npos) {
+    return {};
+  }
+  return L"explorer.exe shell:AppsFolder\\" + aumid;
+}
+
+std::wstring QuotedExeCommand(const std::wstring& path) {
+  if (path.empty() || path.find(L'"') != std::wstring::npos) {
+    return {};
+  }
+  return L"\"" + path + L"\"";
+}
+
+template <typename TryAumid, typename TryRelaunch, typename TryExe>
+bool TryDockLaunch(const DockApp& app, TryAumid&& try_aumid, TryRelaunch&& try_relaunch, TryExe&& try_exe) {
+  if (LooksLikeHostedWebApp(app.aumid)) {
+    if (!app.aumid.empty() && try_aumid(app.aumid)) {
+      return true;
+    }
+    return try_relaunch(app.relaunch_command);
+  }
+  if (!app.aumid.empty() && (app.exe_path.empty() || IsHostExe(app.exe_path)) && try_aumid(app.aumid)) {
+    return true;
+  }
+  if (try_relaunch(app.relaunch_command)) {
+    return true;
+  }
+  if (!app.exe_path.empty() && !IsHostExe(app.exe_path) && try_exe(app.exe_path)) {
+    return true;
+  }
+  if (!app.aumid.empty()) {
+    return try_aumid(app.aumid);
+  }
+  return false;
+}
+
+std::wstring BuildDockLaunchCommandLine(const DockApp& app) {
+  std::wstring line;
+  TryDockLaunch(
+      app,
+      [&](const std::wstring& aumid) {
+        line = AppsFolderLaunchLine(aumid);
+        return !line.empty();
+      },
+      [&](const std::wstring& command) {
+        line = command;
+        return !command.empty();
+      },
+      [&](const std::wstring& path) {
+        line = QuotedExeCommand(path);
+        return !line.empty();
+      });
+  return line;
+}
+
 }  // namespace
+
+std::wstring DockLaunchCommandLine(const DockApp& app) {
+  return BuildDockLaunchCommandLine(app);
+}
 
 uint64_t TaskWindowFingerprint() {
   struct Acc {
@@ -1108,26 +1168,7 @@ bool LaunchExe(const std::wstring& path) {
 }
 
 bool LaunchDockApp(const DockApp& app) {
-  const bool hosted_web = LooksLikeHostedWebApp(app.aumid);
-  if (hosted_web) {
-    if (!app.aumid.empty() && LaunchAumid(app.aumid)) {
-      return true;
-    }
-    return LaunchCommandLine(app.relaunch_command);
-  }
-  if (!app.aumid.empty() && (app.exe_path.empty() || IsHostExe(app.exe_path)) && LaunchAumid(app.aumid)) {
-    return true;
-  }
-  if (LaunchCommandLine(app.relaunch_command)) {
-    return true;
-  }
-  if (!app.exe_path.empty() && !IsHostExe(app.exe_path)) {
-    return LaunchExe(app.exe_path);
-  }
-  if (!app.aumid.empty()) {
-    return LaunchAumid(app.aumid);
-  }
-  return false;
+  return TryDockLaunch(app, LaunchAumid, LaunchCommandLine, LaunchExe);
 }
 
 void RestoreHwnds(const std::vector<HWND>& windows) {

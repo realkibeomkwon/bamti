@@ -734,16 +734,7 @@ std::wstring LoginRunValueName(const DockApp& app) {
 }
 
 std::wstring LoginRunCommand(const DockApp& app) {
-  if (!app.exe_path.empty()) {
-    if (app.exe_path.find(L'"') != std::wstring::npos) {
-      return {};
-    }
-    return L"\"" + app.exe_path + L"\"";
-  }
-  if (!app.aumid.empty() && app.aumid.find(L'"') == std::wstring::npos) {
-    return L"explorer.exe shell:AppsFolder\\" + app.aumid;
-  }
-  return {};
+  return DockLaunchCommandLine(app);
 }
 
 bool LoginValueExists(const std::wstring& name) {
