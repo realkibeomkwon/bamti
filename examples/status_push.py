@@ -30,6 +30,50 @@ def send(pipe, payload: dict) -> None:
     pipe.flush()
 
 
+def usage_example_v2(item_id: str) -> dict:
+    return {
+        "v": 2,
+        "op": "upsert",
+        "id": item_id,
+        "segment": {
+            "icon": {"kind": "glyph", "glyph": "◐"},
+            "text": "10%",
+            "tooltip": "Codex · Session 6% · Weekly 10%",
+            "state": "normal",
+            "accent": "#FF7A45",
+            "priority": 10,
+        },
+        "panel": {
+            "title": "Codex",
+            "subtitle": "Prolite",
+            "updated": "Updated just now",
+            "rows": [
+                {
+                    "type": "gauge",
+                    "label": "Session (5h) — Codex",
+                    "value": 0.06,
+                    "value_text": "6%",
+                    "detail": "Resets later",
+                },
+                {
+                    "type": "gauge",
+                    "label": "Weekly — Codex",
+                    "value": 0.10,
+                    "value_text": "10%",
+                    "detail": "Resets in 6d",
+                    "note": "Ahead of pace",
+                },
+                {"type": "separator"},
+                {"type": "kv", "label": "Plan", "value": "Pro"},
+                {"type": "text", "text": "Values are illustrative.", "style": "note"},
+                {"type": "toggle", "row_id": "auto_refresh", "label": "Auto refresh", "on": True},
+                {"type": "button", "row_id": "settings", "label": "Settings..."},
+                {"type": "button", "row_id": "quit", "label": "Quit", "style": "danger"},
+            ],
+        },
+    }
+
+
 def usage_example(item_id: str) -> dict:
     return {
         "v": 1,
@@ -70,17 +114,22 @@ def main() -> int:
     parser.add_argument("--remove", action="store_true")
     parser.add_argument("--once", action="store_true", help="upsert once and exit")
     parser.add_argument("--interval", type=float, default=10.0, help="ping interval seconds")
+    parser.add_argument("--v2", action="store_true", help="send protocol v2 example")
     args = parser.parse_args()
+    ver = 2 if args.v2 else 1
 
     pipe = connect()
     try:
         if args.remove:
-            send(pipe, {"v": 1, "op": "remove", "id": args.id})
+            send(pipe, {"v": ver, "op": "remove", "id": args.id})
             return 0
 
-        item = usage_example(args.id)
+        item = usage_example_v2(args.id) if args.v2 else usage_example(args.id)
         if args.text:
-            item["text"] = args.text
+            if args.v2:
+                item.setdefault("segment", {})["text"] = args.text
+            else:
+                item["text"] = args.text
         send(pipe, item)
         if args.once:
             return 0
@@ -93,7 +142,7 @@ def main() -> int:
             while not stop.wait(args.interval):
                 with write_lock:
                     try:
-                        send(pipe, {"v": 1, "op": "ping"})
+                        send(pipe, {"v": ver, "op": "ping"})
                     except OSError:
                         stop.set()
                         return
@@ -123,7 +172,7 @@ def main() -> int:
             stop.set()
             with write_lock:
                 try:
-                    send(pipe, {"v": 1, "op": "remove", "id": args.id})
+                    send(pipe, {"v": ver, "op": "remove", "id": args.id})
                 except OSError:
                     pass
         return 0
