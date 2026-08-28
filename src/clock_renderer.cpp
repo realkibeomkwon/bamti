@@ -27,6 +27,17 @@ D2D1_COLOR_F StatusItemColor(bool dark, uint32_t accent) {
   return ClockTextColor(dark);
 }
 
+double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
+  static LARGE_INTEGER freq{};
+  if (freq.QuadPart == 0) {
+    QueryPerformanceFrequency(&freq);
+  }
+  if (freq.QuadPart == 0) {
+    return 0.0;
+  }
+  return (end.QuadPart - start.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+}
+
 void FillWindowsLogo(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, float left_dip, float top_dip, float size_dip,
                      UINT dpi) {
   const float scale = static_cast<float>(dpi) / 96.0f;
@@ -109,7 +120,7 @@ std::wstring ClockRenderer::CurrentTimeText() const {
 }
 
 bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool dark, const BarLayoutResult& layout,
-                         BarLayout* text, bool start_hot, bool start_pressed) {
+                         BarLayout* text, bool start_hot, bool start_pressed, DrawTimings* timings) {
   if (!d2d_ || !hdc || text == nullptr) {
     return false;
   }
@@ -125,7 +136,14 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
     }
   }
 
+  LARGE_INTEGER t0{};
+  LARGE_INTEGER t1{};
+  QueryPerformanceCounter(&t0);
   HRESULT hr = rt_->BindDC(hdc, &dirty);
+  QueryPerformanceCounter(&t1);
+  if (timings != nullptr) {
+    timings->bind_ms = QpcMs(t0, t1);
+  }
   if (FAILED(hr)) {
     rt_.Reset();
     return false;
@@ -136,16 +154,27 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
       static_cast<float>(client.bottom - client.top) * 96.0f / static_cast<float>(dpi_);
 
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+  QueryPerformanceCounter(&t0);
   hr = rt_->CreateSolidColorBrush(ClockTextColor(dark), brush.ReleaseAndGetAddressOf());
+  QueryPerformanceCounter(&t1);
+  if (timings != nullptr) {
+    timings->brush_ms = QpcMs(t0, t1);
+  }
   if (FAILED(hr)) {
     return false;
   }
 
+  QueryPerformanceCounter(&t0);
   rt_->BeginDraw();
   rt_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
   rt_->SetTransform(D2D1::Matrix3x2F::Translation(-static_cast<float>(dirty.left - client.left) / px,
                                                   -static_cast<float>(dirty.top - client.top) / px));
+  QueryPerformanceCounter(&t1);
+  if (timings != nullptr) {
+    timings->begin_ms = QpcMs(t0, t1);
+  }
 
+  QueryPerformanceCounter(&t0);
   for (const BarSegment& seg : layout.segments) {
     RECT overlap{};
     if (IntersectRect(&overlap, &seg.rect, &dirty) == FALSE) {
@@ -181,8 +210,17 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
     }
     rt_->DrawTextLayout(D2D1::Point2F(x, y), layout_text, brush.Get(), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
   }
+  QueryPerformanceCounter(&t1);
+  if (timings != nullptr) {
+    timings->draw_ms = QpcMs(t0, t1);
+  }
 
+  QueryPerformanceCounter(&t0);
   hr = rt_->EndDraw();
+  QueryPerformanceCounter(&t1);
+  if (timings != nullptr) {
+    timings->end_ms = QpcMs(t0, t1);
+  }
   if (hr == D2DERR_RECREATE_TARGET) {
     rt_.Reset();
     return false;

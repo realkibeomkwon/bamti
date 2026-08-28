@@ -46,7 +46,8 @@ class MenuBar {
   void Paint();
   void RefreshLayout();
   void ArmRepaint();
-  void NotePerf(double compute_ms, double draw_ms, const RECT& dirty, const RECT& client);
+  void NotePerf(double compute_ms, double draw_ms, const RECT& dirty, const RECT& client, const DrawTimings& draw,
+                double bpbegin_ms, double bpend_ms);
   void ShowContextMenu(POINT screen);
   void RefreshFullscreenState();
   void SetFullscreenOccluded(bool occluded);
@@ -101,6 +102,13 @@ class MenuBar {
   PerfAcc perf_full_;
   PerfAcc perf_seg_;
   PerfAcc perf_compute_;
+  PerfAcc perf_bind_;
+  PerfAcc perf_brush_;
+  PerfAcc perf_begin_;
+  PerfAcc perf_draw_;
+  PerfAcc perf_end_;
+  PerfAcc perf_bpbegin_;
+  PerfAcc perf_bpend_;
   BarLayout layout_;
   ClockRenderer clock_;
   PipeServer status_;

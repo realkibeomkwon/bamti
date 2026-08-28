@@ -915,13 +915,21 @@ void MenuBar::RefreshLayout() {
   }
 }
 
-void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, const RECT& client) {
+void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, const RECT& client, const DrawTimings& draw,
+                      double bpbegin_ms, double bpend_ms) {
   perf_compute_.Add(compute_ms);
   if (EqualRect(&dirty, &client) != FALSE) {
     perf_full_.Add(draw_ms);
   } else {
     perf_seg_.Add(draw_ms);
   }
+  perf_bind_.Add(draw.bind_ms);
+  perf_brush_.Add(draw.brush_ms);
+  perf_begin_.Add(draw.begin_ms);
+  perf_draw_.Add(draw.draw_ms);
+  perf_end_.Add(draw.end_ms);
+  perf_bpbegin_.Add(bpbegin_ms);
+  perf_bpend_.Add(bpend_ms);
   ++perf_frames_;
   if (perf_frames_ % 100 != 0) {
     return;
@@ -936,6 +944,7 @@ void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, con
                  acc.maxv);
     }
   };
+  auto avg = [](const PerfAcc& acc) { return acc.n == 0 ? 0.0 : acc.sum / static_cast<double>(acc.n); };
   wchar_t full_s[64]{};
   wchar_t seg_s[64]{};
   wchar_t compute_s[64]{};
@@ -945,9 +954,19 @@ void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, con
   Log(L"perf", L"bar %s %s %s segments=%u overflow=%u%s", full_s, seg_s, compute_s,
       static_cast<unsigned>(last.segments.size()), static_cast<unsigned>(last.overflow.size()),
       perf_cold_ ? L" cold" : L"");
+  Log(L"perf", L"draw bind=%.2f brush=%.2f begin=%.2f draw=%.2f end=%.2f bpbegin=%.2f bpend=%.2f (ms, avg)",
+      avg(perf_bind_), avg(perf_brush_), avg(perf_begin_), avg(perf_draw_), avg(perf_end_), avg(perf_bpbegin_),
+      avg(perf_bpend_));
   perf_full_.Reset();
   perf_seg_.Reset();
   perf_compute_.Reset();
+  perf_bind_.Reset();
+  perf_brush_.Reset();
+  perf_begin_.Reset();
+  perf_draw_.Reset();
+  perf_end_.Reset();
+  perf_bpbegin_.Reset();
+  perf_bpend_.Reset();
   perf_cold_ = false;
 }
 
@@ -974,17 +993,26 @@ void MenuBar::Paint() {
     params.cbSize = sizeof(params);
     params.dwFlags = BPPF_ERASE;
     HDC buffer_dc = nullptr;
+    LARGE_INTEGER t0{};
+    LARGE_INTEGER t1{};
+    QueryPerformanceCounter(&t0);
     const HPAINTBUFFER buffer = BeginBufferedPaint(hdc, &dirty, BPBF_TOPDOWNDIB, &params, &buffer_dc);
     if (buffer != nullptr && buffer_dc != nullptr) {
       BufferedPaintClear(buffer, &dirty);
-      LARGE_INTEGER t0{};
-      LARGE_INTEGER t1{};
+      QueryPerformanceCounter(&t1);
+      const double bpbegin_ms = QpcMs(t0, t1);
+
+      DrawTimings draw{};
       QueryPerformanceCounter(&t0);
       clock_.Draw(buffer_dc, client, dirty, dark_, layout_.last(), &layout_,
-                  start_hot_ || start_menu_.visible(), start_pressed_ || start_menu_.visible());
+                  start_hot_ || start_menu_.visible(), start_pressed_ || start_menu_.visible(), &draw);
       QueryPerformanceCounter(&t1);
-      NotePerf(last_compute_ms_, QpcMs(t0, t1), dirty, client);
+      const double draw_ms = QpcMs(t0, t1);
+
+      QueryPerformanceCounter(&t0);
       EndBufferedPaint(buffer, TRUE);
+      QueryPerformanceCounter(&t1);
+      NotePerf(last_compute_ms_, draw_ms, dirty, client, draw, bpbegin_ms, QpcMs(t0, t1));
     }
   }
   EndPaint(hwnd_, &ps);

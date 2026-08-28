@@ -9,12 +9,20 @@
 
 namespace bamti {
 
+struct DrawTimings {
+  double bind_ms = 0;
+  double brush_ms = 0;
+  double begin_ms = 0;
+  double draw_ms = 0;
+  double end_ms = 0;
+};
+
 class ClockRenderer {
  public:
   bool Initialize();
   void SetDpi(UINT dpi);
   bool Draw(HDC hdc, const RECT& client, const RECT& dirty, bool dark, const BarLayoutResult& layout,
-            BarLayout* text, bool start_hot, bool start_pressed);
+            BarLayout* text, bool start_hot, bool start_pressed, DrawTimings* timings = nullptr);
   std::wstring CurrentTimeText() const;
 
  private:
