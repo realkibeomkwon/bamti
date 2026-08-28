@@ -107,6 +107,22 @@ double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
   return (end.QuadPart - start.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
 }
 
+int DisplayRefreshHz() {
+  DWM_TIMING_INFO info{};
+  info.cbSize = sizeof(info);
+  if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &info)) && info.rateRefresh.uiDenominator != 0) {
+    return static_cast<int>((info.rateRefresh.uiNumerator + info.rateRefresh.uiDenominator / 2) /
+                            info.rateRefresh.uiDenominator);
+  }
+  const HDC hdc = GetDC(nullptr);
+  if (hdc == nullptr) {
+    return 0;
+  }
+  const int hz = GetDeviceCaps(hdc, VREFRESH);
+  ReleaseDC(nullptr, hdc);
+  return hz;
+}
+
 const wchar_t* MenuCmdName(UINT cmd) {
   if (cmd >= kWindowCommandBase) {
     return L"window";
@@ -1442,6 +1458,7 @@ bool Dock::Create(HINSTANCE instance) {
   submenu_.SetDark(dark_);
   popup_.SetAfterTick(&Dock::AfterPopupTick, this);
   RefreshFullscreen();
+  Log(L"perf", L"display refresh=%dHz", DisplayRefreshHz());
   Log(L"dock", L"ready hwnd=%p items=%zu", hwnd_, items_.size());
   return true;
 }
@@ -2677,7 +2694,10 @@ void Dock::StartDragAnimTimer() {
   }
   anim_frames_ = 0;
   anim_ms_sum_ = 0.0;
-  last_anim_tick_ = GetTickCount64();
+  anim_interval_sum_ = 0.0;
+  anim_interval_min_ = 0.0;
+  anim_interval_max_ = 0.0;
+  QueryPerformanceCounter(&last_anim_qpc_);
   if (anim_x_.size() != items_.size()) {
     SnapAnimX();
   }
@@ -2688,13 +2708,20 @@ void Dock::StopDragAnimTimer(bool log) {
     KillTimer(hwnd_, kAnimTimerId);
   }
   anim_timer_on_ = false;
-  last_anim_tick_ = 0;
+  last_anim_qpc_ = {};
   if (log && anim_frames_ > 0) {
-    Log(L"perf", L"drag anim frames=%u avg=%.1fms", anim_frames_,
-        anim_ms_sum_ / static_cast<double>(anim_frames_));
+    const UINT intervals = anim_frames_ > 1 ? anim_frames_ - 1 : 0;
+    const double interval_avg = intervals > 0 ? anim_interval_sum_ / static_cast<double>(intervals) : 0.0;
+    const double fps = interval_avg > 0.0 ? 1000.0 / interval_avg : 0.0;
+    const double render_avg = anim_ms_sum_ / static_cast<double>(anim_frames_);
+    Log(L"perf", L"drag anim frames=%u interval avg=%.1f min=%.1f max=%.1f fps=%.1f render avg=%.1fms", anim_frames_,
+        interval_avg, anim_interval_min_, anim_interval_max_, fps, render_avg);
   }
   anim_frames_ = 0;
   anim_ms_sum_ = 0.0;
+  anim_interval_sum_ = 0.0;
+  anim_interval_min_ = 0.0;
+  anim_interval_max_ = 0.0;
   SnapAnimX();
 }
 
@@ -2706,12 +2733,27 @@ void Dock::TickDragAnim() {
   if (anim_x_.size() != items_.size()) {
     SnapAnimX();
   }
-  const ULONGLONG now = GetTickCount64();
-  double dt = last_anim_tick_ == 0 ? 16.0 : static_cast<double>(now - last_anim_tick_);
-  last_anim_tick_ = now;
-  if (dt < 1.0) {
-    dt = 1.0;
-  } else if (dt > 100.0) {
+  LARGE_INTEGER qpc_now{};
+  QueryPerformanceCounter(&qpc_now);
+  double dt = 16.0;
+  if (last_anim_qpc_.QuadPart != 0) {
+    const double interval = QpcMs(last_anim_qpc_, qpc_now);
+    if (anim_interval_sum_ == 0.0 && anim_interval_max_ == 0.0) {
+      anim_interval_min_ = interval;
+      anim_interval_max_ = interval;
+    } else {
+      if (interval < anim_interval_min_) {
+        anim_interval_min_ = interval;
+      }
+      if (interval > anim_interval_max_) {
+        anim_interval_max_ = interval;
+      }
+    }
+    anim_interval_sum_ += interval;
+    dt = interval;
+  }
+  last_anim_qpc_ = qpc_now;
+  if (dt > 100.0) {
     dt = 100.0;
   }
   const float k = static_cast<float>(1.0 - std::pow(0.8, dt / 16.0));

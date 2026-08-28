@@ -139,9 +139,12 @@ class Dock {
   UINT drag_logs_ = 0;
   UINT drag_move_logs_ = 0;
   std::vector<float> anim_x_;
-  ULONGLONG last_anim_tick_ = 0;
   UINT anim_frames_ = 0;
   double anim_ms_sum_ = 0;
+  double anim_interval_sum_ = 0;
+  double anim_interval_min_ = 0;
+  double anim_interval_max_ = 0;
+  LARGE_INTEGER last_anim_qpc_{};
   bool anim_timer_on_ = false;
 };
 
