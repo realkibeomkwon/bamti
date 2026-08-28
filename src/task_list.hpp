@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <windows.h>
@@ -24,6 +25,7 @@ std::vector<std::wstring> LoadDockPins();
 bool SaveDockPins(const std::vector<std::wstring>& paths);
 
 std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_paths);
+uint64_t TaskWindowFingerprint();
 void ForgetCachedWindow(HWND hwnd);
 
 bool ActivateHwnd(HWND hwnd);

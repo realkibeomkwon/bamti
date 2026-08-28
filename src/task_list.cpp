@@ -15,6 +15,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cwchar>
 #include <unordered_map>
@@ -562,6 +563,28 @@ struct Group {
 };
 
 }  // namespace
+
+uint64_t TaskWindowFingerprint() {
+  struct Acc {
+    uint64_t hash = 14695981039346656037ULL;
+    uint64_t count = 0;
+  } acc;
+  EnumWindows(
+      [](HWND hwnd, LPARAM lp) -> BOOL {
+        if (!IsTaskWindow(hwnd)) {
+          return TRUE;
+        }
+        auto* a = reinterpret_cast<Acc*>(lp);
+        a->hash ^= static_cast<uint64_t>(reinterpret_cast<uintptr_t>(hwnd));
+        a->hash *= 1099511628211ULL;
+        ++a->count;
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&acc));
+  acc.hash ^= acc.count;
+  acc.hash *= 1099511628211ULL;
+  return acc.hash;
+}
 
 std::wstring CanonicalPath(const std::wstring& path) {
   if (path.empty()) {

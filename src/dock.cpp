@@ -50,7 +50,7 @@ constexpr int kMenuMinWidthDip = 168;
 constexpr int kMenuMaxWidthDip = 280;
 constexpr int kMenuTextPadDip = 12;
 constexpr UINT kHideDelayMs = 100;
-constexpr UINT kRebuildDelayMs = 150;
+constexpr UINT kRebuildDelayMs = 300;
 constexpr UINT_PTR kHideTimerId = 1;
 constexpr UINT_PTR kPollTimerId = 2;
 constexpr UINT_PTR kRebuildTimerId = 3;
@@ -1030,6 +1030,12 @@ void CALLBACK Dock::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG obj
   if (GetAncestor(hwnd, GA_ROOT) != hwnd) {
     return;
   }
+  if (!IsWindowVisible(hwnd) && event != EVENT_OBJECT_DESTROY && event != EVENT_OBJECT_HIDE) {
+    return;
+  }
+  if ((GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) {
+    return;
+  }
   if (event == EVENT_OBJECT_DESTROY) {
     ForgetCachedWindow(hwnd);
     if (hwnd == TaskbarController::WatchedTray()) {
@@ -1279,12 +1285,28 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
 }
 
 void Dock::Rebuild() {
+  if (!shown_) {
+    pending_rebuild_ = true;
+    return;
+  }
   if (Busy()) {
     pending_rebuild_ = true;
     return;
   }
   pending_rebuild_ = false;
   const ULONGLONG started = GetTickCount64();
+  const ULONGLONG fp_started = GetTickCount64();
+  const uint64_t fp = TaskWindowFingerprint();
+  const unsigned fp_ms = static_cast<unsigned>(GetTickCount64() - fp_started);
+  if (fp_ms > 2) {
+    Log(L"perf", L"rebuild fingerprint %ums", fp_ms);
+  }
+  if (!force_collect_ && fp == last_window_fp_ && !items_.empty()) {
+    Log(L"perf", L"rebuild skip fingerprint items=%zu %ums", items_.size(), fp_ms);
+    return;
+  }
+  force_collect_ = false;
+  last_window_fp_ = fp;
   std::vector<DockApp> next = CollectDockApps(pins_);
   const std::wstring snap = CollectSnap(next);
   if (snap == last_collect_snap_ && !items_.empty()) {
@@ -1598,13 +1620,21 @@ void Dock::RenderLayered() {
 }
 
 void Dock::ShowPill() {
-  if (fullscreen_occluded_ || items_.empty()) {
+  if (fullscreen_occluded_) {
     return;
   }
   TaskbarController::Rehide();
   CancelHideTimer();
   if (!shown_) {
     shown_ = true;
+    if (pending_rebuild_) {
+      Rebuild();
+    }
+    if (!shown_ || items_.empty()) {
+      shown_ = false;
+      UpdateIdleTimer();
+      return;
+    }
     Layout();
     ShowWindow(hwnd_, SW_SHOWNA);
     RaiseOverlays();
@@ -1797,6 +1827,7 @@ void Dock::ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND
         SaveDockPins(pins_);
       }
       pending_rebuild_ = true;
+      force_collect_ = true;
     }
   } else if (cmd == kUnpinCommand) {
     const std::wstring id = DockPinId(app);
@@ -1805,6 +1836,7 @@ void Dock::ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND
                 pins_.end());
     SaveDockPins(pins_);
     pending_rebuild_ = true;
+    force_collect_ = true;
   } else if (cmd == kQuitCommand) {
     CloseHwnds(app.windows);
   }
@@ -1829,7 +1861,7 @@ void Dock::SanitizePins() {
 
 void Dock::ScheduleRebuild() {
   pending_rebuild_ = true;
-  if (hwnd_ == nullptr || Busy()) {
+  if (hwnd_ == nullptr || !shown_ || Busy()) {
     return;
   }
   SetTimer(hwnd_, kRebuildTimerId, kRebuildDelayMs, nullptr);
@@ -1944,6 +1976,7 @@ void Dock::EndDrag(bool commit) {
       pins_.insert(pins_.begin() + to, moved);
       SaveDockPins(pins_);
       pending_rebuild_ = true;
+      force_collect_ = true;
     }
   }
   if (pending_rebuild_) {

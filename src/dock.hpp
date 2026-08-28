@@ -88,6 +88,7 @@ class Dock {
   bool hide_armed_ = false;
   bool dragging_ = false;
   bool pending_rebuild_ = false;
+  bool force_collect_ = false;
   int pressed_ = -1;
   int drag_index_ = -1;
   int drop_index_ = -1;
@@ -105,6 +106,7 @@ class Dock {
   PopupSurface popup_;
   std::unique_ptr<DockMenuContent> menu_content_;
   std::wstring last_collect_snap_;
+  uint64_t last_window_fp_ = 0;
 };
 
 }  // namespace bamti
