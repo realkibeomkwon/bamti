@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
+import msvcrt
 import threading
 import time
 
@@ -26,6 +28,14 @@ def connect():
 def send(pipe, payload: dict) -> None:
     pipe.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
     pipe.flush()
+
+
+def peek_bytes(pipe) -> int:
+    handle = msvcrt.get_osfhandle(pipe.fileno())
+    avail = ctypes.c_ulong(0)
+    if ctypes.windll.kernel32.PeekNamedPipe(ctypes.c_void_p(handle), None, 0, None, ctypes.byref(avail), None) == 0:
+        raise OSError(ctypes.windll.kernel32.GetLastError())
+    return int(avail.value)
 
 
 def item(price: int, alerts: bool) -> dict:
@@ -75,7 +85,14 @@ def main() -> int:
     try:
         while not stop.is_set():
             try:
-                chunk = pipe.read(1)
+                n = peek_bytes(pipe)
+            except OSError:
+                break
+            if n == 0:
+                time.sleep(0.1)
+                continue
+            try:
+                chunk = pipe.read(n)
             except OSError:
                 break
             if not chunk:
