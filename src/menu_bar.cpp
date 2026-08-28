@@ -31,6 +31,10 @@ constexpr UINT kRepaintCoalesceMs = 16;
 constexpr UINT kToggleTimeoutMs = 2000;
 constexpr int kBarHeightDip = 32;
 constexpr UINT kExitCommand = 1;
+constexpr UINT kWidgetBatteryCmd = 10;
+constexpr UINT kWidgetCpuCmd = 11;
+constexpr UINT kWidgetNetworkCmd = 12;
+constexpr UINT kWidgetBoardCmd = 13;
 
 MenuBar* g_menu_bar = nullptr;
 HHOOK g_key_hook = nullptr;
@@ -436,11 +440,27 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     }
-    case WM_COMMAND:
-      if (LOWORD(wparam) == kExitCommand) {
+    case WM_COMMAND: {
+      const UINT cmd = LOWORD(wparam);
+      if (cmd == kExitCommand) {
         DestroyWindow(hwnd_);
+        return 0;
+      }
+      if (cmd >= kWidgetBatteryCmd && cmd <= kWidgetBoardCmd) {
+        WidgetSettings next = widgets_.settings();
+        if (cmd == kWidgetBatteryCmd) {
+          next.battery = !next.battery;
+        } else if (cmd == kWidgetCpuCmd) {
+          next.cpu = !next.cpu;
+        } else if (cmd == kWidgetNetworkCmd) {
+          next.network = !next.network;
+        } else {
+          next.widget_board = !next.widget_board;
+        }
+        widgets_.SetSettings(next);
       }
       return 0;
+    }
     case kToggleStartMsg:
       NotePostedStorm(L"toggle-start", g_toggle_start_count, g_toggle_start_window);
       ToggleStartMenu(true);
@@ -1010,6 +1030,13 @@ void MenuBar::ShowContextMenu(POINT screen) {
   if (menu == nullptr) {
     return;
   }
+  // 7단계에서 항목 표시 설정 전체를 PopupSurface로 옮길 임시 메뉴다.
+  const WidgetSettings s = widgets_.settings();
+  AppendMenuW(menu, MF_STRING | (s.battery ? MF_CHECKED : 0), kWidgetBatteryCmd, L"배터리");
+  AppendMenuW(menu, MF_STRING | (s.cpu ? MF_CHECKED : 0), kWidgetCpuCmd, L"CPU");
+  AppendMenuW(menu, MF_STRING | (s.network ? MF_CHECKED : 0), kWidgetNetworkCmd, L"네트워크");
+  AppendMenuW(menu, MF_STRING | (s.widget_board ? MF_CHECKED : 0), kWidgetBoardCmd, L"위젯 보드 단추");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kExitCommand, L"종료");
   TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, screen.x, screen.y, hwnd_, nullptr);
   DestroyMenu(menu);
