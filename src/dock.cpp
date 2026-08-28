@@ -70,6 +70,8 @@ constexpr UINT kQuitCommand = 3;
 constexpr UINT kShowAllCommand = 4;
 constexpr UINT kHideCommand = 5;
 constexpr UINT kNewWindowCommand = 6;
+constexpr UINT kOpenCommand = 7;
+constexpr UINT kOptionsCommand = 8;
 constexpr UINT kWindowCommandBase = 100;
 
 HWND g_notify = nullptr;
@@ -104,6 +106,10 @@ const wchar_t* MenuCmdName(UINT cmd) {
       return L"hide";
     case kNewWindowCommand:
       return L"new-window";
+    case kOpenCommand:
+      return L"open";
+    case kOptionsCommand:
+      return L"options";
     default:
       return L"none";
   }
@@ -722,6 +728,7 @@ class DockMenuContent : public PopupContent {
     window_targets_.reserve(app.windows.size());
     std::vector<DockMenuRow> window_rows;
     window_rows.reserve(app.windows.size());
+    const HWND foreground = GetForegroundWindow();
     for (HWND hwnd : app.windows) {
       if (hwnd == nullptr || !IsWindow(hwnd)) {
         continue;
@@ -735,7 +742,7 @@ class DockMenuContent : public PopupContent {
         title.push_back(L'\u2026');
       }
       const UINT id = kWindowCommandBase + static_cast<UINT>(window_targets_.size());
-      window_rows.push_back({id, std::move(title), false});
+      window_rows.push_back({id, std::move(title), false, hwnd == foreground});
       window_targets_.push_back(hwnd);
     }
 
@@ -748,28 +755,31 @@ class DockMenuContent : public PopupContent {
         rows_.push_back({0, L"", true});
       }
     };
-    if (can_launch) {
-      rows_.push_back({kNewWindowCommand, L"새 창", false});
-    }
+    auto add_row = [&](UINT id, std::wstring text, bool checked = false, bool submenu = false) {
+      rows_.push_back({id, std::move(text), false, checked, submenu});
+    };
+
     if (has_windows) {
-      add_sep();
       rows_.insert(rows_.end(), window_rows.begin(), window_rows.end());
+      if (can_launch) {
+        add_sep();
+        add_row(kNewWindowCommand, L"새 창");
+      }
     }
-    if (has_windows && can_pin) {
+    add_sep();
+    add_row(kOptionsCommand, L"옵션", false, true);
+    if (can_pin) {
       add_sep();
-    }
-    if (app.pinned) {
-      rows_.push_back({kUnpinCommand, L"고정 해제", false});
-    } else if (app.can_pin && !IsSelfExecutable(app.exe_path)) {
-      rows_.push_back({kPinCommand, L"독에 고정", false});
+      add_row(app.pinned ? kUnpinCommand : kPinCommand, L"독에 유지", app.pinned);
     }
     if (has_windows) {
-      if (can_pin) {
-        add_sep();
-      }
-      rows_.push_back({kShowAllCommand, L"모두 보기", false});
-      rows_.push_back({kHideCommand, L"가리기", false});
-      rows_.push_back({kQuitCommand, L"종료", false});
+      add_sep();
+      add_row(kShowAllCommand, L"모두 보기");
+      add_row(kHideCommand, L"가리기");
+      add_row(kQuitCommand, L"종료");
+    } else if (can_launch) {
+      add_sep();
+      add_row(kOpenCommand, L"열기");
     }
     if (!rows_.empty() && rows_.back().separator) {
       rows_.pop_back();
@@ -1990,9 +2000,9 @@ void Dock::ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND
     force_collect_ = true;
   } else if (cmd == kQuitCommand) {
     CloseHwnds(app.windows);
-  } else if (cmd == kNewWindowCommand) {
+  } else if (cmd == kNewWindowCommand || cmd == kOpenCommand) {
     if (!LaunchDockApp(app)) {
-      Log(L"dock", L"new-window failed name=%s", app.display_name.c_str());
+      Log(L"dock", L"%s failed name=%s", MenuCmdName(cmd), app.display_name.c_str());
     }
   }
 
