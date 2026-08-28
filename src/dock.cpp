@@ -92,6 +92,20 @@ UINT g_popup_closed_count = 0;
 ULONGLONG g_popup_closed_window = 0;
 UINT g_menu_cmd_count = 0;
 ULONGLONG g_menu_cmd_window = 0;
+UINT g_render_split_logs = 0;
+int g_render_split_n = -1;
+constexpr UINT kRenderSplitLogMax = 8;
+
+double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
+  static LARGE_INTEGER freq{};
+  if (freq.QuadPart == 0) {
+    QueryPerformanceFrequency(&freq);
+  }
+  if (freq.QuadPart == 0) {
+    return 0.0;
+  }
+  return (end.QuadPart - start.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+}
 
 const wchar_t* MenuCmdName(UINT cmd) {
   if (cmd >= kWindowCommandBase) {
@@ -2051,6 +2065,13 @@ void Dock::RenderLayered() {
     return;
   }
 
+  LARGE_INTEGER t0{};
+  LARGE_INTEGER t1{};
+  LARGE_INTEGER t2{};
+  LARGE_INTEGER t3{};
+  LARGE_INTEGER t4{};
+  QueryPerformanceCounter(&t0);
+
   BITMAPINFO bmi{};
   bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
   bmi.bmiHeader.biWidth = width;
@@ -2081,6 +2102,7 @@ void Dock::RenderLayered() {
   rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
   rt->BeginDraw();
   rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+  QueryPerformanceCounter(&t1);
 
   const float radius = static_cast<float>(Dip(kCornerRadiusDip));
   const D2D1_ROUNDED_RECT rounded{
@@ -2100,6 +2122,7 @@ void Dock::RenderLayered() {
   if (stroke) {
     rt->DrawRoundedRectangle(rounded, stroke.Get(), 1.0f);
   }
+  QueryPerformanceCounter(&t2);
 
   const int icon_px = Dip(kIconDip);
   const auto order = DisplayOrder();
@@ -2156,6 +2179,7 @@ void Dock::RenderLayered() {
     const float bottom = static_cast<float>(height - Dip(18));
     rt->DrawLine(D2D1::Point2F(mid, top), D2D1::Point2F(mid, bottom), stroke.Get(), 1.0f);
   }
+  QueryPerformanceCounter(&t3);
 
   rt->EndDraw();
   rt.Reset();
@@ -2171,6 +2195,18 @@ void Dock::RenderLayered() {
   SelectObject(mem, old);
   DeleteDC(mem);
   DeleteObject(dib);
+  QueryPerformanceCounter(&t4);
+
+  const int n = static_cast<int>(order.size());
+  if (n != g_render_split_n) {
+    g_render_split_n = n;
+    g_render_split_logs = 0;
+  }
+  if (g_render_split_logs < kRenderSplitLogMax) {
+    ++g_render_split_logs;
+    Log(L"perf", L"render split n=%d prep=%.1f bg=%.1f icon=%.1f present=%.1f total=%.1fms", n, QpcMs(t0, t1),
+        QpcMs(t1, t2), QpcMs(t2, t3), QpcMs(t3, t4), QpcMs(t0, t4));
+  }
 }
 
 void Dock::ShowPill() {
