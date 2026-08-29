@@ -610,7 +610,16 @@ void TrayMirror::WorkerLoop() {
         flush_ms = sink_->NotifyWaitTimeoutMs();
       }
     }
-    const DWORD wait = WaitForMultipleObjects(n, waits, FALSE, active ? flush_ms : INFINITE);
+    const DWORD timeout = active ? flush_ms : INFINITE;
+    const DWORD wait = MsgWaitForMultipleObjectsEx(n, waits, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    if (wait == WAIT_OBJECT_0 + n) {
+      MSG msg;
+      while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+      }
+      continue;
+    }
     if (wait == WAIT_OBJECT_0) {
       break;
     }
