@@ -71,6 +71,25 @@ HWND FindBridge() {
   return FindWindowExW(tray, nullptr, kBridgeClass, nullptr);
 }
 
+void SignalWake(HANDLE wake, volatile LONG* fired) {
+  if (fired != nullptr) {
+    InterlockedIncrement(fired);
+  }
+  if (wake != nullptr) {
+    SetEvent(wake);
+  }
+}
+
+HANDLE g_hook_wake = nullptr;
+volatile LONG* g_hook_fired = nullptr;
+
+void CALLBACK TrayWinEventProc(HWINEVENTHOOK, DWORD, HWND, LONG id_object, LONG id_child, DWORD, DWORD) {
+  if (id_object != 0 || id_child != 0) {
+    return;
+  }
+  SignalWake(g_hook_wake, g_hook_fired);
+}
+
 class StructureHandler final : public IUIAutomationStructureChangedEventHandler {
  public:
   StructureHandler(HANDLE wake, volatile LONG* fired) : refs_(1), wake_(wake), fired_(fired) {}
@@ -102,17 +121,53 @@ class StructureHandler final : public IUIAutomationStructureChangedEventHandler 
 
   HRESULT STDMETHODCALLTYPE HandleStructureChangedEvent(IUIAutomationElement*, StructureChangeType,
                                                         SAFEARRAY*) override {
-    if (fired_ != nullptr) {
-      InterlockedIncrement(fired_);
-    }
-    if (wake_ != nullptr) {
-      SetEvent(wake_);
-    }
+    SignalWake(wake_, fired_);
     return S_OK;
   }
 
  private:
   ~StructureHandler() = default;
+  volatile LONG refs_;
+  HANDLE wake_;
+  volatile LONG* fired_;
+};
+
+class PropertyHandler final : public IUIAutomationPropertyChangedEventHandler {
+ public:
+  PropertyHandler(HANDLE wake, volatile LONG* fired) : refs_(1), wake_(wake), fired_(fired) {}
+  PropertyHandler(const PropertyHandler&) = delete;
+  PropertyHandler& operator=(const PropertyHandler&) = delete;
+
+  ULONG STDMETHODCALLTYPE AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&refs_)); }
+
+  ULONG STDMETHODCALLTYPE Release() override {
+    const LONG n = InterlockedDecrement(&refs_);
+    if (n == 0) {
+      delete this;
+    }
+    return static_cast<ULONG>(n);
+  }
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** pp) override {
+    if (pp == nullptr) {
+      return E_POINTER;
+    }
+    if (riid == IID_IUnknown || riid == __uuidof(IUIAutomationPropertyChangedEventHandler)) {
+      *pp = static_cast<IUIAutomationPropertyChangedEventHandler*>(this);
+      AddRef();
+      return S_OK;
+    }
+    *pp = nullptr;
+    return E_NOINTERFACE;
+  }
+
+  HRESULT STDMETHODCALLTYPE HandlePropertyChangedEvent(IUIAutomationElement*, PROPERTYID, VARIANT) override {
+    SignalWake(wake_, fired_);
+    return S_OK;
+  }
+
+ private:
+  ~PropertyHandler() = default;
   volatile LONG refs_;
   HANDLE wake_;
   volatile LONG* fired_;
@@ -266,7 +321,7 @@ class TrayBackendUia final : public TrayBackend {
     if (abandoned_ || wake == nullptr) {
       return false;
     }
-    if (subscribed_ && handler_ != nullptr && bridge_ != nullptr && IsWindow(bridge_)) {
+    if (subscribed_ && handler_ != nullptr && props_ != nullptr && bridge_ != nullptr && IsWindow(bridge_)) {
       return true;
     }
     UnsubscribeStructureChanged();
@@ -283,22 +338,78 @@ class TrayBackendUia final : public TrayBackend {
       return false;
     }
     handler_.Attach(raw);
-    const HRESULT hr =
-        uia_->AddStructureChangedEventHandler(root.Get(), TreeScope_Subtree, nullptr, handler_.Get());
+    auto* praw = new (std::nothrow) PropertyHandler(wake, &fired_);
+    if (praw == nullptr) {
+      handler_.Reset();
+      return false;
+    }
+    props_.Attach(praw);
+    // ChildRemoved는 보내는 요소가 이미 사라져 nullptr 캐시로는 이벤트가 떨어지지 않는다.
+    // RuntimeId만 캐시하고, 값은 읽지 않은 채 신호로만 쓴다.
+    Microsoft::WRL::ComPtr<IUIAutomationCacheRequest> ev_cache;
+    if (FAILED(uia_->CreateCacheRequest(ev_cache.GetAddressOf())) || ev_cache == nullptr) {
+      handler_.Reset();
+      props_.Reset();
+      return false;
+    }
+    ev_cache->AddProperty(UIA_RuntimeIdPropertyId);
+    HRESULT hr =
+        uia_->AddStructureChangedEventHandler(root.Get(), TreeScope_Subtree, ev_cache.Get(), handler_.Get());
     if (FAILED(hr)) {
       handler_.Reset();
+      props_.Reset();
       Log(L"tray", L"structure_changed subscribe hr=0x%08X", static_cast<unsigned>(hr));
       return false;
     }
+    PROPERTYID changed[] = {UIA_IsOffscreenPropertyId};
+    hr = uia_->AddPropertyChangedEventHandlerNativeArray(root.Get(), TreeScope_Subtree, ev_cache.Get(), props_.Get(),
+                                                         changed, ARRAYSIZE(changed));
+    if (FAILED(hr)) {
+      Log(L"tray", L"property_changed subscribe hr=0x%08X", static_cast<unsigned>(hr));
+      uia_->RemoveAllEventHandlers();
+      handler_.Reset();
+      props_.Reset();
+      return false;
+    }
+    // HWND 래퍼는 XAML ChildRemoved를 놓친다. 아이콘 패널 부모에도 같은 핸들러를 건다.
+    Microsoft::WRL::ComPtr<IUIAutomationElementArray> arr;
+    if (SUCCEEDED(root->FindAll(TreeScope_Descendants, cond_.Get(), arr.GetAddressOf())) && arr != nullptr) {
+      int n = 0;
+      arr->get_Length(&n);
+      Microsoft::WRL::ComPtr<IUIAutomationTreeWalker> walker;
+      if (n > 0 && SUCCEEDED(uia_->get_ControlViewWalker(walker.GetAddressOf())) && walker != nullptr) {
+        Microsoft::WRL::ComPtr<IUIAutomationElement> first;
+        if (SUCCEEDED(arr->GetElement(0, first.GetAddressOf())) && first != nullptr) {
+          Microsoft::WRL::ComPtr<IUIAutomationElement> parent;
+          if (SUCCEEDED(walker->GetParentElement(first.Get(), parent.GetAddressOf())) && parent != nullptr) {
+            uia_->AddStructureChangedEventHandler(parent.Get(), TreeScope_Subtree, ev_cache.Get(), handler_.Get());
+            uia_->AddPropertyChangedEventHandlerNativeArray(parent.Get(), TreeScope_Subtree, ev_cache.Get(),
+                                                            props_.Get(), changed, ARRAYSIZE(changed));
+          }
+        }
+      }
+    }
+    UnhookWinEvent(hook_);
+    hook_ = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY, nullptr, TrayWinEventProc, 0, 0,
+                            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    g_hook_wake = wake;
+    g_hook_fired = &fired_;
     subscribed_ = true;
     return true;
   }
 
   void UnsubscribeStructureChanged() override {
+    if (hook_ != nullptr) {
+      UnhookWinEvent(hook_);
+      hook_ = nullptr;
+    }
+    g_hook_wake = nullptr;
+    g_hook_fired = nullptr;
     if (uia_ != nullptr) {
       uia_->RemoveAllEventHandlers();
     }
     handler_.Reset();
+    props_.Reset();
     subscribed_ = false;
     InterlockedExchange(&fired_, 0);
   }
@@ -488,6 +599,8 @@ class TrayBackendUia final : public TrayBackend {
   Microsoft::WRL::ComPtr<IUIAutomationCondition> cond_;
   Microsoft::WRL::ComPtr<IUIAutomationCacheRequest> cache_;
   Microsoft::WRL::ComPtr<IUIAutomationStructureChangedEventHandler> handler_;
+  Microsoft::WRL::ComPtr<IUIAutomationPropertyChangedEventHandler> props_;
+  HWINEVENTHOOK hook_ = nullptr;
   volatile LONG fired_ = 0;
   bool subscribed_ = false;
   bool abandoned_ = false;
