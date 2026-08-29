@@ -50,6 +50,15 @@ bool g_win_injected = false;
 bool g_swallow_space = false;
 DWORD g_win_vk = VK_LWIN;
 
+std::vector<RowType> PanelRowTypes(const StatusPanel& panel) {
+  std::vector<RowType> types;
+  types.reserve(panel.rows.size());
+  for (const StatusRow& row : panel.rows) {
+    types.push_back(row.type);
+  }
+  return types;
+}
+
 void InjectWinKey(DWORD vk, bool up) {
   INPUT in{};
   in.type = INPUT_KEYBOARD;
@@ -932,7 +941,7 @@ void MenuBar::OpenStatusPanel(const StatusHit& hit) {
   ClientToScreen(hwnd_, &anchor);
   open_panel_id_ = found->id;
   open_panel_revision_ = found->revision;
-  open_panel_rows_ = found->panel->rows.size();
+  open_panel_rows_ = PanelRowTypes(*found->panel);
   StatusEvent ev;
   ev.id = found->id;
   ev.event = "panel_open";
@@ -965,7 +974,7 @@ void MenuBar::RefreshOpenPanel() {
   if (item->revision == open_panel_revision_) {
     return;
   }
-  if (item->panel->rows.size() != open_panel_rows_) {
+  if (PanelRowTypes(*item->panel) != open_panel_rows_) {
     status_popup_.Close();
     return;
   }

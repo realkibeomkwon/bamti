@@ -131,7 +131,7 @@ class MenuBar {
   std::wstring tooltip_text_;
   std::string open_panel_id_;
   uint64_t open_panel_revision_ = 0;
-  size_t open_panel_rows_ = 0;
+  std::vector<RowType> open_panel_rows_;
   struct PendingToggle {
     std::string id;
     std::string row_id;

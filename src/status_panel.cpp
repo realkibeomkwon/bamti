@@ -1,5 +1,6 @@
 #include "status_panel.hpp"
 
+#include "log.hpp"
 #include "theme.hpp"
 
 #include <d2d1helper.h>
@@ -39,6 +40,15 @@ int ButtonRunLen(const std::vector<StatusRow>& rows, size_t start) {
     ++n;
   }
   return n;
+}
+
+void NoteHitOutOfRange(int hit_i, size_t n, int row, size_t rows) {
+  static bool logged = false;
+  if (logged) {
+    return;
+  }
+  logged = true;
+  Log(L"panel", L"render hit out of range i=%d hits=%zu row=%d rows=%zu", hit_i, n, row, rows);
 }
 
 }  // namespace
@@ -235,7 +245,15 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
       while (drawn < run) {
         const int count = (std::min)(kButtonsPerLine, run - drawn);
         for (int c = 0; c < count; ++c) {
+          if (static_cast<size_t>(hit_i) >= hits_.size()) {
+            NoteHitOutOfRange(hit_i, hits_.size(), -1, rows.size());
+            continue;
+          }
           const Hit& hit = hits_[static_cast<size_t>(hit_i++)];
+          if (hit.row < 0 || hit.row >= static_cast<int>(rows.size())) {
+            NoteHitOutOfRange(hit_i - 1, hits_.size(), hit.row, rows.size());
+            continue;
+          }
           const StatusRow& button = rows[static_cast<size_t>(hit.row)];
           const float l = static_cast<float>(hit.rc.left);
           const float t = static_cast<float>(hit.rc.top);
@@ -298,26 +316,34 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
       target->DrawLine(D2D1::Point2F(left, mid), D2D1::Point2F(right, mid), line.Get(), 1.0f);
       y += DipToPx(kPanelSepDip, dpi);
     } else if (row.type == RowType::kToggle) {
-      const Hit& hit = hits_[static_cast<size_t>(hit_i++)];
-      const float t = static_cast<float>(hit.rc.top);
-      const float b = static_cast<float>(hit.rc.bottom);
-      if (hot_index == hit_i - 1) {
-        target->FillRectangle(D2D1::RectF(static_cast<float>(hit.rc.left), t, static_cast<float>(hit.rc.right), b),
-                              hover.Get());
+      if (static_cast<size_t>(hit_i) >= hits_.size()) {
+        NoteHitOutOfRange(hit_i, hits_.size(), static_cast<int>(i), rows.size());
+      } else {
+        const Hit& hit = hits_[static_cast<size_t>(hit_i++)];
+        if (hit.row < 0 || hit.row >= static_cast<int>(rows.size())) {
+          NoteHitOutOfRange(hit_i - 1, hits_.size(), hit.row, rows.size());
+        } else {
+          const float t = static_cast<float>(hit.rc.top);
+          const float b = static_cast<float>(hit.rc.bottom);
+          if (hot_index == hit_i - 1) {
+            target->FillRectangle(D2D1::RectF(static_cast<float>(hit.rc.left), t, static_cast<float>(hit.rc.right), b),
+                                  hover.Get());
+          }
+          const int track_w = DipToPx(kToggleTrackWDip, dpi);
+          const int track_h = DipToPx(kToggleTrackHDip, dpi);
+          const float track_l = right - static_cast<float>(track_w);
+          const float track_t = t + (b - t - static_cast<float>(track_h)) * 0.5f;
+          const float radius = static_cast<float>(track_h) * 0.5f;
+          const D2D1_ROUNDED_RECT track_rc{D2D1::RectF(track_l, track_t, right, track_t + static_cast<float>(track_h)),
+                                           radius, radius};
+          target->FillRoundedRectangle(track_rc, row.on ? fill.Get() : track.Get());
+          const float thumb_r = radius - 2.0f;
+          const float thumb_cx = row.on ? right - radius : track_l + radius;
+          const float thumb_cy = track_t + radius;
+          target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumb_cx, thumb_cy), thumb_r, thumb_r), thumb.Get());
+          DrawPopupText(target, dpi, row.label, D2D1::RectF(left, t, track_l - 8.0f, b), text.Get());
+        }
       }
-      const int track_w = DipToPx(kToggleTrackWDip, dpi);
-      const int track_h = DipToPx(kToggleTrackHDip, dpi);
-      const float track_l = right - static_cast<float>(track_w);
-      const float track_t = t + (b - t - static_cast<float>(track_h)) * 0.5f;
-      const float radius = static_cast<float>(track_h) * 0.5f;
-      const D2D1_ROUNDED_RECT track_rc{D2D1::RectF(track_l, track_t, right, track_t + static_cast<float>(track_h)),
-                                       radius, radius};
-      target->FillRoundedRectangle(track_rc, row.on ? fill.Get() : track.Get());
-      const float thumb_r = radius - 2.0f;
-      const float thumb_cx = row.on ? right - radius : track_l + radius;
-      const float thumb_cy = track_t + radius;
-      target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumb_cx, thumb_cy), thumb_r, thumb_r), thumb.Get());
-      DrawPopupText(target, dpi, row.label, D2D1::RectF(left, t, track_l - 8.0f, b), text.Get());
       y += DipToPx(kPanelActionDip, dpi);
     }
     ++i;
