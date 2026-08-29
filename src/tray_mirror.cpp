@@ -165,11 +165,26 @@ void TrayMirror::StartIntercept() {
   if (intercept_ == nullptr || !intercept_->Probe()) {
     Log(L"tray", L"intercept spy failed; explorer receives icons directly");
     intercept_.reset();
+    return;
+  }
+  if (rect_lookup_) {
+    intercept_->SetRectLookup(rect_lookup_);
   }
 }
 
 void TrayMirror::StopIntercept() {
   intercept_.reset();
+}
+
+void TrayMirror::SetRectLookup(std::function<bool(uint64_t key, RECT* screen)> lookup) {
+  rect_lookup_ = std::move(lookup);
+  if (intercept_ != nullptr) {
+    intercept_->SetRectLookup(rect_lookup_);
+  }
+}
+
+bool TrayMirror::ForwardsContextMenu() const {
+  return intercept_ != nullptr;
 }
 
 void TrayMirror::SetSettings(const WidgetSettings& next) {
@@ -315,7 +330,7 @@ bool TrayMirror::KeyHidden(uint64_t key, const std::vector<std::string>& hidden)
 }
 
 void TrayMirror::OnEvent(const StatusEvent& ev) {
-  if (ev.event != "click" || ev.button != "left") {
+  if (ev.event != "click" || (ev.button != "left" && ev.button != "right")) {
     return;
   }
   const uint64_t key = ParseId(ev.id);
@@ -325,6 +340,7 @@ void TrayMirror::OnEvent(const StatusEvent& ev) {
   {
     std::lock_guard lock(mu_);
     pending_invoke_ = key;
+    pending_right_ = ev.button == "right";
   }
   if (wake_event_ != nullptr) {
     SetEvent(wake_event_);
@@ -333,17 +349,20 @@ void TrayMirror::OnEvent(const StatusEvent& ev) {
 
 void TrayMirror::DrainInvoke(TrayBackend* backend) {
   uint64_t key = 0;
+  bool right = false;
   {
     std::lock_guard lock(mu_);
     key = pending_invoke_;
     pending_invoke_ = 0;
+    right = pending_right_;
+    pending_right_ = false;
   }
   if (key == 0 || backend == nullptr) {
     return;
   }
   TrayIconInfo icon;
   icon.key = key;
-  if (backend->Invoke(icon)) {
+  if (backend->Invoke(icon, right)) {
     return;
   }
   HRESULT hr = E_FAIL;
@@ -619,9 +638,10 @@ void TrayMirror::WorkerLoop() {
     events_live = true;
   }
   Log(L"tray",
-      L"backend=%hs capture=no hide_mode=hidden right_click=bamti_menu overflow=mirrored "
+      L"backend=%hs capture=no hide_mode=hidden right_click=%hs overflow=mirrored "
       L"structure_changed=%d probe=%d",
-      backend != nullptr ? backend->Name() : "none", events_live ? 1 : 0, probed ? 1 : 0);
+      backend != nullptr ? backend->Name() : "none", intercept ? "app" : "bamti_menu", events_live ? 1 : 0,
+      probed ? 1 : 0);
 
   HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
   bool run_enum = true;

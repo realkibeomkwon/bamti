@@ -69,6 +69,16 @@ struct ShellTrayMessage {
   TrayNotifyIconData icon_data;
   uint32_t version;
 };
+
+struct NotifyIconIdentifier {
+  int32_t magic_number;
+  int32_t message;
+  int32_t callback_size;
+  int32_t padding;
+  uint32_t window_handle;
+  uint32_t uid;
+  GUID guid_item;
+};
 #pragma pack(pop)
 
 struct StoredIcon {
@@ -243,6 +253,73 @@ class TrayBackendIntercept final : public TrayBackend {
   }
 
   bool Invoke(const TrayIconInfo&) override { return false; }
+
+  bool Invoke(const TrayIconInfo& icon, bool right) override {
+    HWND owner = nullptr;
+    UINT uid = 0;
+    UINT callback = 0;
+    UINT version = 0;
+    uint64_t key = icon.key;
+    {
+      std::lock_guard lock(mu_);
+      for (const StoredIcon& one : items_) {
+        if (one.info.key == key) {
+          owner = one.info.owner;
+          uid = one.info.uid;
+          callback = one.info.callback_message;
+          version = one.info.version;
+          break;
+        }
+      }
+    }
+    if (owner == nullptr || callback == 0 || IsWindow(owner) == FALSE) {
+      return false;
+    }
+    DWORD pid = 0;
+    GetWindowThreadProcessId(owner, &pid);
+    if (pid != 0) {
+      AllowSetForegroundWindow(pid);
+    }
+    POINT pt{};
+    RECT rc{};
+    bool have_rect = false;
+    {
+      std::lock_guard lock(mu_);
+      if (rect_lookup_) {
+        have_rect = rect_lookup_(key, &rc);
+      }
+    }
+    if (have_rect) {
+      pt.x = (rc.left + rc.right) / 2;
+      pt.y = (rc.top + rc.bottom) / 2;
+    } else {
+      GetCursorPos(&pt);
+    }
+    const UINT down = right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
+    const UINT up = right ? WM_RBUTTONUP : WM_LBUTTONUP;
+    if (version >= 4) {
+      const WPARAM wp = MAKEWPARAM(static_cast<UINT>(pt.x), static_cast<UINT>(pt.y));
+      PostMessageW(owner, callback, wp, MAKELPARAM(down, uid));
+      PostMessageW(owner, callback, wp, MAKELPARAM(up, uid));
+      if (right) {
+        PostMessageW(owner, callback, wp, MAKELPARAM(WM_CONTEXTMENU, uid));
+      }
+    } else {
+      PostMessageW(owner, callback, uid, down);
+      PostMessageW(owner, callback, uid, up);
+      if (right) {
+        PostMessageW(owner, callback, uid, WM_CONTEXTMENU);
+      }
+    }
+    return true;
+  }
+
+  bool ForwardsContextMenu() const override { return true; }
+
+  void SetRectLookup(std::function<bool(uint64_t key, RECT* screen)> lookup) override {
+    std::lock_guard lock(mu_);
+    rect_lookup_ = std::move(lookup);
+  }
 
   void Reset() override {}
 
@@ -423,6 +500,12 @@ class TrayBackendIntercept final : public TrayBackend {
       FlushPending();
       return 0;
     }
+    if (msg == WM_COPYDATA) {
+      auto* cds = reinterpret_cast<COPYDATASTRUCT*>(lp);
+      if (cds != nullptr && cds->dwData == 3) {
+        return AnswerGetRect(cds);
+      }
+    }
     if (msg == WM_COPYDATA || msg == WM_ACTIVATEAPP || msg == WM_COMMAND) {
       ForwardOrQueue(hwnd, msg, wp, lp);
       return 1;
@@ -554,6 +637,40 @@ class TrayBackendIntercept final : public TrayBackend {
       Log(L"tray", L"intercept pending flushed remain=%zu", left.size());
     }
     pending_.swap(left);
+  }
+
+  LRESULT AnswerGetRect(COPYDATASTRUCT* cds) {
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    auto pack = [](LONG v) -> LRESULT {
+      const USHORT s = static_cast<USHORT>(v);
+      return MAKELRESULT(s, s);
+    };
+    if (cds == nullptr || cds->lpData == nullptr || cds->cbData < sizeof(NotifyIconIdentifier)) {
+      return pack(cursor.x);
+    }
+    NotifyIconIdentifier id{};
+    memcpy(&id, cds->lpData, sizeof(id));
+    uint64_t key = 0;
+    if (!GuidEmpty(id.guid_item)) {
+      key = Fnv1a64(reinterpret_cast<const uint8_t*>(&id.guid_item), sizeof(GUID));
+    } else {
+      key = Fnv1a64(reinterpret_cast<const uint8_t*>(&id.window_handle), sizeof(id.window_handle));
+      key = Fnv1a64(reinterpret_cast<const uint8_t*>(&id.uid), sizeof(id.uid), key);
+    }
+    RECT rc{};
+    bool found = false;
+    {
+      std::lock_guard lock(mu_);
+      if (rect_lookup_) {
+        found = rect_lookup_(key, &rc);
+      }
+    }
+    LONG v = id.message == 2 ? cursor.y : cursor.x;
+    if (found) {
+      v = id.message == 2 ? (rc.top + rc.bottom) / 2 : (rc.left + rc.right) / 2;
+    }
+    return pack(v);
   }
 
   void ParseCopyData(COPYDATASTRUCT* cds) {
@@ -742,6 +859,7 @@ class TrayBackendIntercept final : public TrayBackend {
   int next_order_ = 0;
   std::vector<StoredIcon> items_;
   std::function<void()> on_change_;
+  std::function<bool(uint64_t, RECT*)> rect_lookup_;
 };
 
 }  // namespace

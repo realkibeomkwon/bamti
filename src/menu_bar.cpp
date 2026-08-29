@@ -226,6 +226,19 @@ bool MenuBar::Create(HINSTANCE instance) {
   if (!status_.StartAll()) {
     return false;
   }
+  tray_.SetRectLookup([this](uint64_t key, RECT* out) {
+    if (hwnd_ == nullptr || out == nullptr) {
+      return false;
+    }
+    for (const BarSegment& seg : layout_.last().segments) {
+      if (seg.kind == SegmentKind::kStatus && TrayMirror::ParseId(seg.id) == key) {
+        *out = seg.rect;
+        MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(out), 2);
+        return true;
+      }
+    }
+    return false;
+  });
   session_notify_ = WTSRegisterSessionNotification(hwnd_, NOTIFY_FOR_THIS_SESSION) != FALSE;
   display_notify_ = RegisterPowerSettingNotification(hwnd_, &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
   if (!status_popup_.Create(instance, hwnd_)) {
@@ -441,6 +454,15 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         if (hit->id.rfind("bamti.tray/", 0) == 0) {
           POINT screen = pt;
           ClientToScreen(hwnd_, &screen);
+          if (tray_.ForwardsContextMenu()) {
+            status_popup_.Close();
+            StatusEvent ev;
+            ev.id = hit->id;
+            ev.event = "click";
+            ev.button = "right";
+            status_.Dispatch(ev);
+            return 0;
+          }
           ShowTrayIconMenu(screen, hit->id);
           return 0;
         }
@@ -1163,6 +1185,7 @@ void MenuBar::ShowContextMenu(POINT screen) {
   AppendMenuW(menu, MF_STRING | (tray.tray_mirror ? MF_CHECKED : 0), kTrayMirrorToggleCmd, L"트레이 미러");
   AppendMenuW(menu, MF_STRING | (tray.tray_system_icons ? MF_CHECKED : 0), kTraySystemIconsCmd, L"시스템 아이콘도 표시");
   AppendMenuW(menu, MF_STRING | (tray.tray_overflow_icons ? MF_CHECKED : 0), kTrayOverflowIconsCmd, L"숨긴 아이콘도 표시");
+  AppendMenuW(menu, MF_STRING, kTrayPeekCmd, L"알림 영역 잠시 표시");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kExitCommand, L"종료");
   TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, screen.x, screen.y, hwnd_, nullptr);

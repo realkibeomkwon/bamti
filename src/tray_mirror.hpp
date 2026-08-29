@@ -5,6 +5,7 @@
 #include "tray_backend.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -30,6 +31,8 @@ class TrayMirror : public StatusSource {
   WidgetSettings settings() const;
   void SetSettings(const WidgetSettings& next);
   void OnExplorerRestart();
+  void SetRectLookup(std::function<bool(uint64_t key, RECT* screen)> lookup);
+  bool ForwardsContextMenu() const;
   static uint64_t ParseId(const std::string& id);
   static std::string KeyText(uint64_t key);
 
@@ -76,7 +79,9 @@ class TrayMirror : public StatusSource {
   int slow_streak_ = 0;
   ULONGLONG last_perf_log_ = 0;
   uint64_t pending_invoke_ = 0;
+  bool pending_right_ = false;
   std::unique_ptr<TrayBackend> intercept_;
+  std::function<bool(uint64_t, RECT*)> rect_lookup_;
 };
 
 }  // namespace bamti
