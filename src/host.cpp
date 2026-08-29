@@ -158,18 +158,42 @@ bool CommandLineHasProbeTray() {
   return probe;
 }
 
+bool CommandLineHasProbeTrayParked() {
+  int argc = 0;
+  LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  if (argv == nullptr) {
+    return false;
+  }
+  bool probe = false;
+  for (int i = 1; i < argc; ++i) {
+    if (lstrcmpiW(argv[i], L"--probe-tray-parked") == 0) {
+      probe = true;
+      break;
+    }
+  }
+  LocalFree(argv);
+  return probe;
+}
+
+int RunProbe(int (*fn)()) {
+  LogInit();
+  const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  const int code = fn();
+  if (SUCCEEDED(com)) {
+    CoUninitialize();
+  }
+  LogShutdown();
+  return code;
+}
+
 }  // namespace
 
 int Run(HINSTANCE instance) {
+  if (CommandLineHasProbeTrayParked()) {
+    return RunProbe(RunTrayProbeParked);
+  }
   if (CommandLineHasProbeTray()) {
-    LogInit();
-    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    const int code = RunTrayProbe();
-    if (SUCCEEDED(com)) {
-      CoUninitialize();
-    }
-    LogShutdown();
-    return code;
+    return RunProbe(RunTrayProbe);
   }
 
   const bool restore_taskbar = CommandLineHasRestoreTaskbar();

@@ -13,10 +13,12 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 #pragma comment(lib, "oleaut32")
@@ -1064,6 +1066,400 @@ void WriteCapture(Probe& probe, const std::wstring& png_path) {
   probe.report.Line(L"");
 }
 
+constexpr LONG kParkY = 32000;
+constexpr UINT kParkWaitMs = 3000;
+constexpr UINT kFlashPollMs = 16;
+constexpr UINT kFlashBurstMs = 250;
+constexpr wchar_t kBridgeClass[] = L"Windows.UI.Composition.DesktopWindowContentBridge";
+constexpr wchar_t kNotifyClass[] = L"TrayNotifyWnd";
+constexpr wchar_t kPrimaryTrayClass[] = L"Shell_TrayWnd";
+constexpr wchar_t kSecondaryTrayClass[] = L"Shell_SecondaryTrayWnd";
+
+struct SavedTray {
+  HWND hwnd = nullptr;
+  std::wstring cls;
+  RECT rc{};
+  bool visible = false;
+};
+
+struct ParkCapture {
+  HWND hwnd = nullptr;
+  std::wstring cls;
+  RECT rect{};
+  bool visible = false;
+  BOOL print_ok = FALSE;
+  bool timeout = false;
+  int w = 0;
+  int h = 0;
+  double non_black_pct = 0.0;
+  double alpha_nz_pct = 0.0;
+  std::vector<std::uint8_t> bits;
+  bool png_saved = false;
+  std::wstring png_path;
+};
+
+struct TrayButton {
+  std::wstring name;
+  std::wstring automation_id;
+  std::wstring class_name;
+  RECT screen{};
+  BOOL offscreen = FALSE;
+};
+
+struct ChannelStd {
+  bool in_bounds = false;
+  int pixels = 0;
+  double r = 0.0;
+  double g = 0.0;
+  double b = 0.0;
+  double Max() const { return (std::max)(r, (std::max)(g, b)); }
+};
+
+void EnumTrayWindows(const auto& fn) {
+  if (HWND primary = FindWindowW(kPrimaryTrayClass, nullptr)) {
+    fn(primary);
+  }
+  HWND secondary = nullptr;
+  while ((secondary = FindWindowExW(nullptr, secondary, kSecondaryTrayClass, nullptr)) != nullptr) {
+    fn(secondary);
+  }
+}
+
+HWND FindChildClass(HWND parent, const wchar_t* cls) {
+  if (parent == nullptr || cls == nullptr) {
+    return nullptr;
+  }
+  return FindWindowExW(parent, nullptr, cls, nullptr);
+}
+
+bool CaptureScreenRect(const RECT& rc, std::vector<std::uint8_t>* bits, int* w, int* h) {
+  if (bits == nullptr || w == nullptr || h == nullptr) {
+    return false;
+  }
+  const int width = rc.right - rc.left;
+  const int height = rc.bottom - rc.top;
+  if (width <= 0 || height <= 0) {
+    return false;
+  }
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = width;
+  bmi.bmiHeader.biHeight = -height;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  void* dib_bits = nullptr;
+  HBITMAP dib = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &dib_bits, nullptr, 0);
+  if (dib == nullptr || dib_bits == nullptr) {
+    if (dib != nullptr) {
+      DeleteObject(dib);
+    }
+    return false;
+  }
+  HDC mem = CreateCompatibleDC(nullptr);
+  if (mem == nullptr) {
+    DeleteObject(dib);
+    return false;
+  }
+  HGDIOBJ old = SelectObject(mem, dib);
+  HDC screen = GetDC(nullptr);
+  const BOOL ok = screen != nullptr && BitBlt(mem, 0, 0, width, height, screen, rc.left, rc.top, SRCCOPY) != FALSE;
+  if (screen != nullptr) {
+    ReleaseDC(nullptr, screen);
+  }
+  if (ok) {
+    const size_t n = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
+    bits->assign(static_cast<const std::uint8_t*>(dib_bits), static_cast<const std::uint8_t*>(dib_bits) + n);
+    *w = width;
+    *h = height;
+  }
+  SelectObject(mem, old);
+  DeleteDC(mem);
+  DeleteObject(dib);
+  return ok != FALSE;
+}
+
+double MeanAbsDiff(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b) {
+  const size_t n = (std::min)(a.size(), b.size());
+  if (n == 0) {
+    return 255.0;
+  }
+  double sum = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    sum += std::abs(static_cast<int>(a[i]) - static_cast<int>(b[i]));
+  }
+  return sum / static_cast<double>(n);
+}
+
+ParkCapture CaptureWindowBits(HWND hwnd, const std::wstring* png_path) {
+  ParkCapture cap;
+  cap.hwnd = hwnd;
+  cap.cls = ClassOf(hwnd);
+  cap.visible = hwnd != nullptr && IsWindowVisible(hwnd) != FALSE;
+  if (hwnd != nullptr) {
+    GetWindowRect(hwnd, &cap.rect);
+  }
+  cap.w = cap.rect.right - cap.rect.left;
+  cap.h = cap.rect.bottom - cap.rect.top;
+  if (hwnd == nullptr || cap.w <= 0 || cap.h <= 0) {
+    return cap;
+  }
+
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = cap.w;
+  bmi.bmiHeader.biHeight = -cap.h;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  void* bits = nullptr;
+  HBITMAP dib = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  if (dib == nullptr || bits == nullptr) {
+    if (dib != nullptr) {
+      DeleteObject(dib);
+    }
+    return cap;
+  }
+  HDC mem_dc = CreateCompatibleDC(nullptr);
+  if (mem_dc == nullptr) {
+    DeleteObject(dib);
+    return cap;
+  }
+  HGDIOBJ old = SelectObject(mem_dc, dib);
+
+  CaptureJob job;
+  job.hwnd = hwnd;
+  job.dc = mem_dc;
+  job.flags = kRenderFullContent;
+  Handle thread;
+  thread.value = CreateThread(nullptr, 0, CaptureThread, &job, 0, nullptr);
+  if (thread.value == nullptr) {
+    SelectObject(mem_dc, old);
+    DeleteDC(mem_dc);
+    DeleteObject(dib);
+    return cap;
+  }
+  if (WaitForSingleObject(thread.value, kCaptureMsMax) == WAIT_TIMEOUT) {
+    cap.timeout = true;
+    return cap;
+  }
+  cap.print_ok = job.ok;
+  const size_t n = static_cast<size_t>(cap.w) * static_cast<size_t>(cap.h);
+  cap.bits.assign(static_cast<const std::uint8_t*>(bits), static_cast<const std::uint8_t*>(bits) + n * 4);
+  size_t non_black = 0;
+  size_t alpha_nz = 0;
+  for (size_t i = 0; i < n; ++i) {
+    const std::uint8_t b = cap.bits[i * 4 + 0];
+    const std::uint8_t g = cap.bits[i * 4 + 1];
+    const std::uint8_t r = cap.bits[i * 4 + 2];
+    const std::uint8_t a = cap.bits[i * 4 + 3];
+    if (r != 0 || g != 0 || b != 0) {
+      ++non_black;
+    }
+    if (a != 0) {
+      ++alpha_nz;
+    }
+  }
+  cap.non_black_pct = n == 0 ? 0.0 : (100.0 * static_cast<double>(non_black) / static_cast<double>(n));
+  cap.alpha_nz_pct = n == 0 ? 0.0 : (100.0 * static_cast<double>(alpha_nz) / static_cast<double>(n));
+  if (png_path != nullptr) {
+    cap.png_path = *png_path;
+    DeleteFileW(png_path->c_str());
+    cap.png_saved = SavePng(*png_path, static_cast<UINT>(cap.w), static_cast<UINT>(cap.h), cap.bits.data());
+  }
+  SelectObject(mem_dc, old);
+  DeleteDC(mem_dc);
+  DeleteObject(dib);
+  return cap;
+}
+
+ChannelStd RectChannelStd(const ParkCapture& cap, const RECT& screen) {
+  ChannelStd out;
+  if (cap.w <= 0 || cap.h <= 0 || cap.bits.size() < static_cast<size_t>(cap.w) * static_cast<size_t>(cap.h) * 4) {
+    return out;
+  }
+  const int x0 = (std::max)(0, static_cast<int>(screen.left - cap.rect.left));
+  const int y0 = (std::max)(0, static_cast<int>(screen.top - cap.rect.top));
+  const int x1 = (std::min)(cap.w, static_cast<int>(screen.right - cap.rect.left));
+  const int y1 = (std::min)(cap.h, static_cast<int>(screen.bottom - cap.rect.top));
+  if (x1 <= x0 || y1 <= y0) {
+    return out;
+  }
+  out.in_bounds = true;
+  double sum_r = 0.0;
+  double sum_g = 0.0;
+  double sum_b = 0.0;
+  for (int y = y0; y < y1; ++y) {
+    for (int x = x0; x < x1; ++x) {
+      const size_t i = (static_cast<size_t>(y) * static_cast<size_t>(cap.w) + static_cast<size_t>(x)) * 4;
+      sum_b += cap.bits[i + 0];
+      sum_g += cap.bits[i + 1];
+      sum_r += cap.bits[i + 2];
+      ++out.pixels;
+    }
+  }
+  if (out.pixels == 0) {
+    return out;
+  }
+  const double n = static_cast<double>(out.pixels);
+  const double mean_r = sum_r / n;
+  const double mean_g = sum_g / n;
+  const double mean_b = sum_b / n;
+  double var_r = 0.0;
+  double var_g = 0.0;
+  double var_b = 0.0;
+  for (int y = y0; y < y1; ++y) {
+    for (int x = x0; x < x1; ++x) {
+      const size_t i = (static_cast<size_t>(y) * static_cast<size_t>(cap.w) + static_cast<size_t>(x)) * 4;
+      const double db = cap.bits[i + 0] - mean_b;
+      const double dg = cap.bits[i + 1] - mean_g;
+      const double dr = cap.bits[i + 2] - mean_r;
+      var_b += db * db;
+      var_g += dg * dg;
+      var_r += dr * dr;
+    }
+  }
+  out.r = std::sqrt(var_r / n);
+  out.g = std::sqrt(var_g / n);
+  out.b = std::sqrt(var_b / n);
+  return out;
+}
+
+Microsoft::WRL::ComPtr<IUIAutomationCondition> MakeTrayButtonCondition(IUIAutomation* uia) {
+  Microsoft::WRL::ComPtr<IUIAutomationCondition> empty;
+  if (uia == nullptr) {
+    return empty;
+  }
+  VARIANT vn;
+  VariantInit(&vn);
+  vn.vt = VT_BSTR;
+  vn.bstrVal = SysAllocString(L"NotifyItemIcon");
+  Microsoft::WRL::ComPtr<IUIAutomationCondition> id_notify;
+  const HRESULT nhr = uia->CreatePropertyCondition(UIA_AutomationIdPropertyId, vn, id_notify.GetAddressOf());
+  VariantClear(&vn);
+  if (FAILED(nhr) || id_notify == nullptr) {
+    return empty;
+  }
+
+  VARIANT vs;
+  VariantInit(&vs);
+  vs.vt = VT_BSTR;
+  vs.bstrVal = SysAllocString(L"SystemTrayIcon");
+  Microsoft::WRL::ComPtr<IUIAutomationCondition> id_system;
+  const HRESULT shr = uia->CreatePropertyCondition(UIA_AutomationIdPropertyId, vs, id_system.GetAddressOf());
+  VariantClear(&vs);
+  if (FAILED(shr) || id_system == nullptr) {
+    return empty;
+  }
+
+  VARIANT vt;
+  VariantInit(&vt);
+  vt.vt = VT_I4;
+  vt.lVal = UIA_ButtonControlTypeId;
+  Microsoft::WRL::ComPtr<IUIAutomationCondition> type_btn;
+  const HRESULT thr = uia->CreatePropertyCondition(UIA_ControlTypePropertyId, vt, type_btn.GetAddressOf());
+  VariantClear(&vt);
+  if (FAILED(thr) || type_btn == nullptr) {
+    return empty;
+  }
+
+  Microsoft::WRL::ComPtr<IUIAutomationCondition> id_or;
+  if (FAILED(uia->CreateOrCondition(id_notify.Get(), id_system.Get(), id_or.GetAddressOf())) || id_or == nullptr) {
+    return empty;
+  }
+  Microsoft::WRL::ComPtr<IUIAutomationCondition> cond;
+  if (FAILED(uia->CreateAndCondition(id_or.Get(), type_btn.Get(), cond.GetAddressOf()))) {
+    return empty;
+  }
+  return cond;
+}
+
+void CollectButtonsFrom(IUIAutomation* uia, IUIAutomationCondition* cond, HWND hwnd, std::vector<TrayButton>* out) {
+  if (uia == nullptr || cond == nullptr || hwnd == nullptr || out == nullptr) {
+    return;
+  }
+  Microsoft::WRL::ComPtr<IUIAutomationElement> root;
+  if (FAILED(uia->ElementFromHandle(hwnd, root.GetAddressOf())) || root == nullptr) {
+    return;
+  }
+  Microsoft::WRL::ComPtr<IUIAutomationElementArray> arr;
+  if (FAILED(root->FindAll(TreeScope_Descendants, cond, arr.GetAddressOf())) || arr == nullptr) {
+    return;
+  }
+  int n = 0;
+  arr->get_Length(&n);
+  for (int i = 0; i < n; ++i) {
+    Microsoft::WRL::ComPtr<IUIAutomationElement> el;
+    if (FAILED(arr->GetElement(i, el.GetAddressOf())) || el == nullptr) {
+      continue;
+    }
+    TrayButton btn;
+    btn.name = ElementBstr(el.Get(), &IUIAutomationElement::get_CurrentName);
+    btn.automation_id = ElementBstr(el.Get(), &IUIAutomationElement::get_CurrentAutomationId);
+    btn.class_name = ElementBstr(el.Get(), &IUIAutomationElement::get_CurrentClassName);
+    el->get_CurrentBoundingRectangle(&btn.screen);
+    el->get_CurrentIsOffscreen(&btn.offscreen);
+    out->push_back(std::move(btn));
+  }
+}
+
+void DedupButtons(std::vector<TrayButton>* buttons) {
+  if (buttons == nullptr) {
+    return;
+  }
+  std::sort(buttons->begin(), buttons->end(), [](const TrayButton& a, const TrayButton& b) {
+    if (a.screen.left != b.screen.left) {
+      return a.screen.left < b.screen.left;
+    }
+    return a.name < b.name;
+  });
+  std::vector<TrayButton> unique;
+  unique.reserve(buttons->size());
+  for (const TrayButton& btn : *buttons) {
+    bool seen = false;
+    for (const TrayButton& have : unique) {
+      if (have.screen.left == btn.screen.left && have.screen.top == btn.screen.top &&
+          have.screen.right == btn.screen.right && have.screen.bottom == btn.screen.bottom &&
+          have.automation_id == btn.automation_id) {
+        seen = true;
+        break;
+      }
+    }
+    if (!seen) {
+      unique.push_back(btn);
+    }
+  }
+  *buttons = std::move(unique);
+}
+
+void RestoreSavedTrays(const std::vector<SavedTray>& saved) {
+  for (const SavedTray& item : saved) {
+    if (item.hwnd == nullptr || IsWindow(item.hwnd) == FALSE) {
+      continue;
+    }
+    SetWindowPos(item.hwnd, nullptr, item.rc.left, item.rc.top, item.rc.right - item.rc.left,
+                 item.rc.bottom - item.rc.top, SWP_NOZORDER | SWP_NOACTIVATE);
+    if (item.visible) {
+      ShowWindow(item.hwnd, SW_SHOWNA);
+    }
+  }
+}
+
+struct ParkGuard {
+  std::vector<SavedTray> saved;
+  bool restored = false;
+
+  void Restore() {
+    if (restored) {
+      return;
+    }
+    restored = true;
+    RestoreSavedTrays(saved);
+  }
+
+  ~ParkGuard() { Restore(); }
+};
+
 void PrintSummary(const Probe& probe, const std::wstring& report_path, ULONGLONG elapsed_ms) {
   wprintf(L"os=%s elevated=%s %s\n", probe.os_line.c_str(), YesNo(probe.elevated), probe.wow_line.c_str());
   wprintf(L"bamti_resident=%s\n", YesNo(probe.bamti_resident));
@@ -1119,6 +1515,286 @@ int RunTrayProbe() {
 
   Log(L"probe", L"tray probe done elapsed_ms=%llu report=%s", elapsed, report_path.c_str());
   PrintSummary(probe, report_path, elapsed);
+  return 0;
+}
+
+int RunTrayProbeParked() {
+  const ULONGLONG t0 = GetTickCount64();
+  AttachParentConsole();
+  Log(L"probe", L"tray parked probe start");
+
+  const std::wstring dir = DataDir();
+  if (dir.empty()) {
+    Log(L"probe", L"DataDir empty");
+    return 1;
+  }
+  const std::wstring report_path = JoinPath(dir, L"probe-tray-parked.txt");
+  const std::wstring bridge_png = JoinPath(dir, L"probe-parked-bridge.png");
+  const std::wstring notify_png = JoinPath(dir, L"probe-parked-notify.png");
+
+  Report report;
+
+  Probe env_probe;
+  WriteEnv(env_probe);
+  report.text += env_probe.report.text;
+
+  ParkGuard guard;
+  EnumTrayWindows([&](HWND hwnd) {
+    SavedTray item;
+    item.hwnd = hwnd;
+    item.cls = ClassOf(hwnd);
+    item.visible = IsWindowVisible(hwnd) != FALSE;
+    GetWindowRect(hwnd, &item.rc);
+    guard.saved.push_back(item);
+  });
+
+  report.Line(L"## 2. 주차 전 상태");
+  if (guard.saved.empty()) {
+    report.Line(L"Shell_TrayWnd: 없음");
+  }
+  RECT original_edge{};
+  bool have_edge = false;
+  for (const SavedTray& item : guard.saved) {
+    report.Line(L"hwnd=0x%llX class=%s visible=%s rect(%ld,%ld,%ld,%ld)", HwndU64(item.hwnd), item.cls.c_str(),
+                YesNo(item.visible), item.rc.left, item.rc.top, item.rc.right, item.rc.bottom);
+    if (!have_edge && item.cls == kPrimaryTrayClass) {
+      original_edge = item.rc;
+      have_edge = true;
+    }
+  }
+  report.Line(L"");
+
+  std::vector<std::uint8_t> edge_before;
+  int edge_w = 0;
+  int edge_h = 0;
+  bool edge_before_ok = false;
+  if (have_edge && original_edge.top < kParkY / 2) {
+    edge_before_ok = CaptureScreenRect(original_edge, &edge_before, &edge_w, &edge_h);
+  }
+  report.Line(L"## 3. 주차");
+  report.Line(L"mode=SetWindowPos y=%ld ShowWindow=no", kParkY);
+  bool park_ok = true;
+  for (const SavedTray& item : guard.saved) {
+    const BOOL pos = SetWindowPos(item.hwnd, nullptr, item.rc.left, kParkY, 0, 0,
+                                  SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
+    RECT now{};
+    GetWindowRect(item.hwnd, &now);
+    report.Line(L"hwnd=0x%llX SetWindowPos=%s now_rect(%ld,%ld,%ld,%ld) visible=%s", HwndU64(item.hwnd),
+                YesNo(pos != FALSE), now.left, now.top, now.right, now.bottom,
+                YesNo(IsWindowVisible(item.hwnd) != FALSE));
+    if (pos == FALSE || now.top < kParkY / 2) {
+      park_ok = false;
+    }
+  }
+
+  int flash_hits = 0;
+  int flash_samples = 0;
+  double max_edge_diff = 0.0;
+  const ULONGLONG park_start = GetTickCount64();
+  while (GetTickCount64() - park_start < kParkWaitMs) {
+    ++flash_samples;
+    bool at_edge = false;
+    EnumTrayWindows([&](HWND hwnd) {
+      RECT rc{};
+      if (GetWindowRect(hwnd, &rc) != FALSE && rc.top < kParkY / 2) {
+        at_edge = true;
+      }
+    });
+    if (have_edge && original_edge.top < kParkY / 2) {
+      std::vector<std::uint8_t> edge_now;
+      int w = 0;
+      int h = 0;
+      if (edge_before_ok && CaptureScreenRect(original_edge, &edge_now, &w, &h)) {
+        const double diff = MeanAbsDiff(edge_before, edge_now);
+        if (diff > max_edge_diff) {
+          max_edge_diff = diff;
+        }
+        // 원래 태스크바 픽셀과 거의 같으면 가장자리에 아직 남아 있다.
+        if (diff < 6.0) {
+          at_edge = true;
+        }
+      }
+    }
+    if (at_edge) {
+      ++flash_hits;
+    }
+    const UINT sleep_ms = (GetTickCount64() - park_start < kFlashBurstMs) ? kFlashPollMs : 50;
+    Sleep(sleep_ms);
+  }
+  const bool flashed = flash_hits > 0;
+  report.Line(L"wait_ms=%u flash_samples=%d flash_hits=%d edge_mean_abs_diff_max=%.2f flashed=%s", kParkWaitMs,
+              flash_samples, flash_hits, max_edge_diff, YesNo(flashed));
+  report.Line(L"park_ok=%s", YesNo(park_ok));
+  report.Line(L"");
+
+  HWND tray = FindWindowW(kPrimaryTrayClass, nullptr);
+  HWND bridge = FindChildClass(tray, kBridgeClass);
+  HWND notify = FindChildClass(tray, kNotifyClass);
+  report.Line(L"## 4. 주차 후 대상 창");
+  auto dump_hwnd = [&](const wchar_t* label, HWND hwnd) {
+    if (hwnd == nullptr) {
+      report.Line(L"%s: 없음", label);
+      return;
+    }
+    RECT rc{};
+    GetWindowRect(hwnd, &rc);
+    report.Line(L"%s hwnd=0x%llX class=%s visible=%s rect(%ld,%ld,%ld,%ld)", label, HwndU64(hwnd), ClassOf(hwnd).c_str(),
+                YesNo(IsWindowVisible(hwnd) != FALSE), rc.left, rc.top, rc.right, rc.bottom);
+  };
+  dump_hwnd(L"Shell_TrayWnd", tray);
+  dump_hwnd(L"DesktopWindowContentBridge", bridge);
+  dump_hwnd(L"TrayNotifyWnd", notify);
+  report.Line(L"");
+
+  report.Line(L"## 5. UI Automation 알림 영역 버튼");
+  std::vector<TrayButton> buttons;
+  Microsoft::WRL::ComPtr<IUIAutomation> uia;
+  const HRESULT created =
+      CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(uia.GetAddressOf()));
+  if (FAILED(created) || uia == nullptr) {
+    report.Line(L"CoCreateInstance(CLSID_CUIAutomation) hr=0x%08X", static_cast<unsigned>(created));
+  } else {
+    Microsoft::WRL::ComPtr<IUIAutomationCondition> cond = MakeTrayButtonCondition(uia.Get());
+    if (cond == nullptr) {
+      report.Line(L"CreatePropertyCondition 실패");
+    } else {
+      const ULONGLONG uia_t0 = GetTickCount64();
+      CollectButtonsFrom(uia.Get(), cond.Get(), bridge != nullptr ? bridge : tray, &buttons);
+      if (buttons.empty() && tray != nullptr && bridge != nullptr) {
+        CollectButtonsFrom(uia.Get(), cond.Get(), tray, &buttons);
+      }
+      DedupButtons(&buttons);
+      report.Line(L"elapsed_ms=%llu count=%llu", GetTickCount64() - uia_t0,
+                  static_cast<unsigned long long>(buttons.size()));
+      report.Line(L"형식: order  name  AutomationId  ClassName  BoundingRectangle  IsOffscreen");
+      int order = 0;
+      for (const TrayButton& btn : buttons) {
+        report.Line(L"%d  %s  %s  %s  rect(%ld,%ld,%ld,%ld)  %s", order, Quoted(btn.name).c_str(),
+                    Quoted(btn.automation_id).c_str(), Quoted(btn.class_name).c_str(), btn.screen.left, btn.screen.top,
+                    btn.screen.right, btn.screen.bottom, YesNo(btn.offscreen != FALSE));
+        ++order;
+      }
+    }
+  }
+  report.Line(L"");
+
+  report.Line(L"## 6. PrintWindow");
+  const ParkCapture bridge_cap = CaptureWindowBits(bridge, &bridge_png);
+  const ParkCapture notify_cap = CaptureWindowBits(notify, &notify_png);
+  auto dump_cap = [&](const wchar_t* label, const ParkCapture& cap) {
+    report.Line(L"%s hwnd=0x%llX class=%s visible=%s rect(%ld,%ld,%ld,%ld)", label, HwndU64(cap.hwnd), cap.cls.c_str(),
+                YesNo(cap.visible), cap.rect.left, cap.rect.top, cap.rect.right, cap.rect.bottom);
+    report.Line(L"  PrintWindow=%s timeout=%s flags=0x%X size=%dx%d", YesNo(cap.print_ok != FALSE),
+                YesNo(cap.timeout), kRenderFullContent, cap.w, cap.h);
+    report.Line(L"  non_black_pct=%.2f alpha_nz_pct=%.2f pixels=%llu", cap.non_black_pct, cap.alpha_nz_pct,
+                static_cast<unsigned long long>(cap.bits.size() / 4));
+    if (!cap.png_path.empty()) {
+      report.Line(L"  png=%s saved=%s", cap.png_path.c_str(), YesNo(cap.png_saved));
+    }
+  };
+  dump_cap(L"bridge", bridge_cap);
+  dump_cap(L"notify", notify_cap);
+  report.Line(L"");
+
+  report.Line(L"## 7. 아이콘 사각형 표준편차");
+  report.Line(L"형식: order  name  bridge(in,px,std_r,std_g,std_b,std_max)  notify(...)");
+  int bridge_pass = 0;
+  int notify_pass = 0;
+  int considered = 0;
+  double bridge_sum = 0.0;
+  double notify_sum = 0.0;
+  int order = 0;
+  for (const TrayButton& btn : buttons) {
+    const ChannelStd bs = RectChannelStd(bridge_cap, btn.screen);
+    const ChannelStd ns = RectChannelStd(notify_cap, btn.screen);
+    report.Line(L"%d  %s  bridge(%s,%d,%.2f,%.2f,%.2f,%.2f)  notify(%s,%d,%.2f,%.2f,%.2f,%.2f)", order,
+                Quoted(btn.name).c_str(), YesNo(bs.in_bounds), bs.pixels, bs.r, bs.g, bs.b, bs.Max(),
+                YesNo(ns.in_bounds), ns.pixels, ns.r, ns.g, ns.b, ns.Max());
+    if (bs.in_bounds || ns.in_bounds) {
+      ++considered;
+      if (bs.in_bounds) {
+        bridge_sum += bs.Max();
+        if (bs.Max() >= 8.0) {
+          ++bridge_pass;
+        }
+      }
+      if (ns.in_bounds) {
+        notify_sum += ns.Max();
+        if (ns.Max() >= 8.0) {
+          ++notify_pass;
+        }
+      }
+    }
+    ++order;
+  }
+  const int half = considered / 2;
+  const bool capture_ok = considered > 0 && ((bridge_pass > half) || (notify_pass > half));
+  const wchar_t* target = L"none";
+  if (capture_ok) {
+    if (bridge_pass > half && notify_pass > half) {
+      target = bridge_sum >= notify_sum ? L"DesktopWindowContentBridge" : L"TrayNotifyWnd";
+    } else if (bridge_pass > half) {
+      target = L"DesktopWindowContentBridge";
+    } else {
+      target = L"TrayNotifyWnd";
+    }
+  }
+  report.Line(L"considered=%d half=%d bridge_pass=%d notify_pass=%d", considered, half, bridge_pass, notify_pass);
+  report.Line(L"capture_path=%s target=%s", YesNo(capture_ok), target);
+  report.Line(L"");
+
+  report.Line(L"## 8. 복귀");
+  guard.Restore();
+  bool restore_ok = true;
+  EnumTrayWindows([&](HWND hwnd) {
+    RECT rc{};
+    GetWindowRect(hwnd, &rc);
+    const bool visible = IsWindowVisible(hwnd) != FALSE;
+    bool matched = false;
+    for (const SavedTray& item : guard.saved) {
+      if (item.hwnd == hwnd) {
+        matched = true;
+        const bool pos_ok = std::abs(rc.top - item.rc.top) < 8;
+        report.Line(L"hwnd=0x%llX visible=%s rect(%ld,%ld,%ld,%ld) pos_ok=%s orig_visible=%s", HwndU64(hwnd),
+                    YesNo(visible), rc.left, rc.top, rc.right, rc.bottom, YesNo(pos_ok), YesNo(item.visible));
+        if (!pos_ok) {
+          restore_ok = false;
+        }
+      }
+    }
+    if (!matched) {
+      report.Line(L"hwnd=0x%llX 복귀 대상 아님 rect(%ld,%ld,%ld,%ld)", HwndU64(hwnd), rc.left, rc.top, rc.right,
+                  rc.bottom);
+    }
+  });
+  report.Line(L"restore_ok=%s flashed_during_park=%s", YesNo(restore_ok), YesNo(flashed));
+
+  const ULONGLONG elapsed = GetTickCount64() - t0;
+  report.Line(L"");
+  report.Line(L"handles_end=%lu", HandleCount());
+  report.Line(L"elapsed_ms=%llu", elapsed);
+
+  DeleteFileW(report_path.c_str());
+  FILE* file = nullptr;
+  if (_wfopen_s(&file, report_path.c_str(), L"w, ccs=UTF-8") != 0 || file == nullptr) {
+    Log(L"probe", L"parked report open fail path=%s", report_path.c_str());
+    wprintf(L"report open fail %s\n", report_path.c_str());
+    return 1;
+  }
+  fputws(report.text.c_str(), file);
+  fclose(file);
+
+  wprintf(L"bamti_resident=%s park_ok=%s restore_ok=%s flashed=%s\n", YesNo(env_probe.bamti_resident), YesNo(park_ok),
+          YesNo(restore_ok), YesNo(flashed));
+  wprintf(L"buttons=%llu capture_path=%s target=%s\n", static_cast<unsigned long long>(buttons.size()),
+          YesNo(capture_ok), target);
+  wprintf(L"bridge PrintWindow=%s size=%dx%d non_black=%.2f%%\n", YesNo(bridge_cap.print_ok != FALSE), bridge_cap.w,
+          bridge_cap.h, bridge_cap.non_black_pct);
+  wprintf(L"notify PrintWindow=%s size=%dx%d non_black=%.2f%%\n", YesNo(notify_cap.print_ok != FALSE), notify_cap.w,
+          notify_cap.h, notify_cap.non_black_pct);
+  wprintf(L"%s\n", report_path.c_str());
+  Log(L"probe", L"tray parked probe done elapsed_ms=%llu report=%s capture=%s target=%s", elapsed, report_path.c_str(),
+      YesNo(capture_ok), target);
   return 0;
 }
 
