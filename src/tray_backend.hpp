@@ -20,6 +20,11 @@ struct TrayIconInfo {
   bool has_image_child = false;
   bool from_overflow = false;
   BOOL offscreen = FALSE;
+  std::vector<uint8_t> png;
+  HWND owner = nullptr;
+  UINT uid = 0;
+  UINT callback_message = 0;
+  UINT version = 0;
 };
 
 class TrayBackend {

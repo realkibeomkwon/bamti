@@ -378,10 +378,15 @@ void TrayMirror::Publish(const TrayIconInfo& icon, int order) {
   StatusItem item;
   item.id = MakeId(icon.key);
   item.source = "tray";
-  item.icon.kind = IconKind::kGlyph;
-  item.icon.glyph = FirstGlyph(icon.tip);
-  if (item.icon.glyph.size() > kStatusGlyphMaxChars) {
-    item.icon.glyph.resize(kStatusGlyphMaxChars);
+  if (!icon.png.empty()) {
+    item.icon.kind = IconKind::kPng;
+    item.icon.bytes = icon.png;
+  } else {
+    item.icon.kind = IconKind::kGlyph;
+    item.icon.glyph = FirstGlyph(icon.tip);
+    if (item.icon.glyph.size() > kStatusGlyphMaxChars) {
+      item.icon.glyph.resize(kStatusGlyphMaxChars);
+    }
   }
   item.icon.cache_key = HashStatusIcon(item.icon);
   item.tooltip = Truncate(icon.tip, kStatusPanelTextMaxChars);
@@ -399,6 +404,7 @@ void TrayMirror::Publish(const TrayIconInfo& icon, int order) {
     st.tip = icon.tip;
     st.order = order;
     st.visible = item.visible;
+    st.icon_hash = item.icon.cache_key;
     st.id = item.id;
     items_[icon.key] = std::move(st);
   }
@@ -469,6 +475,7 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
     st.tip = copy.tip;
     st.order = copy.order;
     st.visible = copy.from_overflow ? true : (copy.offscreen == FALSE);
+    st.icon_hash = copy.png.empty() ? 0 : Fnv1a64(copy.png.data(), copy.png.size());
     st.id = MakeId(copy.key);
     next.push_back(st);
     keep.push_back(std::move(copy));
@@ -485,7 +492,7 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
     for (const ItemState& st : next) {
       const auto it = prev.find(st.key);
       if (it == prev.end() || it->second.tip != st.tip || it->second.order != st.order ||
-          it->second.visible != st.visible) {
+          it->second.visible != st.visible || it->second.icon_hash != st.icon_hash) {
         same = false;
         break;
       }
@@ -515,8 +522,9 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
     for (const TrayIconInfo& icon : keep) {
       const auto it = prev.find(icon.key);
       const bool vis = icon.from_overflow ? true : (icon.offscreen == FALSE);
+      const uint64_t icon_hash = icon.png.empty() ? 0 : Fnv1a64(icon.png.data(), icon.png.size());
       if (it == prev.end() || it->second.tip != icon.tip || it->second.order != icon.order ||
-          it->second.visible != vis) {
+          it->second.visible != vis || it->second.icon_hash != icon_hash) {
         if (it == prev.end()) {
           ++added;
         }
@@ -588,12 +596,27 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
 
 void TrayMirror::WorkerLoop() {
   const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  auto backend = MakeUiaTrayBackend();
+  std::unique_ptr<TrayBackend> owned;
+  TrayBackend* backend = intercept_.get();
+  if (backend == nullptr) {
+    owned = MakeUiaTrayBackend();
+    backend = owned.get();
+  } else {
+    backend->SetChangeSink([this] {
+      if (wake_event_ != nullptr) {
+        SetEvent(wake_event_);
+      }
+    });
+  }
   const bool probed = backend != nullptr && backend->Probe();
+  const bool intercept = intercept_ != nullptr && backend == intercept_.get();
   bool events_abandoned = false;
   bool events_live = false;
-  if (backend != nullptr && !events_abandoned) {
+  if (backend != nullptr && !events_abandoned && !intercept) {
     events_live = backend->SubscribeStructureChanged(struct_event_);
+  }
+  if (intercept) {
+    events_live = true;
   }
   Log(L"tray",
       L"backend=%hs capture=no hide_mode=hidden right_click=bamti_menu overflow=mirrored "
@@ -632,16 +655,20 @@ void TrayMirror::WorkerLoop() {
     }
     if (reset && backend != nullptr) {
       backend->Reset();
-      events_live = false;
-      if (!events_abandoned) {
-        events_live = backend->SubscribeStructureChanged(struct_event_);
+      if (intercept) {
+        events_live = true;
+      } else {
+        events_live = false;
+        if (!events_abandoned) {
+          events_live = backend->SubscribeStructureChanged(struct_event_);
+        }
       }
     }
     if (have_invoke) {
-      DrainInvoke(backend.get());
+      DrainInvoke(backend);
     }
     if (active && backend != nullptr && run_enum) {
-      DoRound(backend.get(), events_live);
+      DoRound(backend, events_live);
       last_enum = GetTickCount64();
       run_enum = false;
       struct_pending = false;
@@ -756,8 +783,8 @@ void TrayMirror::WorkerLoop() {
 
   if (backend != nullptr) {
     backend->UnsubscribeStructureChanged();
-    backend.reset();
   }
+  owned.reset();
   if (timer != nullptr) {
     CloseHandle(timer);
   }

@@ -39,6 +39,7 @@ class TrayMirror : public StatusSource {
     std::wstring tip;
     int order = 0;
     bool visible = true;
+    uint64_t icon_hash = 0;
     std::string id;
   };
 
