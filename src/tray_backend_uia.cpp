@@ -286,17 +286,6 @@ class TrayBackendUia final : public TrayBackend {
       return false;
     }
 
-    VARIANT vi;
-    VariantInit(&vi);
-    vi.vt = VT_I4;
-    vi.lVal = UIA_ImageControlTypeId;
-    Microsoft::WRL::ComPtr<IUIAutomationCondition> type_img;
-    hr = uia_->CreatePropertyCondition(UIA_ControlTypePropertyId, vi, type_img.GetAddressOf());
-    VariantClear(&vi);
-    if (FAILED(hr) || type_img == nullptr) {
-      return false;
-    }
-
     if (FAILED(uia_->CreateCacheRequest(cache_.GetAddressOf())) || cache_ == nullptr) {
       return false;
     }
@@ -306,9 +295,10 @@ class TrayBackendUia final : public TrayBackend {
     cache_->AddProperty(UIA_BoundingRectanglePropertyId);
     cache_->AddProperty(UIA_IsOffscreenPropertyId);
     cache_->AddProperty(UIA_RuntimeIdPropertyId);
+    cache_->AddProperty(UIA_ControlTypePropertyId);
     cache_->AddPattern(UIA_InvokePatternId);
+    // Image-only TreeFilter는 FindAllBuildCache 결과에서 버튼 자체를 빼 캐시가 비었다.
     cache_->put_TreeScope(static_cast<TreeScope>(TreeScope_Element | TreeScope_Children));
-    cache_->put_TreeFilter(type_img.Get());
     return true;
   }
 
@@ -327,10 +317,25 @@ class TrayBackendUia final : public TrayBackend {
     out->system_icon = out->automation_id == L"SystemTrayIcon";
     out->has_image_child = true;
     Microsoft::WRL::ComPtr<IUIAutomationElementArray> kids;
-    if (SUCCEEDED(el->GetCachedChildren(kids.GetAddressOf())) && kids != nullptr) {
+    const HRESULT kids_hr = el->GetCachedChildren(kids.GetAddressOf());
+    if (SUCCEEDED(kids_hr)) {
+      out->has_image_child = false;
       int kn = 0;
-      kids->get_Length(&kn);
-      out->has_image_child = kn > 0;
+      if (kids != nullptr) {
+        kids->get_Length(&kn);
+      }
+      for (int i = 0; i < kn; ++i) {
+        Microsoft::WRL::ComPtr<IUIAutomationElement> kid;
+        if (FAILED(kids->GetElement(i, kid.GetAddressOf())) || kid == nullptr) {
+          continue;
+        }
+        CONTROLTYPEID type = 0;
+        kid->get_CachedControlType(&type);
+        if (type == UIA_ImageControlTypeId) {
+          out->has_image_child = true;
+          break;
+        }
+      }
     }
     VARIANT rid;
     VariantInit(&rid);
