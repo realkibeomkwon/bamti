@@ -35,6 +35,8 @@ constexpr UINT kWidgetBatteryCmd = 10;
 constexpr UINT kWidgetCpuCmd = 11;
 constexpr UINT kWidgetNetworkCmd = 12;
 constexpr UINT kWidgetBoardCmd = 13;
+constexpr UINT kTrayMirrorToggleCmd = 14;
+constexpr UINT kTraySystemIconsCmd = 15;
 constexpr UINT kTrayPeekCmd = 20;
 constexpr UINT kTrayHideIconCmd = 21;
 constexpr UINT kTrayMirrorOffCmd = 22;
@@ -494,6 +496,19 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           next.network = !next.network;
         } else {
           next.widget_board = !next.widget_board;
+        }
+        ApplySettings(next);
+      }
+      if (cmd == kTrayMirrorToggleCmd || cmd == kTraySystemIconsCmd) {
+        WidgetSettings next = widgets_.settings();
+        const WidgetSettings tray = tray_.settings();
+        next.tray_mirror = tray.tray_mirror;
+        next.tray_system_icons = tray.tray_system_icons;
+        next.tray_hidden_keys = tray.tray_hidden_keys;
+        if (cmd == kTrayMirrorToggleCmd) {
+          next.tray_mirror = !next.tray_mirror;
+        } else {
+          next.tray_system_icons = !next.tray_system_icons;
         }
         ApplySettings(next);
       }
@@ -1136,6 +1151,9 @@ void MenuBar::ShowContextMenu(POINT screen) {
   AppendMenuW(menu, MF_STRING | (s.cpu ? MF_CHECKED : 0), kWidgetCpuCmd, L"CPU");
   AppendMenuW(menu, MF_STRING | (s.network ? MF_CHECKED : 0), kWidgetNetworkCmd, L"네트워크");
   AppendMenuW(menu, MF_STRING | (s.widget_board ? MF_CHECKED : 0), kWidgetBoardCmd, L"위젯 보드 단추");
+  const WidgetSettings tray = tray_.settings();
+  AppendMenuW(menu, MF_STRING | (tray.tray_mirror ? MF_CHECKED : 0), kTrayMirrorToggleCmd, L"트레이 미러");
+  AppendMenuW(menu, MF_STRING | (tray.tray_system_icons ? MF_CHECKED : 0), kTraySystemIconsCmd, L"시스템 아이콘도 표시");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kExitCommand, L"종료");
   TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, screen.x, screen.y, hwnd_, nullptr);
