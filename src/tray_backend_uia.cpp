@@ -286,6 +286,17 @@ class TrayBackendUia final : public TrayBackend {
       return false;
     }
 
+    VARIANT vi;
+    VariantInit(&vi);
+    vi.vt = VT_I4;
+    vi.lVal = UIA_ImageControlTypeId;
+    Microsoft::WRL::ComPtr<IUIAutomationCondition> type_img;
+    hr = uia_->CreatePropertyCondition(UIA_ControlTypePropertyId, vi, type_img.GetAddressOf());
+    VariantClear(&vi);
+    if (FAILED(hr) || type_img == nullptr) {
+      return false;
+    }
+
     if (FAILED(uia_->CreateCacheRequest(cache_.GetAddressOf())) || cache_ == nullptr) {
       return false;
     }
@@ -296,7 +307,8 @@ class TrayBackendUia final : public TrayBackend {
     cache_->AddProperty(UIA_IsOffscreenPropertyId);
     cache_->AddProperty(UIA_RuntimeIdPropertyId);
     cache_->AddPattern(UIA_InvokePatternId);
-    cache_->put_TreeScope(TreeScope_Element);
+    cache_->put_TreeScope(static_cast<TreeScope>(TreeScope_Element | TreeScope_Children));
+    cache_->put_TreeFilter(type_img.Get());
     return true;
   }
 
@@ -314,6 +326,12 @@ class TrayBackendUia final : public TrayBackend {
     el->get_CachedIsOffscreen(&out->offscreen);
     out->system_icon = out->automation_id == L"SystemTrayIcon";
     out->has_image_child = true;
+    Microsoft::WRL::ComPtr<IUIAutomationElementArray> kids;
+    if (SUCCEEDED(el->GetCachedChildren(kids.GetAddressOf())) && kids != nullptr) {
+      int kn = 0;
+      kids->get_Length(&kn);
+      out->has_image_child = kn > 0;
+    }
     VARIANT rid;
     VariantInit(&rid);
     if (SUCCEEDED(el->GetCachedPropertyValue(UIA_RuntimeIdPropertyId, &rid))) {

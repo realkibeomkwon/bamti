@@ -45,8 +45,9 @@ UINT ClampInterval(ULONGLONG enum_ms) {
 }
 
 int OverflowOrder(const std::vector<TrayIconInfo>& icons) {
+  // 오버플로 단추는 가장 왼쪽 SystemTrayIcon 중 자식 Image가 없는 버튼이다.
   for (const TrayIconInfo& icon : icons) {
-    if (icon.system_icon) {
+    if (icon.system_icon && !icon.has_image_child) {
       return icon.order;
     }
   }
