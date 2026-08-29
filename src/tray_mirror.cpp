@@ -407,9 +407,6 @@ void TrayMirror::DoRound(TrayBackend* backend) {
   next.reserve(raw.size());
   keep.reserve(raw.size());
   for (const TrayIconInfo& icon : raw) {
-    if (!Include(icon, overflow, settings)) {
-      continue;
-    }
     TrayIconInfo copy = icon;
     if (!use_runtime) {
       copy.key = 0;
@@ -421,6 +418,9 @@ void TrayMirror::DoRound(TrayBackend* backend) {
       hash = Fnv1a64(reinterpret_cast<const uint8_t*>(cls.data()), cls.size(), hash);
       const int32_t ord = copy.order;
       copy.key = Fnv1a64(reinterpret_cast<const uint8_t*>(&ord), sizeof(ord), hash);
+    }
+    if (!Include(copy, overflow, settings)) {
+      continue;
     }
     ItemState st;
     st.key = copy.key;
