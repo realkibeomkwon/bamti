@@ -316,6 +316,8 @@ class TrayBackendIntercept final : public TrayBackend {
 
   bool ForwardsContextMenu() const override { return true; }
 
+  bool ParseLive() const override { return parse_enabled_; }
+
   void SetRectLookup(std::function<bool(uint64_t key, RECT* screen)> lookup) override {
     std::lock_guard lock(mu_);
     rect_lookup_ = std::move(lookup);

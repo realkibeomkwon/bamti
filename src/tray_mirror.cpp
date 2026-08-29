@@ -108,7 +108,12 @@ bool TrayMirror::Start(StatusSink* sink) {
       return true;
     }
   }
-  StartIntercept();
+  if (settings_.tray_backend == "intercept") {
+    StartIntercept();
+    if (intercept_ == nullptr) {
+      Log(L"tray", L"intercept unavailable; using uia");
+    }
+  }
   std::lock_guard lock(mu_);
   StartWorkerLocked();
   return true;
@@ -190,18 +195,24 @@ bool TrayMirror::ForwardsContextMenu() const {
 void TrayMirror::SetSettings(const WidgetSettings& next) {
   bool start_worker = false;
   bool stop_worker = false;
+  bool restart_backend = false;
   std::vector<std::string> drop;
   StatusSink* sink = nullptr;
+  std::string backend;
   {
     std::lock_guard lock(mu_);
     const bool was = settings_.tray_mirror;
+    const std::string was_backend = settings_.tray_backend;
     settings_ = next;
+    backend = next.tray_backend;
     sink = sink_;
     if (next.tray_mirror && !was && sink_ != nullptr && !stopped_slow_) {
       start_worker = true;
       reset_pending_ = true;
     } else if (!next.tray_mirror && was) {
       stop_worker = true;
+    } else if (next.tray_mirror && was && was_backend != next.tray_backend) {
+      restart_backend = true;
     } else if (wake_event_ != nullptr) {
       SetEvent(wake_event_);
     }
@@ -226,8 +237,27 @@ void TrayMirror::SetSettings(const WidgetSettings& next) {
     StopIntercept();
     DropAll();
   }
+  if (restart_backend) {
+    StopWorker();
+    StopIntercept();
+    DropAll();
+    if (backend == "intercept") {
+      StartIntercept();
+      if (intercept_ == nullptr) {
+        Log(L"tray", L"intercept unavailable; using uia");
+      }
+    }
+    std::lock_guard lock(mu_);
+    reset_pending_ = true;
+    StartWorkerLocked();
+  }
   if (start_worker) {
-    StartIntercept();
+    if (backend == "intercept") {
+      StartIntercept();
+      if (intercept_ == nullptr) {
+        Log(L"tray", L"intercept unavailable; using uia");
+      }
+    }
     std::lock_guard lock(mu_);
     StartWorkerLocked();
   }
@@ -627,8 +657,8 @@ void TrayMirror::WorkerLoop() {
       }
     });
   }
-  const bool probed = backend != nullptr && backend->Probe();
-  const bool intercept = intercept_ != nullptr && backend == intercept_.get();
+  bool probed = backend != nullptr && backend->Probe();
+  bool intercept = intercept_ != nullptr && backend == intercept_.get();
   bool events_abandoned = false;
   bool events_live = false;
   if (backend != nullptr && !events_abandoned && !intercept) {
@@ -672,6 +702,24 @@ void TrayMirror::WorkerLoop() {
     }
     if (slow_stop) {
       break;
+    }
+    if (intercept && (intercept_ == nullptr || !intercept_->ParseLive())) {
+      Log(L"tray", L"intercept parse failed; switching to uia");
+      if (backend != nullptr) {
+        backend->UnsubscribeStructureChanged();
+      }
+      StopIntercept();
+      owned = MakeUiaTrayBackend();
+      backend = owned.get();
+      intercept = false;
+      probed = backend != nullptr && backend->Probe();
+      events_abandoned = false;
+      events_live = backend != nullptr && backend->SubscribeStructureChanged(struct_event_);
+      reset = true;
+      Log(L"tray",
+          L"backend=%hs capture=no hide_mode=hidden right_click=bamti_menu overflow=mirrored "
+          L"structure_changed=%d probe=%d",
+          backend != nullptr ? backend->Name() : "none", events_live ? 1 : 0, probed ? 1 : 0);
     }
     if (reset && backend != nullptr) {
       backend->Reset();

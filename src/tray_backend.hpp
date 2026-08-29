@@ -39,6 +39,7 @@ class TrayBackend {
   // UIA 백엔드는 쓰지 않고, 가로채기 백엔드는 메시지를 받을 때마다 부른다.
   virtual void SetChangeSink(std::function<void()> on_change) { (void)on_change; }
   virtual void SetRectLookup(std::function<bool(uint64_t key, RECT* screen)> lookup) { (void)lookup; }
+  virtual bool ParseLive() const { return true; }
   virtual bool Invoke(const TrayIconInfo& icon, bool right) {
     (void)right;
     return Invoke(icon);
