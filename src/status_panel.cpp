@@ -46,7 +46,7 @@ int ButtonRunLen(const std::vector<StatusRow>& rows, size_t start) {
 void StatusPanelContent::Reset(StatusItem item, StatusPanelHost host) {
   item_ = std::move(item);
   host_ = std::move(host);
-  hits_.clear();
+  // hits_는 Open 때 Measure가 채운다. 값만 바꿀 때는 호버/히트 영역을 유지한다.
 }
 
 int StatusPanelContent::RowCount() const {

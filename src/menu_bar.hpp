@@ -64,6 +64,8 @@ class MenuBar {
   void ToggleSpotlight();
   void OpenStatusPanel(const StatusHit& hit);
   void OpenOverflow();
+  void RefreshOpenPanel();
+  StatusPanelHost MakePanelHost();
   const BarSegment* HitSegment(POINT client) const;
   void ArmToggle(std::string id, std::string row_id, uint64_t revision, bool on);
   void OnToggleTimeout();
@@ -128,6 +130,8 @@ class MenuBar {
   std::unique_ptr<OverflowContent> overflow_panel_;
   std::wstring tooltip_text_;
   std::string open_panel_id_;
+  uint64_t open_panel_revision_ = 0;
+  size_t open_panel_rows_ = 0;
   struct PendingToggle {
     std::string id;
     std::string row_id;

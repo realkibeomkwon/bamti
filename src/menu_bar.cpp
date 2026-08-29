@@ -295,6 +295,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case kStatusChangedMsg:
       NotePostedStorm(L"status", g_status_msg_count, g_status_msg_window);
       ArmRepaint();
+      RefreshOpenPanel();
       return 0;
     case WM_DPICHANGED:
       layout_.SetDpi(HIWORD(wparam));
@@ -926,21 +927,53 @@ void MenuBar::OpenStatusPanel(const StatusHit& hit) {
   if (spotlight_.visible()) {
     spotlight_.Hide();
   }
+  status_panel_->Reset(*found, MakePanelHost());
+  POINT anchor{hit.rect.left, hit.rect.bottom};
+  ClientToScreen(hwnd_, &anchor);
+  open_panel_id_ = found->id;
+  open_panel_revision_ = found->revision;
+  open_panel_rows_ = found->panel->rows.size();
+  StatusEvent ev;
+  ev.id = found->id;
+  ev.event = "panel_open";
+  status_.Dispatch(ev);
+  status_popup_.Open(status_panel_.get(), anchor, PopupSurface::Anchor::BelowAt);
+}
+
+StatusPanelHost MenuBar::MakePanelHost() {
   StatusPanelHost host;
   host.dark = dark_;
   host.dispatch = [this](const StatusEvent& ev) { status_.Dispatch(ev); };
   host.arm_toggle = [this](std::string id, std::string row_id, uint64_t revision, bool on) {
     ArmToggle(std::move(id), std::move(row_id), revision, on);
   };
-  status_panel_->Reset(*found, std::move(host));
-  POINT anchor{hit.rect.left, hit.rect.bottom};
-  ClientToScreen(hwnd_, &anchor);
-  open_panel_id_ = found->id;
-  StatusEvent ev;
-  ev.id = found->id;
-  ev.event = "panel_open";
-  status_.Dispatch(ev);
-  status_popup_.Open(status_panel_.get(), anchor, PopupSurface::Anchor::BelowAt);
+  return host;
+}
+
+void MenuBar::RefreshOpenPanel() {
+  if (!status_popup_.IsOpen() || open_panel_id_.empty() || status_panel_ == nullptr) {
+    return;
+  }
+  auto item = status_.Get(open_panel_id_);
+  if (!item || !item->panel) {
+    status_popup_.Close();
+    return;
+  }
+  if (toggle_armed_ && item->revision == pending_toggle_.revision) {
+    return;
+  }
+  if (item->revision == open_panel_revision_) {
+    return;
+  }
+  if (item->panel->rows.size() != open_panel_rows_) {
+    status_popup_.Close();
+    return;
+  }
+  open_panel_revision_ = item->revision;
+  status_panel_->Reset(std::move(*item), MakePanelHost());
+  if (status_popup_.hwnd() != nullptr) {
+    InvalidateRect(status_popup_.hwnd(), nullptr, FALSE);
+  }
 }
 
 void MenuBar::ArmToggle(std::string id, std::string row_id, uint64_t revision, bool on) {
@@ -983,22 +1016,9 @@ void MenuBar::OnToggleTimeout() {
     }
   }
   item->state = StatusState::kError;
-  const std::string id = item->id;
+  item->revision += 1;
   status_.Upsert(std::move(*item));
-  if (status_popup_.IsOpen() && open_panel_id_ == id && status_panel_ != nullptr) {
-    if (auto again = status_.Get(id)) {
-      StatusPanelHost host;
-      host.dark = dark_;
-      host.dispatch = [this](const StatusEvent& ev) { status_.Dispatch(ev); };
-      host.arm_toggle = [this](std::string iid, std::string row_id, uint64_t revision, bool on) {
-        ArmToggle(std::move(iid), std::move(row_id), revision, on);
-      };
-      status_panel_->Reset(std::move(*again), std::move(host));
-      if (status_popup_.hwnd() != nullptr) {
-        InvalidateRect(status_popup_.hwnd(), nullptr, FALSE);
-      }
-    }
-  }
+  RefreshOpenPanel();
   ArmRepaint();
 }
 
