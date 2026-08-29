@@ -1460,6 +1460,245 @@ struct ParkGuard {
   ~ParkGuard() { Restore(); }
 };
 
+constexpr UINT kOverflowRounds = 5;
+constexpr UINT kOverflowGapMs = 3000;
+constexpr wchar_t kOverflowIslandClass[] = L"TopLevelWindowForOverflowXamlIsland";
+
+struct OverflowIcon {
+  std::wstring name;
+  RECT screen{};
+  BOOL offscreen = FALSE;
+  std::wstring runtime_id;
+  bool invoke = false;
+};
+
+std::wstring RuntimeIdText(IUIAutomationElement* el) {
+  VARIANT v;
+  VariantInit(&v);
+  std::wstring out = L"-";
+  if (el == nullptr || FAILED(el->GetCurrentPropertyValue(UIA_RuntimeIdPropertyId, &v))) {
+    VariantClear(&v);
+    return out;
+  }
+  if ((v.vt & VT_ARRAY) != 0 && v.parray != nullptr) {
+    const VARTYPE elem = static_cast<VARTYPE>(v.vt & VT_TYPEMASK);
+    if (elem == VT_I4 || elem == VT_UI4 || elem == VT_INT || elem == VT_UINT) {
+      LONG lo = 0;
+      LONG hi = -1;
+      if (SUCCEEDED(SafeArrayGetLBound(v.parray, 1, &lo)) &&
+          SUCCEEDED(SafeArrayGetUBound(v.parray, 1, &hi)) && hi >= lo) {
+        out = L"[";
+        bool ok = true;
+        for (LONG i = lo; i <= hi; ++i) {
+          LONG value = 0;
+          if (FAILED(SafeArrayGetElement(v.parray, &i, &value))) {
+            ok = false;
+            break;
+          }
+          if (i > lo) {
+            out += L",";
+          }
+          wchar_t buf[16]{};
+          swprintf_s(buf, L"%ld", value);
+          out += buf;
+        }
+        if (ok) {
+          out += L"]";
+        } else {
+          out = L"-";
+        }
+      }
+    }
+  }
+  VariantClear(&v);
+  return out;
+}
+
+Microsoft::WRL::ComPtr<IUIAutomationCondition> MakeNotifyItemCondition(IUIAutomation* uia) {
+  Microsoft::WRL::ComPtr<IUIAutomationCondition> empty;
+  if (uia == nullptr) {
+    return empty;
+  }
+  VARIANT vn;
+  VariantInit(&vn);
+  vn.vt = VT_BSTR;
+  vn.bstrVal = SysAllocString(L"NotifyItemIcon");
+  Microsoft::WRL::ComPtr<IUIAutomationCondition> id_notify;
+  const HRESULT nhr = uia->CreatePropertyCondition(UIA_AutomationIdPropertyId, vn, id_notify.GetAddressOf());
+  VariantClear(&vn);
+  if (FAILED(nhr) || id_notify == nullptr) {
+    return empty;
+  }
+
+  VARIANT vt;
+  VariantInit(&vt);
+  vt.vt = VT_I4;
+  vt.lVal = UIA_ButtonControlTypeId;
+  Microsoft::WRL::ComPtr<IUIAutomationCondition> type_btn;
+  const HRESULT thr = uia->CreatePropertyCondition(UIA_ControlTypePropertyId, vt, type_btn.GetAddressOf());
+  VariantClear(&vt);
+  if (FAILED(thr) || type_btn == nullptr) {
+    return empty;
+  }
+
+  Microsoft::WRL::ComPtr<IUIAutomationCondition> cond;
+  if (FAILED(uia->CreateAndCondition(id_notify.Get(), type_btn.Get(), cond.GetAddressOf()))) {
+    return empty;
+  }
+  return cond;
+}
+
+void CollectOverflowIcons(IUIAutomation* uia, IUIAutomationCondition* cond, HWND hwnd,
+                          std::vector<OverflowIcon>* out) {
+  if (uia == nullptr || cond == nullptr || hwnd == nullptr || out == nullptr) {
+    return;
+  }
+  Microsoft::WRL::ComPtr<IUIAutomationElement> root;
+  if (FAILED(uia->ElementFromHandle(hwnd, root.GetAddressOf())) || root == nullptr) {
+    return;
+  }
+  Microsoft::WRL::ComPtr<IUIAutomationElementArray> arr;
+  if (FAILED(root->FindAll(TreeScope_Descendants, cond, arr.GetAddressOf())) || arr == nullptr) {
+    return;
+  }
+  int n = 0;
+  arr->get_Length(&n);
+  for (int i = 0; i < n; ++i) {
+    Microsoft::WRL::ComPtr<IUIAutomationElement> el;
+    if (FAILED(arr->GetElement(i, el.GetAddressOf())) || el == nullptr) {
+      continue;
+    }
+    OverflowIcon icon;
+    icon.name = ElementBstr(el.Get(), &IUIAutomationElement::get_CurrentName);
+    el->get_CurrentBoundingRectangle(&icon.screen);
+    el->get_CurrentIsOffscreen(&icon.offscreen);
+    icon.runtime_id = RuntimeIdText(el.Get());
+    icon.invoke = PatternAvailable(el.Get(), UIA_IsInvokePatternAvailablePropertyId);
+    out->push_back(std::move(icon));
+  }
+}
+
+void WriteOverflow(Probe& probe) {
+  // Invoke는 조회만 하고 호출하지 않는다. 오버플로 창도 열지 않는다.
+  probe.report.Line(L"## 7. 오버플로 NotifyItemIcon");
+  HWND island = FindWindowW(kOverflowIslandClass, nullptr);
+  if (island == nullptr) {
+    probe.report.Line(L"TopLevelWindowForOverflowXamlIsland: 없음");
+    probe.report.Line(L"");
+    return;
+  }
+  RECT island_rc{};
+  GetWindowRect(island, &island_rc);
+  probe.report.Line(L"island hwnd=0x%llX class=%s visible=%s rect(%ld,%ld,%ld,%ld)", HwndU64(island),
+                    ClassOf(island).c_str(), YesNo(IsWindowVisible(island) != FALSE), island_rc.left, island_rc.top,
+                    island_rc.right, island_rc.bottom);
+  HWND bridge = FindChildClass(island, kBridgeClass);
+  if (bridge == nullptr) {
+    probe.report.Line(L"DesktopWindowContentBridge: 없음");
+    probe.report.Line(L"");
+    return;
+  }
+  RECT bridge_rc{};
+  GetWindowRect(bridge, &bridge_rc);
+  probe.report.Line(L"bridge hwnd=0x%llX class=%s visible=%s rect(%ld,%ld,%ld,%ld)", HwndU64(bridge),
+                    ClassOf(bridge).c_str(), YesNo(IsWindowVisible(bridge) != FALSE), bridge_rc.left, bridge_rc.top,
+                    bridge_rc.right, bridge_rc.bottom);
+  probe.report.Line(L"rounds=%u gap_ms=%u", kOverflowRounds, kOverflowGapMs);
+  probe.report.Line(L"형식: order  name  rect  IsOffscreen  RuntimeId  Invoke");
+
+  Microsoft::WRL::ComPtr<IUIAutomation> uia;
+  const HRESULT created =
+      CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(uia.GetAddressOf()));
+  if (FAILED(created) || uia == nullptr) {
+    probe.report.Line(L"CoCreateInstance(CLSID_CUIAutomation) hr=0x%08X", static_cast<unsigned>(created));
+    probe.report.Line(L"");
+    return;
+  }
+  Microsoft::WRL::ComPtr<IUIAutomationCondition> cond = MakeNotifyItemCondition(uia.Get());
+  if (cond == nullptr) {
+    probe.report.Line(L"CreatePropertyCondition 실패");
+    probe.report.Line(L"");
+    return;
+  }
+
+  std::vector<std::vector<OverflowIcon>> rounds;
+  rounds.resize(kOverflowRounds);
+  for (UINT r = 0; r < kOverflowRounds; ++r) {
+    if (r > 0) {
+      Sleep(kOverflowGapMs);
+    }
+    const ULONGLONG t0 = GetTickCount64();
+    CollectOverflowIcons(uia.Get(), cond.Get(), bridge, &rounds[r]);
+    const ULONGLONG elapsed = GetTickCount64() - t0;
+    probe.report.Line(L"");
+    probe.report.Line(L"### round %u", r + 1);
+    probe.report.Line(L"elapsed_ms=%llu count=%llu", elapsed, static_cast<unsigned long long>(rounds[r].size()));
+    int order = 0;
+    for (const OverflowIcon& icon : rounds[r]) {
+      probe.report.Line(L"%d  name=%s  rect(%ld,%ld,%ld,%ld)  IsOffscreen=%s  RuntimeId=%s  Invoke=%s", order,
+                        Quoted(icon.name).c_str(), icon.screen.left, icon.screen.top, icon.screen.right,
+                        icon.screen.bottom, YesNo(icon.offscreen != FALSE), icon.runtime_id.c_str(),
+                        YesNo(icon.invoke));
+      ++order;
+    }
+  }
+
+  bool count_same = true;
+  bool name_order_same = true;
+  bool runtime_id_order_same = true;
+  bool runtime_id_set_same = true;
+  bool runtime_id_present = true;
+  const std::vector<OverflowIcon>& first = rounds[0];
+  std::vector<std::wstring> first_ids;
+  first_ids.reserve(first.size());
+  for (const OverflowIcon& icon : first) {
+    first_ids.push_back(icon.runtime_id);
+    if (icon.runtime_id == L"-") {
+      runtime_id_present = false;
+    }
+  }
+  std::vector<std::wstring> first_sorted = first_ids;
+  std::sort(first_sorted.begin(), first_sorted.end());
+  for (UINT r = 1; r < kOverflowRounds; ++r) {
+    if (rounds[r].size() != first.size()) {
+      count_same = false;
+      name_order_same = false;
+      runtime_id_order_same = false;
+      runtime_id_set_same = false;
+      continue;
+    }
+    std::vector<std::wstring> ids;
+    ids.reserve(rounds[r].size());
+    for (size_t i = 0; i < rounds[r].size(); ++i) {
+      ids.push_back(rounds[r][i].runtime_id);
+      if (rounds[r][i].name != first[i].name) {
+        name_order_same = false;
+      }
+      if (rounds[r][i].runtime_id != first[i].runtime_id) {
+        runtime_id_order_same = false;
+      }
+      if (rounds[r][i].runtime_id == L"-") {
+        runtime_id_present = false;
+      }
+    }
+    std::sort(ids.begin(), ids.end());
+    if (ids != first_sorted) {
+      runtime_id_set_same = false;
+    }
+  }
+  RECT island_end{};
+  GetWindowRect(island, &island_end);
+  probe.report.Line(L"");
+  probe.report.Line(L"### identity");
+  probe.report.Line(L"count_same=%s name_order_same=%s runtime_id_order_same=%s runtime_id_set_same=%s "
+                    L"runtime_id_present=%s",
+                    YesNo(count_same), YesNo(name_order_same), YesNo(runtime_id_order_same),
+                    YesNo(runtime_id_set_same), YesNo(runtime_id_present));
+  probe.report.Line(L"island_visible_end=%s rect(%ld,%ld,%ld,%ld)", YesNo(IsWindowVisible(island) != FALSE),
+                    island_end.left, island_end.top, island_end.right, island_end.bottom);
+  probe.report.Line(L"");
+}
+
 void PrintSummary(const Probe& probe, const std::wstring& report_path, ULONGLONG elapsed_ms) {
   wprintf(L"os=%s elevated=%s %s\n", probe.os_line.c_str(), YesNo(probe.elevated), probe.wow_line.c_str());
   wprintf(L"bamti_resident=%s\n", YesNo(probe.bamti_resident));
@@ -1498,6 +1737,7 @@ int RunTrayProbe() {
   WriteButtons(probe);
   WriteUia(probe);
   WriteCapture(probe, png_path);
+  WriteOverflow(probe);
 
   const ULONGLONG elapsed = GetTickCount64() - t0;
   probe.report.Line(L"handles_end=%lu", HandleCount());
