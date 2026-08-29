@@ -16,6 +16,11 @@ constexpr int kTrayPriorityBase = 5;
 constexpr ULONGLONG kPerfLogMs = 300000;
 constexpr UINT kSlowEnumMs = 200;
 constexpr int kSlowStreakStop = 3;
+constexpr UINT kEventDebounceMs = 300;
+constexpr UINT kEventMinIntervalMs = 1000;
+constexpr UINT kSafetyIntervalMs = 5000;
+constexpr UINT kFloodWindowMs = 10000;
+constexpr long kFloodMaxEvents = 50;
 constexpr wchar_t kClockClass[] = L"SystemTray.OmniButton";
 constexpr wchar_t kShowDesktopClass[] = L"SystemTray.ShowDesktopButton";
 constexpr wchar_t kOverflowButtonClass[] = L"SystemTray.NormalButton";
@@ -64,6 +69,7 @@ int OverflowOrder(const std::vector<TrayIconInfo>& icons) {
 TrayMirror::TrayMirror() {
   stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   wake_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  struct_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 }
 
 TrayMirror::~TrayMirror() {
@@ -75,6 +81,10 @@ TrayMirror::~TrayMirror() {
   if (wake_event_ != nullptr) {
     CloseHandle(wake_event_);
     wake_event_ = nullptr;
+  }
+  if (struct_event_ != nullptr) {
+    CloseHandle(struct_event_);
+    struct_event_ = nullptr;
   }
 }
 
@@ -371,7 +381,7 @@ void TrayMirror::Publish(const TrayIconInfo& icon, int order) {
   }
 }
 
-void TrayMirror::DoRound(TrayBackend* backend) {
+void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
   if (backend == nullptr) {
     return;
   }
@@ -386,7 +396,7 @@ void TrayMirror::DoRound(TrayBackend* backend) {
   {
     std::lock_guard lock(mu_);
     last_enum_ms_ = elapsed;
-    interval_ms_ = ClampInterval(elapsed);
+    interval_ms_ = events_live ? kSafetyIntervalMs : ClampInterval(elapsed);
     settings = settings_;
     sink = sink_;
     use_runtime = use_runtime_id_;
@@ -554,10 +564,23 @@ void TrayMirror::WorkerLoop() {
   const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   auto backend = MakeUiaTrayBackend();
   const bool probed = backend != nullptr && backend->Probe();
-  Log(L"tray", L"backend=%hs capture=no hide_mode=hidden right_click=bamti_menu overflow=not_mirrored probe=%d",
-      backend != nullptr ? backend->Name() : "none", probed ? 1 : 0);
+  bool events_abandoned = false;
+  bool events_live = false;
+  if (backend != nullptr && !events_abandoned) {
+    events_live = backend->SubscribeStructureChanged(struct_event_);
+  }
+  Log(L"tray",
+      L"backend=%hs capture=no hide_mode=hidden right_click=bamti_menu overflow=not_mirrored "
+      L"structure_changed=%d probe=%d",
+      backend != nullptr ? backend->Name() : "none", events_live ? 1 : 0, probed ? 1 : 0);
 
   HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+  bool run_enum = true;
+  bool struct_pending = false;
+  ULONGLONG last_enum = 0;
+  ULONGLONG last_struct = 0;
+  ULONGLONG flood_t0 = 0;
+  long flood_n = 0;
 
   for (;;) {
     if (stop_event_ != nullptr && WaitForSingleObject(stop_event_, 0) == WAIT_OBJECT_0) {
@@ -583,12 +606,19 @@ void TrayMirror::WorkerLoop() {
     }
     if (reset && backend != nullptr) {
       backend->Reset();
+      events_live = false;
+      if (!events_abandoned) {
+        events_live = backend->SubscribeStructureChanged(struct_event_);
+      }
     }
     if (have_invoke) {
       DrainInvoke(backend.get());
     }
-    if (active && backend != nullptr) {
-      DoRound(backend.get());
+    if (active && backend != nullptr && run_enum) {
+      DoRound(backend.get(), events_live);
+      last_enum = GetTickCount64();
+      run_enum = false;
+      struct_pending = false;
       std::lock_guard lock(mu_);
       interval = interval_ms_;
       slow_stop = stopped_slow_;
@@ -597,10 +627,11 @@ void TrayMirror::WorkerLoop() {
       break;
     }
 
-    HANDLE waits[3]{};
+    HANDLE waits[4]{};
     DWORD n = 0;
     waits[n++] = stop_event_;
     waits[n++] = wake_event_;
+    waits[n++] = struct_event_;
     if (active && timer != nullptr) {
       LARGE_INTEGER rel{};
       const ULONGLONG delay = interval == 0 ? 1 : interval;
@@ -619,7 +650,21 @@ void TrayMirror::WorkerLoop() {
         flush_ms = sink_->NotifyWaitTimeoutMs();
       }
     }
-    const DWORD timeout = active ? flush_ms : INFINITE;
+    DWORD timeout = active ? flush_ms : INFINITE;
+    if (struct_pending && active) {
+      const ULONGLONG now = GetTickCount64();
+      ULONGLONG ready = last_struct + kEventDebounceMs;
+      if (last_enum != 0) {
+        const ULONGLONG min_at = last_enum + kEventMinIntervalMs;
+        if (min_at > ready) {
+          ready = min_at;
+        }
+      }
+      const DWORD deb = ready > now ? static_cast<DWORD>(ready - now) : 0;
+      if (deb < timeout) {
+        timeout = deb;
+      }
+    }
     const DWORD wait = MsgWaitForMultipleObjectsEx(n, waits, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     if (wait == WAIT_OBJECT_0 + n) {
       MSG msg;
@@ -633,9 +678,48 @@ void TrayMirror::WorkerLoop() {
       break;
     }
     if (wait == WAIT_TIMEOUT) {
+      if (struct_pending && active) {
+        const ULONGLONG now = GetTickCount64();
+        const bool debounced = now >= last_struct + kEventDebounceMs;
+        const bool spaced = last_enum == 0 || now >= last_enum + kEventMinIntervalMs;
+        if (debounced && spaced) {
+          run_enum = true;
+        }
+      }
       if (sink != nullptr) {
         sink->Flush();
       }
+      continue;
+    }
+    if (wait == WAIT_OBJECT_0 + 1) {
+      run_enum = true;
+      continue;
+    }
+    if (wait == WAIT_OBJECT_0 + 2) {
+      const long nfire = backend != nullptr ? backend->TakeStructureChangedCount() : 0;
+      if (active) {
+        const ULONGLONG now = GetTickCount64();
+        if (flood_n == 0 || now - flood_t0 >= kFloodWindowMs) {
+          flood_t0 = now;
+          flood_n = 0;
+        }
+        flood_n += nfire > 0 ? nfire : 1;
+        if (!events_abandoned && flood_n > kFloodMaxEvents) {
+          events_abandoned = true;
+          events_live = false;
+          if (backend != nullptr) {
+            backend->AbandonStructureChanged();
+          }
+          Log(L"tray", L"structure_changed flood count=%ld window_ms=%llu; polling only", flood_n,
+              now - flood_t0);
+        }
+        last_struct = now;
+        struct_pending = true;
+      }
+      continue;
+    }
+    if (n > 3 && wait == WAIT_OBJECT_0 + 3) {
+      run_enum = true;
       continue;
     }
     if (wait == WAIT_FAILED) {
@@ -644,6 +728,10 @@ void TrayMirror::WorkerLoop() {
     }
   }
 
+  if (backend != nullptr) {
+    backend->UnsubscribeStructureChanged();
+    backend.reset();
+  }
   if (timer != nullptr) {
     CloseHandle(timer);
   }

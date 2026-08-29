@@ -45,7 +45,7 @@ class TrayMirror : public StatusSource {
   void WorkerLoop();
   void StartWorkerLocked();
   void StopWorker();
-  void DoRound(TrayBackend* backend);
+  void DoRound(TrayBackend* backend, bool events_live);
   void Publish(const TrayIconInfo& icon, int order);
   void DropAll();
   bool Include(const TrayIconInfo& icon, int overflow_order, const WidgetSettings& settings) const;
@@ -60,6 +60,7 @@ class TrayMirror : public StatusSource {
   std::thread worker_;
   HANDLE stop_event_ = nullptr;
   HANDLE wake_event_ = nullptr;
+  HANDLE struct_event_ = nullptr;
   bool active_ = true;
   bool reset_pending_ = false;
   bool stopped_slow_ = false;

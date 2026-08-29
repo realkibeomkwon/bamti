@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -69,6 +70,53 @@ HWND FindBridge() {
   }
   return FindWindowExW(tray, nullptr, kBridgeClass, nullptr);
 }
+
+class StructureHandler final : public IUIAutomationStructureChangedEventHandler {
+ public:
+  StructureHandler(HANDLE wake, volatile LONG* fired) : refs_(1), wake_(wake), fired_(fired) {}
+  StructureHandler(const StructureHandler&) = delete;
+  StructureHandler& operator=(const StructureHandler&) = delete;
+
+  ULONG STDMETHODCALLTYPE AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&refs_)); }
+
+  ULONG STDMETHODCALLTYPE Release() override {
+    const LONG n = InterlockedDecrement(&refs_);
+    if (n == 0) {
+      delete this;
+    }
+    return static_cast<ULONG>(n);
+  }
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** pp) override {
+    if (pp == nullptr) {
+      return E_POINTER;
+    }
+    if (riid == IID_IUnknown || riid == __uuidof(IUIAutomationStructureChangedEventHandler)) {
+      *pp = static_cast<IUIAutomationStructureChangedEventHandler*>(this);
+      AddRef();
+      return S_OK;
+    }
+    *pp = nullptr;
+    return E_NOINTERFACE;
+  }
+
+  HRESULT STDMETHODCALLTYPE HandleStructureChangedEvent(IUIAutomationElement*, StructureChangeType,
+                                                        SAFEARRAY*) override {
+    if (fired_ != nullptr) {
+      InterlockedIncrement(fired_);
+    }
+    if (wake_ != nullptr) {
+      SetEvent(wake_);
+    }
+    return S_OK;
+  }
+
+ private:
+  ~StructureHandler() = default;
+  volatile LONG refs_;
+  HANDLE wake_;
+  volatile LONG* fired_;
+};
 
 class TrayBackendUia final : public TrayBackend {
  public:
@@ -209,7 +257,62 @@ class TrayBackendUia final : public TrayBackend {
     return false;
   }
 
-  void Reset() override { ResetHwnd(); }
+  void Reset() override {
+    UnsubscribeStructureChanged();
+    ResetHwnd();
+  }
+
+  bool SubscribeStructureChanged(HANDLE wake) override {
+    if (abandoned_ || wake == nullptr) {
+      return false;
+    }
+    if (subscribed_ && handler_ != nullptr && bridge_ != nullptr && IsWindow(bridge_)) {
+      return true;
+    }
+    UnsubscribeStructureChanged();
+    if (!EnsureUia() || !EnsureHwnd()) {
+      return false;
+    }
+    Microsoft::WRL::ComPtr<IUIAutomationElement> root;
+    if (FAILED(uia_->ElementFromHandle(bridge_, root.GetAddressOf())) || root == nullptr) {
+      ResetHwnd();
+      return false;
+    }
+    auto* raw = new (std::nothrow) StructureHandler(wake, &fired_);
+    if (raw == nullptr) {
+      return false;
+    }
+    handler_.Attach(raw);
+    const HRESULT hr =
+        uia_->AddStructureChangedEventHandler(root.Get(), TreeScope_Subtree, nullptr, handler_.Get());
+    if (FAILED(hr)) {
+      handler_.Reset();
+      Log(L"tray", L"structure_changed subscribe hr=0x%08X", static_cast<unsigned>(hr));
+      return false;
+    }
+    subscribed_ = true;
+    return true;
+  }
+
+  void UnsubscribeStructureChanged() override {
+    if (uia_ != nullptr) {
+      uia_->RemoveAllEventHandlers();
+    }
+    handler_.Reset();
+    subscribed_ = false;
+    InterlockedExchange(&fired_, 0);
+  }
+
+  bool StructureChangedLive() const override { return subscribed_ && !abandoned_; }
+
+  long TakeStructureChangedCount() override { return InterlockedExchange(&fired_, 0); }
+
+  void AbandonStructureChanged() override {
+    UnsubscribeStructureChanged();
+    abandoned_ = true;
+  }
+
+  ~TrayBackendUia() { UnsubscribeStructureChanged(); }
 
   void LastInvokeError(HRESULT* hr, const char** pattern) const override {
     if (hr != nullptr) {
@@ -384,6 +487,10 @@ class TrayBackendUia final : public TrayBackend {
   Microsoft::WRL::ComPtr<IUIAutomation> uia_;
   Microsoft::WRL::ComPtr<IUIAutomationCondition> cond_;
   Microsoft::WRL::ComPtr<IUIAutomationCacheRequest> cache_;
+  Microsoft::WRL::ComPtr<IUIAutomationStructureChangedEventHandler> handler_;
+  volatile LONG fired_ = 0;
+  bool subscribed_ = false;
+  bool abandoned_ = false;
   HRESULT last_hr_ = S_OK;
   const char* last_pattern_ = "";
 };

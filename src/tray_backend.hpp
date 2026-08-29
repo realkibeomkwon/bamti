@@ -28,6 +28,14 @@ class TrayBackend {
   virtual bool Enumerate(std::vector<TrayIconInfo>* out) = 0;
   virtual bool Invoke(const TrayIconInfo& icon) = 0;
   virtual void Reset() = 0;
+  virtual bool SubscribeStructureChanged(HANDLE wake) {
+    (void)wake;
+    return false;
+  }
+  virtual void UnsubscribeStructureChanged() {}
+  virtual bool StructureChangedLive() const { return false; }
+  virtual long TakeStructureChangedCount() { return 0; }
+  virtual void AbandonStructureChanged() {}
   virtual void LastInvokeError(HRESULT* hr, const char** pattern) const {
     if (hr != nullptr) {
       *hr = S_OK;
