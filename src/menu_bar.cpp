@@ -1189,6 +1189,7 @@ void MenuBar::StartTrayPeek() {
   if (hwnd_ != nullptr) {
     SetTimer(hwnd_, kPeekTimerId, kPeekMs, nullptr);
   }
+  TaskbarController::BeginPeek(kPeekMs + 2000);
   taskbar_.Restore();
 }
 
@@ -1201,6 +1202,7 @@ void MenuBar::EndTrayPeek() {
   }
   tray_peeking_ = false;
   taskbar_.Hide();
+  TaskbarController::EndPeek();
   if (providers_active_) {
     tray_.SetActive(true);
   }

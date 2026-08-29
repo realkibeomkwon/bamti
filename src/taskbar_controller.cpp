@@ -23,6 +23,7 @@ HWND g_tray_hwnd = nullptr;
 WINEVENTPROC g_tray_proc = nullptr;
 int g_tray_suppress_depth = 0;
 ULONGLONG g_tray_suppress_until = 0;
+ULONGLONG g_peek_until = 0;
 
 constexpr DWORD kTrayEvents[] = {
     EVENT_OBJECT_SHOW,
@@ -258,8 +259,29 @@ void TaskbarController::Restore() {
   Log(L"tray", L"restored");
 }
 
+void TaskbarController::BeginPeek(UINT ms) {
+  g_peek_until = GetTickCount64() + ms;
+  Log(L"tray", L"peek begin ms=%u", ms);
+}
+
+void TaskbarController::EndPeek() {
+  g_peek_until = 0;
+  Log(L"tray", L"peek end");
+}
+
+bool TaskbarController::Peeking() {
+  if (g_peek_until == 0) {
+    return false;
+  }
+  if (GetTickCount64() >= g_peek_until) {
+    g_peek_until = 0;
+    return false;
+  }
+  return true;
+}
+
 void TaskbarController::EnsureHidden() {
-  if (!hidden_) {
+  if (Peeking() || !hidden_) {
     return;
   }
   if (HWND tray = PrimaryTray()) {
@@ -273,6 +295,9 @@ void TaskbarController::EnsureHidden() {
 }
 
 bool TaskbarController::Rehide() {
+  if (Peeking()) {
+    return false;
+  }
   bool need = false;
   EnumTrays([&](HWND hwnd) {
     if (IsWindowVisible(hwnd) != FALSE) {
