@@ -24,11 +24,14 @@ class TrayMirror : public StatusSource {
   const char* Name() const override;
   bool Start(StatusSink* sink) override;
   void Stop() override;
+  void OnEvent(const StatusEvent& ev) override;
   void SetActive(bool active) override;
 
   WidgetSettings settings() const;
   void SetSettings(const WidgetSettings& next);
   void OnExplorerRestart();
+  static uint64_t ParseId(const std::string& id);
+  static std::string KeyText(uint64_t key);
 
  private:
   struct ItemState {
@@ -45,9 +48,11 @@ class TrayMirror : public StatusSource {
   void DoRound(TrayBackend* backend);
   void Publish(const TrayIconInfo& icon, int order);
   void DropAll();
-  bool Include(const TrayIconInfo& icon, int overflow_order, bool system_icons) const;
+  bool Include(const TrayIconInfo& icon, int overflow_order, const WidgetSettings& settings) const;
+  void DrainInvoke(TrayBackend* backend);
   static std::wstring FirstGlyph(const std::wstring& tip);
   static std::string MakeId(uint64_t key);
+  static bool KeyHidden(uint64_t key, const std::vector<std::string>& hidden);
 
   StatusSink* sink_ = nullptr;
   mutable std::mutex mu_;
@@ -66,6 +71,7 @@ class TrayMirror : public StatusSource {
   UINT interval_ms_ = 1000;
   int slow_streak_ = 0;
   ULONGLONG last_perf_log_ = 0;
+  uint64_t pending_invoke_ = 0;
 };
 
 }  // namespace bamti

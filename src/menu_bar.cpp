@@ -35,6 +35,11 @@ constexpr UINT kWidgetBatteryCmd = 10;
 constexpr UINT kWidgetCpuCmd = 11;
 constexpr UINT kWidgetNetworkCmd = 12;
 constexpr UINT kWidgetBoardCmd = 13;
+constexpr UINT kTrayPeekCmd = 20;
+constexpr UINT kTrayHideIconCmd = 21;
+constexpr UINT kTrayMirrorOffCmd = 22;
+constexpr UINT_PTR kPeekTimerId = 4;
+constexpr UINT kPeekMs = 10000;
 
 UINT g_taskbar_created = 0;
 
@@ -297,6 +302,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (wparam == kToggleTimerId) {
         OnToggleTimeout();
       }
+      if (wparam == kPeekTimerId) {
+        EndTrayPeek();
+      }
       return 0;
     case kPopupClosedMsg:
       if (!open_panel_id_.empty()) {
@@ -414,6 +422,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         }
       }
       if (const auto hit = HitTest(pt)) {
+        status_popup_.Close();
         StatusEvent ev;
         ev.id = hit->id;
         ev.event = "click";
@@ -426,6 +435,12 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_RBUTTONUP: {
       POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       if (const auto hit = HitTest(pt)) {
+        if (hit->id.rfind("bamti.tray/", 0) == 0) {
+          POINT screen = pt;
+          ClientToScreen(hwnd_, &screen);
+          ShowTrayIconMenu(screen, hit->id);
+          return 0;
+        }
         StatusEvent ev;
         ev.id = hit->id;
         ev.event = "click";
@@ -467,6 +482,10 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       if (cmd >= kWidgetBatteryCmd && cmd <= kWidgetBoardCmd) {
         WidgetSettings next = widgets_.settings();
+        const WidgetSettings tray = tray_.settings();
+        next.tray_mirror = tray.tray_mirror;
+        next.tray_system_icons = tray.tray_system_icons;
+        next.tray_hidden_keys = tray.tray_hidden_keys;
         if (cmd == kWidgetBatteryCmd) {
           next.battery = !next.battery;
         } else if (cmd == kWidgetCpuCmd) {
@@ -476,7 +495,43 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         } else {
           next.widget_board = !next.widget_board;
         }
-        widgets_.SetSettings(next);
+        ApplySettings(next);
+      }
+      if (cmd == kTrayPeekCmd) {
+        StartTrayPeek();
+      }
+      if (cmd == kTrayHideIconCmd) {
+        const uint64_t key = TrayMirror::ParseId(tray_menu_id_);
+        if (key != 0) {
+          WidgetSettings next = widgets_.settings();
+          const WidgetSettings tray = tray_.settings();
+          next.tray_mirror = tray.tray_mirror;
+          next.tray_system_icons = tray.tray_system_icons;
+          next.tray_hidden_keys = tray.tray_hidden_keys;
+          const std::string hex = TrayMirror::KeyText(key);
+          bool have = false;
+          for (const std::string& one : next.tray_hidden_keys) {
+            if (one == hex) {
+              have = true;
+              break;
+            }
+          }
+          if (!have) {
+            next.tray_hidden_keys.push_back(hex);
+            if (next.tray_hidden_keys.size() > kTrayHiddenKeysMax) {
+              next.tray_hidden_keys.erase(next.tray_hidden_keys.begin());
+            }
+          }
+          ApplySettings(next);
+        }
+      }
+      if (cmd == kTrayMirrorOffCmd) {
+        WidgetSettings next = widgets_.settings();
+        const WidgetSettings tray = tray_.settings();
+        next.tray_mirror = false;
+        next.tray_system_icons = tray.tray_system_icons;
+        next.tray_hidden_keys = tray.tray_hidden_keys;
+        ApplySettings(next);
       }
       return 0;
     }
@@ -534,6 +589,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         KillTimer(hwnd_, kClockTimerId);
         KillTimer(hwnd_, kRepaintTimerId);
         KillTimer(hwnd_, kToggleTimerId);
+        KillTimer(hwnd_, kPeekTimerId);
         StopFullscreenWatch(hwnd_);
         UnregisterSessionWatch();
         status_.StopAll();
@@ -546,6 +602,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kClockTimerId);
       KillTimer(hwnd_, kRepaintTimerId);
       KillTimer(hwnd_, kToggleTimerId);
+      KillTimer(hwnd_, kPeekTimerId);
       StopFullscreenWatch(hwnd_);
       UnregisterSessionWatch();
       status_.StopAll();
@@ -1085,6 +1142,52 @@ void MenuBar::ShowContextMenu(POINT screen) {
   DestroyMenu(menu);
 }
 
+void MenuBar::ShowTrayIconMenu(POINT screen, const std::string& id) {
+  const HMENU menu = CreatePopupMenu();
+  if (menu == nullptr) {
+    return;
+  }
+  tray_menu_id_ = id;
+  AppendMenuW(menu, MF_STRING, kTrayPeekCmd, L"알림 영역 잠시 표시");
+  AppendMenuW(menu, MF_STRING, kTrayHideIconCmd, L"이 아이콘 숨기기");
+  AppendMenuW(menu, MF_STRING, kTrayMirrorOffCmd, L"트레이 미러 끄기");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"앱 메뉴는 알림 영역 잠시 표시로 엽니다");
+  AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"숨긴 아이콘은 Windows 설정에서 항상 표시해야 미러됩니다");
+  AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"지금은 글리프만 표시합니다");
+  TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, screen.x, screen.y, hwnd_, nullptr);
+  DestroyMenu(menu);
+}
+
+void MenuBar::ApplySettings(const WidgetSettings& next) {
+  widgets_.SetSettings(next);
+  tray_.SetSettings(next);
+}
+
+void MenuBar::StartTrayPeek() {
+  status_popup_.Close();
+  tray_peeking_ = true;
+  tray_.SetActive(false);
+  if (hwnd_ != nullptr) {
+    SetTimer(hwnd_, kPeekTimerId, kPeekMs, nullptr);
+  }
+  taskbar_.Restore();
+}
+
+void MenuBar::EndTrayPeek() {
+  if (hwnd_ != nullptr) {
+    KillTimer(hwnd_, kPeekTimerId);
+  }
+  if (!tray_peeking_) {
+    return;
+  }
+  tray_peeking_ = false;
+  taskbar_.Hide();
+  if (providers_active_) {
+    tray_.SetActive(true);
+  }
+}
+
 void MenuBar::RefreshFullscreenState() {
   SetFullscreenOccluded(IsTrueFullscreen(hwnd_));
 }
@@ -1092,10 +1195,16 @@ void MenuBar::RefreshFullscreenState() {
 void MenuBar::UpdateProviderActive() {
   const bool active = !fullscreen_occluded_ && !session_locked_ && display_on_;
   if (active == providers_active_) {
+    if (tray_peeking_ && active) {
+      tray_.SetActive(false);
+    }
     return;
   }
   providers_active_ = active;
   status_.SetActive(active);
+  if (tray_peeking_) {
+    tray_.SetActive(false);
+  }
 }
 
 void MenuBar::UnregisterSessionWatch() {

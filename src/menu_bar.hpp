@@ -50,6 +50,10 @@ class MenuBar {
   void NotePerf(double compute_ms, double draw_ms, const RECT& dirty, const RECT& client, const DrawTimings& draw,
                 double bpbegin_ms, double bpend_ms);
   void ShowContextMenu(POINT screen);
+  void ShowTrayIconMenu(POINT screen, const std::string& id);
+  void ApplySettings(const WidgetSettings& next);
+  void StartTrayPeek();
+  void EndTrayPeek();
   void RefreshFullscreenState();
   void SetFullscreenOccluded(bool occluded);
   void UpdateProviderActive();
@@ -142,6 +146,8 @@ class MenuBar {
   };
   PendingToggle pending_toggle_{};
   bool toggle_armed_ = false;
+  bool tray_peeking_ = false;
+  std::string tray_menu_id_;
 };
 
 }  // namespace bamti

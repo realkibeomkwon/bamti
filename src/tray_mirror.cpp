@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 
 namespace bamti {
 namespace {
@@ -140,10 +141,13 @@ WidgetSettings TrayMirror::settings() const {
 void TrayMirror::SetSettings(const WidgetSettings& next) {
   bool start_worker = false;
   bool stop_worker = false;
+  std::vector<std::string> drop;
+  StatusSink* sink = nullptr;
   {
     std::lock_guard lock(mu_);
     const bool was = settings_.tray_mirror;
     settings_ = next;
+    sink = sink_;
     if (next.tray_mirror && !was && sink_ != nullptr && !stopped_slow_) {
       start_worker = true;
       reset_pending_ = true;
@@ -152,8 +156,23 @@ void TrayMirror::SetSettings(const WidgetSettings& next) {
     } else if (wake_event_ != nullptr) {
       SetEvent(wake_event_);
     }
+    if (!stop_worker) {
+      for (auto it = items_.begin(); it != items_.end();) {
+        if (KeyHidden(it->first, next.tray_hidden_keys)) {
+          drop.push_back(it->second.id);
+          it = items_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
     if (start_worker) {
       StartWorkerLocked();
+    }
+  }
+  if (sink != nullptr) {
+    for (const std::string& id : drop) {
+      sink->Remove(id);
     }
   }
   if (stop_worker) {
@@ -226,7 +245,77 @@ std::string TrayMirror::MakeId(uint64_t key) {
   return buf;
 }
 
-bool TrayMirror::Include(const TrayIconInfo& icon, int overflow_order, bool system_icons) const {
+std::string TrayMirror::KeyText(uint64_t key) {
+  char buf[24]{};
+  sprintf_s(buf, "0x%016llx", static_cast<unsigned long long>(key));
+  return buf;
+}
+
+uint64_t TrayMirror::ParseId(const std::string& id) {
+  constexpr char kPrefix[] = "bamti.tray/";
+  if (id.size() <= 11 || id.compare(0, 11, kPrefix) != 0) {
+    return 0;
+  }
+  return static_cast<uint64_t>(strtoull(id.c_str() + 11, nullptr, 16));
+}
+
+bool TrayMirror::KeyHidden(uint64_t key, const std::vector<std::string>& hidden) {
+  const std::string hex = KeyText(key);
+  const std::string bare = hex.size() > 2 ? hex.substr(2) : hex;
+  char alt[24]{};
+  sprintf_s(alt, "%016llx", static_cast<unsigned long long>(key));
+  for (const std::string& one : hidden) {
+    if (one == hex || one == bare || one == alt) {
+      return true;
+    }
+    if (one.size() >= 2 && (one[0] == '0' && (one[1] == 'x' || one[1] == 'X'))) {
+      if (strtoull(one.c_str() + 2, nullptr, 16) == key) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void TrayMirror::OnEvent(const StatusEvent& ev) {
+  if (ev.event != "click" || ev.button != "left") {
+    return;
+  }
+  const uint64_t key = ParseId(ev.id);
+  if (key == 0) {
+    return;
+  }
+  {
+    std::lock_guard lock(mu_);
+    pending_invoke_ = key;
+  }
+  if (wake_event_ != nullptr) {
+    SetEvent(wake_event_);
+  }
+}
+
+void TrayMirror::DrainInvoke(TrayBackend* backend) {
+  uint64_t key = 0;
+  {
+    std::lock_guard lock(mu_);
+    key = pending_invoke_;
+    pending_invoke_ = 0;
+  }
+  if (key == 0 || backend == nullptr) {
+    return;
+  }
+  TrayIconInfo icon;
+  icon.key = key;
+  if (backend->Invoke(icon)) {
+    return;
+  }
+  HRESULT hr = E_FAIL;
+  const char* pattern = "none";
+  backend->LastInvokeError(&hr, &pattern);
+  Log(L"tray", L"invoke fail pattern=%hs hr=0x%08X", pattern, static_cast<unsigned>(hr));
+}
+
+bool TrayMirror::Include(const TrayIconInfo& icon, int overflow_order, const WidgetSettings& settings) const {
   if (icon.class_name == kClockClass) {
     return false;
   }
@@ -236,8 +325,11 @@ bool TrayMirror::Include(const TrayIconInfo& icon, int overflow_order, bool syst
   if (overflow_order >= 0 && icon.order == overflow_order) {
     return false;
   }
+  if (KeyHidden(icon.key, settings.tray_hidden_keys)) {
+    return false;
+  }
   if (icon.system_icon) {
-    return system_icons;
+    return settings.tray_system_icons;
   }
   return icon.automation_id == L"NotifyItemIcon";
 }
@@ -315,7 +407,7 @@ void TrayMirror::DoRound(TrayBackend* backend) {
   next.reserve(raw.size());
   keep.reserve(raw.size());
   for (const TrayIconInfo& icon : raw) {
-    if (!Include(icon, overflow, settings.tray_system_icons)) {
+    if (!Include(icon, overflow, settings)) {
       continue;
     }
     TrayIconInfo copy = icon;
@@ -465,6 +557,7 @@ void TrayMirror::WorkerLoop() {
     bool reset = false;
     bool active = false;
     bool slow_stop = false;
+    bool have_invoke = false;
     UINT interval = 1000;
     {
       std::lock_guard lock(mu_);
@@ -473,12 +566,16 @@ void TrayMirror::WorkerLoop() {
       active = active_;
       slow_stop = stopped_slow_;
       interval = interval_ms_;
+      have_invoke = pending_invoke_ != 0;
     }
     if (slow_stop) {
       break;
     }
     if (reset && backend != nullptr) {
       backend->Reset();
+    }
+    if (have_invoke) {
+      DrainInvoke(backend.get());
     }
     if (active && backend != nullptr) {
       DoRound(backend.get());

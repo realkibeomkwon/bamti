@@ -1,8 +1,11 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace bamti {
+
+inline constexpr size_t kTrayHiddenKeysMax = 64;
 
 struct WidgetSettings {
   bool battery = false;
@@ -11,6 +14,7 @@ struct WidgetSettings {
   bool widget_board = false;
   bool tray_mirror = true;
   bool tray_system_icons = false;
+  std::vector<std::string> tray_hidden_keys;
   bool Any() const { return battery || cpu || network || widget_board; }
 };
 
