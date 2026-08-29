@@ -36,7 +36,9 @@ class BuiltinWidgets : public StatusSource {
   void StartWorkerLocked();
   void StopWorker();
   void ResetBaselines();
-  void SubmitSave(const WidgetSettings& s);
+  void SubmitSave();
+  void DrainSaves();
+  static VOID CALLBACK SaveSettingsCallback(PTP_CALLBACK_INSTANCE instance, PVOID ctx);
   void SampleDue(ULONGLONG now);
   void SampleBattery();
   void SampleCpu();
@@ -55,7 +57,9 @@ class BuiltinWidgets : public StatusSource {
   HANDLE stop_event_ = nullptr;
   HANDLE wake_event_ = nullptr;
   HANDLE save_idle_event_ = nullptr;
-  LONG save_inflight_ = 0;
+  WidgetSettings pending_save_{};
+  uint64_t save_gen_ = 0;
+  bool save_busy_ = false;
   bool active_ = true;
   bool reset_pending_ = true;
   bool power_pending_ = false;

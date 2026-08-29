@@ -36,22 +36,6 @@ constexpr wchar_t kCpuGlyph[] = L"▦";
 constexpr wchar_t kNetGlyph[] = L"⇅";
 constexpr wchar_t kBoardGlyph[] = L"▤";
 
-struct SaveJob {
-  WidgetSettings settings;
-  HANDLE idle = nullptr;
-  LONG* inflight = nullptr;
-};
-
-VOID CALLBACK SaveSettingsCallback(PTP_CALLBACK_INSTANCE instance, PVOID ctx) {
-  (void)instance;
-  auto* job = static_cast<SaveJob*>(ctx);
-  SaveWidgetSettings(job->settings);
-  if (job->inflight != nullptr && InterlockedDecrement(job->inflight) == 0 && job->idle != nullptr) {
-    SetEvent(job->idle);
-  }
-  delete job;
-}
-
 uint64_t FileTimeToU64(const FILETIME& ft) {
   ULARGE_INTEGER u;
   u.LowPart = ft.dwLowDateTime;
@@ -413,6 +397,7 @@ WidgetSettings BuiltinWidgets::settings() const {
 
 void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
   bool stop_worker = false;
+  bool submit_save = false;
   StatusSink* sink = nullptr;
   const char* drop[4]{};
   size_t drop_n = 0;
@@ -420,6 +405,15 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
     std::lock_guard lock(mu_);
     const WidgetSettings prev = settings_;
     settings_ = next;
+    pending_save_ = next;
+    ++save_gen_;
+    if (!save_busy_) {
+      save_busy_ = true;
+      submit_save = true;
+      if (save_idle_event_ != nullptr) {
+        ResetEvent(save_idle_event_);
+      }
+    }
     sink = sink_;
     auto note_drop = [&](bool was, bool now, const char* id, std::wstring* fp) {
       if (was && !now) {
@@ -458,7 +452,9 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
   if (stop_worker) {
     StopWorker();
   }
-  SubmitSave(next);
+  if (submit_save) {
+    SubmitSave();
+  }
 }
 
 void BuiltinWidgets::NotePowerEvent(bool resumed) {
@@ -522,23 +518,43 @@ void BuiltinWidgets::OnEvent(const StatusEvent& ev) {
   }
 }
 
-void BuiltinWidgets::SubmitSave(const WidgetSettings& s) {
-  if (save_idle_event_ == nullptr) {
-    return;
-  }
-  auto* job = new SaveJob();
-  job->settings = s;
-  job->idle = save_idle_event_;
-  job->inflight = &save_inflight_;
-  if (InterlockedIncrement(&save_inflight_) == 1) {
-    ResetEvent(save_idle_event_);
-  }
-  if (!TrySubmitThreadpoolCallback(SaveSettingsCallback, job, nullptr)) {
-    if (InterlockedDecrement(&save_inflight_) == 0) {
+void BuiltinWidgets::SubmitSave() {
+  if (!TrySubmitThreadpoolCallback(&BuiltinWidgets::SaveSettingsCallback, this, nullptr)) {
+    std::lock_guard lock(mu_);
+    save_busy_ = false;
+    if (save_idle_event_ != nullptr) {
       SetEvent(save_idle_event_);
     }
-    delete job;
     Log(L"widget", L"settings save submit failed");
+  }
+}
+
+VOID CALLBACK BuiltinWidgets::SaveSettingsCallback(PTP_CALLBACK_INSTANCE instance, PVOID ctx) {
+  (void)instance;
+  static_cast<BuiltinWidgets*>(ctx)->DrainSaves();
+}
+
+void BuiltinWidgets::DrainSaves() {
+  for (;;) {
+    WidgetSettings snap;
+    uint64_t gen = 0;
+    {
+      std::lock_guard lock(mu_);
+      snap = pending_save_;
+      gen = save_gen_;
+    }
+    SaveWidgetSettings(snap);
+    {
+      std::lock_guard lock(mu_);
+      if (gen != save_gen_) {
+        continue;
+      }
+      save_busy_ = false;
+      if (save_idle_event_ != nullptr) {
+        SetEvent(save_idle_event_);
+      }
+      return;
+    }
   }
 }
 
