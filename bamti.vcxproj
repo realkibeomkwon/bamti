@@ -97,6 +97,7 @@
     <ClCompile Include="src\start_menu.cpp" />
     <ClCompile Include="src\spotlight.cpp" />
     <ClCompile Include="src\tray_backend_uia.cpp" />
+    <ClCompile Include="src\tray_intercept.cpp" />
     <ClCompile Include="src\tray_mirror.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -120,6 +121,7 @@
     <ClInclude Include="src\start_menu.hpp" />
     <ClInclude Include="src\spotlight.hpp" />
     <ClInclude Include="src\tray_backend.hpp" />
+    <ClInclude Include="src\tray_intercept.hpp" />
     <ClInclude Include="src\tray_mirror.hpp" />
     <ClInclude Include="src\json_line.hpp" />
     <None Include="src\bamti.manifest" />

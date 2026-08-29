@@ -31,6 +31,7 @@ add_executable(bamti WIN32
   src/spotlight.cpp
   src/tray_probe.cpp
   src/tray_backend_uia.cpp
+  src/tray_intercept.cpp
   src/tray_mirror.cpp
 )
 

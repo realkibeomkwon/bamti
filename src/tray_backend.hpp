@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,6 +30,9 @@ class TrayBackend {
   virtual bool Enumerate(std::vector<TrayIconInfo>* out) = 0;
   virtual bool Invoke(const TrayIconInfo& icon) = 0;
   virtual void Reset() = 0;
+  // 백엔드가 스스로 변경을 알릴 수 있으면 이 콜백을 쓴다.
+  // UIA 백엔드는 쓰지 않고, 가로채기 백엔드는 메시지를 받을 때마다 부른다.
+  virtual void SetChangeSink(std::function<void()> on_change) { (void)on_change; }
   virtual bool SubscribeStructureChanged(HANDLE wake) {
     (void)wake;
     return false;
@@ -48,5 +52,6 @@ class TrayBackend {
 };
 
 std::unique_ptr<TrayBackend> MakeUiaTrayBackend();
+std::unique_ptr<TrayBackend> MakeInterceptTrayBackend();
 
 }  // namespace bamti

@@ -43,8 +43,28 @@ struct TraySuppressGuard {
   }
 };
 
+bool OwnProcessWindow(HWND hwnd) {
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  return pid == GetCurrentProcessId();
+}
+
+}  // namespace
+
+HWND FindExplorerShellTrayWnd() {
+  HWND hwnd = nullptr;
+  while ((hwnd = FindWindowExW(nullptr, hwnd, kPrimaryClass, nullptr)) != nullptr) {
+    if (!OwnProcessWindow(hwnd)) {
+      return hwnd;
+    }
+  }
+  return nullptr;
+}
+
+namespace {
+
 void EnumTrays(const auto& fn) {
-  if (HWND primary = FindWindowW(kPrimaryClass, nullptr)) {
+  if (HWND primary = FindExplorerShellTrayWnd()) {
     fn(primary);
   }
   HWND secondary = nullptr;
@@ -86,7 +106,7 @@ TaskbarController::~TaskbarController() {
 }
 
 HWND TaskbarController::PrimaryTray() {
-  return FindWindowW(kPrimaryClass, nullptr);
+  return FindExplorerShellTrayWnd();
 }
 
 std::wstring TaskbarController::GuardPath() {
@@ -324,7 +344,7 @@ void TaskbarController::ForceRestore() {
   const bool had_guard = ReadGuard(state);
   ShowTrayWindows();
   if (had_guard) {
-    if (HWND tray = FindWindowW(kPrimaryClass, nullptr)) {
+    if (HWND tray = FindExplorerShellTrayWnd()) {
       APPBARDATA abd{};
       abd.cbSize = sizeof(abd);
       abd.hWnd = tray;

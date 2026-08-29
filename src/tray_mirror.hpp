@@ -45,6 +45,8 @@ class TrayMirror : public StatusSource {
   void WorkerLoop();
   void StartWorkerLocked();
   void StopWorker();
+  void StartIntercept();
+  void StopIntercept();
   void DoRound(TrayBackend* backend, bool events_live);
   void Publish(const TrayIconInfo& icon, int order);
   void DropAll();
@@ -73,6 +75,7 @@ class TrayMirror : public StatusSource {
   int slow_streak_ = 0;
   ULONGLONG last_perf_log_ = 0;
   uint64_t pending_invoke_ = 0;
+  std::unique_ptr<TrayBackend> intercept_;
 };
 
 }  // namespace bamti

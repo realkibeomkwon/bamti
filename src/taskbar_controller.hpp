@@ -5,6 +5,9 @@
 
 namespace bamti {
 
+// explorer의 Shell_TrayWnd. 우리 프로세스의 스파이 창은 건너뛴다.
+HWND FindExplorerShellTrayWnd();
+
 class TaskbarController {
  public:
   TaskbarController() = default;

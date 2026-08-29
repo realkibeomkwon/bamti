@@ -638,6 +638,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (g_taskbar_created != 0 && msg == g_taskbar_created) {
         tray_.OnExplorerRestart();
         TaskbarController::RewatchTray();
+        taskbar_.EnsureHidden();
         return 0;
       }
       return DefWindowProcW(hwnd_, msg, wparam, lparam);

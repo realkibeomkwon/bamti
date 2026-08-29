@@ -2,6 +2,7 @@
 
 #include "log.hpp"
 #include "status_item.hpp"
+#include "taskbar_controller.hpp"
 
 #include <oleauto.h>
 #include <uiautomation.h>
@@ -19,7 +20,6 @@
 namespace bamti {
 namespace {
 
-constexpr wchar_t kTrayClass[] = L"Shell_TrayWnd";
 constexpr wchar_t kBridgeClass[] = L"Windows.UI.Composition.DesktopWindowContentBridge";
 constexpr wchar_t kOverflowIslandClass[] = L"TopLevelWindowForOverflowXamlIsland";
 
@@ -66,7 +66,7 @@ uint64_t FallbackKey(const std::wstring& automation_id, const std::wstring& clas
 }
 
 HWND FindBridge() {
-  HWND tray = FindWindowW(kTrayClass, nullptr);
+  HWND tray = FindExplorerShellTrayWnd();
   if (tray == nullptr) {
     return nullptr;
   }

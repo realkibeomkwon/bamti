@@ -94,24 +94,29 @@ const char* TrayMirror::Name() const {
 
 bool TrayMirror::Start(StatusSink* sink) {
   Stop();
-  std::lock_guard lock(mu_);
-  sink_ = sink;
-  settings_ = LoadWidgetSettings();
-  stopped_slow_ = false;
-  reset_pending_ = true;
-  key_round_n_ = 0;
-  use_runtime_id_ = true;
-  items_.clear();
-  if (!settings_.tray_mirror) {
-    Log(L"tray", L"disabled");
-    return true;
+  {
+    std::lock_guard lock(mu_);
+    sink_ = sink;
+    settings_ = LoadWidgetSettings();
+    stopped_slow_ = false;
+    reset_pending_ = true;
+    key_round_n_ = 0;
+    use_runtime_id_ = true;
+    items_.clear();
+    if (!settings_.tray_mirror) {
+      Log(L"tray", L"disabled");
+      return true;
+    }
   }
+  StartIntercept();
+  std::lock_guard lock(mu_);
   StartWorkerLocked();
   return true;
 }
 
 void TrayMirror::Stop() {
   StopWorker();
+  StopIntercept();
   DropAll();
   std::lock_guard lock(mu_);
   sink_ = nullptr;
@@ -154,6 +159,19 @@ WidgetSettings TrayMirror::settings() const {
   return settings_;
 }
 
+void TrayMirror::StartIntercept() {
+  StopIntercept();
+  intercept_ = MakeInterceptTrayBackend();
+  if (intercept_ == nullptr || !intercept_->Probe()) {
+    Log(L"tray", L"intercept spy failed; explorer receives icons directly");
+    intercept_.reset();
+  }
+}
+
+void TrayMirror::StopIntercept() {
+  intercept_.reset();
+}
+
 void TrayMirror::SetSettings(const WidgetSettings& next) {
   bool start_worker = false;
   bool stop_worker = false;
@@ -182,9 +200,6 @@ void TrayMirror::SetSettings(const WidgetSettings& next) {
         }
       }
     }
-    if (start_worker) {
-      StartWorkerLocked();
-    }
   }
   if (sink != nullptr) {
     for (const std::string& id : drop) {
@@ -193,7 +208,13 @@ void TrayMirror::SetSettings(const WidgetSettings& next) {
   }
   if (stop_worker) {
     StopWorker();
+    StopIntercept();
     DropAll();
+  }
+  if (start_worker) {
+    StartIntercept();
+    std::lock_guard lock(mu_);
+    StartWorkerLocked();
   }
 }
 
