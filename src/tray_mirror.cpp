@@ -391,6 +391,8 @@ void TrayMirror::DoRound(TrayBackend* backend) {
     }
     if (added != 0 || removed != 0) {
       Log(L"tray", L"items +%d -%d now=%zu", added, removed, keep.size());
+    } else if (keep.empty()) {
+      Log(L"tray", L"enum raw=%zu keep=0 system=%d", raw.size(), settings.tray_system_icons ? 1 : 0);
     }
   }
 
@@ -447,7 +449,7 @@ void TrayMirror::DoRound(TrayBackend* backend) {
 }
 
 void TrayMirror::WorkerLoop() {
-  const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   auto backend = MakeUiaTrayBackend();
   const bool probed = backend != nullptr && backend->Probe();
   Log(L"tray", L"backend=%hs capture=no hide_mode=hidden right_click=bamti_menu overflow=not_mirrored probe=%d",

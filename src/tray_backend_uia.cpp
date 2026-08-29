@@ -106,10 +106,27 @@ class TrayBackendUia final : public TrayBackend {
         continue;
       }
       TrayIconInfo info;
-      if (!FillCached(el.Get(), &info)) {
-        continue;
-      }
+      FillCached(el.Get(), &info);
       out->push_back(std::move(info));
+    }
+    if (out->empty()) {
+      arr.Reset();
+      if (FAILED(root->FindAll(TreeScope_Descendants, cond_.Get(), arr.GetAddressOf())) || arr == nullptr) {
+        Log(L"tray", L"uia FindAll empty cache_n=%d", n);
+        return true;
+      }
+      int cur_n = 0;
+      arr->get_Length(&cur_n);
+      for (int i = 0; i < cur_n; ++i) {
+        Microsoft::WRL::ComPtr<IUIAutomationElement> el;
+        if (FAILED(arr->GetElement(i, el.GetAddressOf())) || el == nullptr) {
+          continue;
+        }
+        TrayIconInfo info;
+        FillCurrent(el.Get(), &info);
+        out->push_back(std::move(info));
+      }
+      Log(L"tray", L"uia FindAll fallback cache_n=%d current_n=%d kept=%zu", n, cur_n, out->size());
     }
     FinishList(out);
     return true;
@@ -279,11 +296,11 @@ class TrayBackendUia final : public TrayBackend {
     cache_->AddProperty(UIA_IsOffscreenPropertyId);
     cache_->AddProperty(UIA_RuntimeIdPropertyId);
     cache_->AddPattern(UIA_InvokePatternId);
-    cache_->put_TreeScope(TreeScope_Descendants);
+    cache_->put_TreeScope(TreeScope_Element);
     return true;
   }
 
-  bool FillCached(IUIAutomationElement* el, TrayIconInfo* out) {
+  void FillCached(IUIAutomationElement* el, TrayIconInfo* out) {
     BSTR name = nullptr;
     BSTR autoid = nullptr;
     BSTR cls = nullptr;
@@ -303,7 +320,6 @@ class TrayBackendUia final : public TrayBackend {
       out->key = HashIntArray(rid);
     }
     VariantClear(&rid);
-    return out->automation_id == L"NotifyItemIcon" || out->system_icon;
   }
 
   void FinishList(std::vector<TrayIconInfo>* out) {
