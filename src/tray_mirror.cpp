@@ -344,6 +344,9 @@ bool TrayMirror::Include(const TrayIconInfo& icon, int overflow_order, const Wid
   if (KeyHidden(icon.key, settings.tray_hidden_keys)) {
     return false;
   }
+  if (icon.from_overflow) {
+    return settings.tray_overflow_icons && icon.automation_id == L"NotifyItemIcon";
+  }
   if (icon.system_icon) {
     return settings.tray_system_icons;
   }

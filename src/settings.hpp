@@ -14,6 +14,7 @@ struct WidgetSettings {
   bool widget_board = false;
   bool tray_mirror = true;
   bool tray_system_icons = false;
+  bool tray_overflow_icons = true;
   std::vector<std::string> tray_hidden_keys;
   bool Any() const { return battery || cpu || network || widget_board; }
 };

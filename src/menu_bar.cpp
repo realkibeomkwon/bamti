@@ -37,6 +37,7 @@ constexpr UINT kWidgetNetworkCmd = 12;
 constexpr UINT kWidgetBoardCmd = 13;
 constexpr UINT kTrayMirrorToggleCmd = 14;
 constexpr UINT kTraySystemIconsCmd = 15;
+constexpr UINT kTrayOverflowIconsCmd = 16;
 constexpr UINT kTrayPeekCmd = 20;
 constexpr UINT kTrayHideIconCmd = 21;
 constexpr UINT kTrayMirrorOffCmd = 22;
@@ -487,6 +488,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         const WidgetSettings tray = tray_.settings();
         next.tray_mirror = tray.tray_mirror;
         next.tray_system_icons = tray.tray_system_icons;
+        next.tray_overflow_icons = tray.tray_overflow_icons;
         next.tray_hidden_keys = tray.tray_hidden_keys;
         if (cmd == kWidgetBatteryCmd) {
           next.battery = !next.battery;
@@ -499,16 +501,19 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         ApplySettings(next);
       }
-      if (cmd == kTrayMirrorToggleCmd || cmd == kTraySystemIconsCmd) {
+      if (cmd == kTrayMirrorToggleCmd || cmd == kTraySystemIconsCmd || cmd == kTrayOverflowIconsCmd) {
         WidgetSettings next = widgets_.settings();
         const WidgetSettings tray = tray_.settings();
         next.tray_mirror = tray.tray_mirror;
         next.tray_system_icons = tray.tray_system_icons;
+        next.tray_overflow_icons = tray.tray_overflow_icons;
         next.tray_hidden_keys = tray.tray_hidden_keys;
         if (cmd == kTrayMirrorToggleCmd) {
           next.tray_mirror = !next.tray_mirror;
-        } else {
+        } else if (cmd == kTraySystemIconsCmd) {
           next.tray_system_icons = !next.tray_system_icons;
+        } else {
+          next.tray_overflow_icons = !next.tray_overflow_icons;
         }
         ApplySettings(next);
       }
@@ -522,6 +527,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           const WidgetSettings tray = tray_.settings();
           next.tray_mirror = tray.tray_mirror;
           next.tray_system_icons = tray.tray_system_icons;
+          next.tray_overflow_icons = tray.tray_overflow_icons;
           next.tray_hidden_keys = tray.tray_hidden_keys;
           const std::string hex = TrayMirror::KeyText(key);
           bool have = false;
@@ -545,6 +551,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         const WidgetSettings tray = tray_.settings();
         next.tray_mirror = false;
         next.tray_system_icons = tray.tray_system_icons;
+        next.tray_overflow_icons = tray.tray_overflow_icons;
         next.tray_hidden_keys = tray.tray_hidden_keys;
         ApplySettings(next);
       }
@@ -1154,6 +1161,7 @@ void MenuBar::ShowContextMenu(POINT screen) {
   const WidgetSettings tray = tray_.settings();
   AppendMenuW(menu, MF_STRING | (tray.tray_mirror ? MF_CHECKED : 0), kTrayMirrorToggleCmd, L"트레이 미러");
   AppendMenuW(menu, MF_STRING | (tray.tray_system_icons ? MF_CHECKED : 0), kTraySystemIconsCmd, L"시스템 아이콘도 표시");
+  AppendMenuW(menu, MF_STRING | (tray.tray_overflow_icons ? MF_CHECKED : 0), kTrayOverflowIconsCmd, L"숨긴 아이콘도 표시");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kExitCommand, L"종료");
   TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, screen.x, screen.y, hwnd_, nullptr);

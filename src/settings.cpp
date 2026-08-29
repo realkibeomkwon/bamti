@@ -140,6 +140,8 @@ std::string FormatSettings(const WidgetSettings& s, std::string_view extra_topba
   out += s.tray_mirror ? "true" : "false";
   out += ", \"tray_system_icons\": ";
   out += s.tray_system_icons ? "true" : "false";
+  out += ", \"tray_overflow_icons\": ";
+  out += s.tray_overflow_icons ? "true" : "false";
   out += ", \"tray_hidden_keys\": [";
   for (size_t i = 0; i < s.tray_hidden_keys.size(); ++i) {
     if (i != 0) {
@@ -223,6 +225,7 @@ WidgetSettings LoadWidgetSettings() {
   }
   s.tray_mirror = json::GetBool(*widgets, "tray_mirror").value_or(true);
   s.tray_system_icons = json::GetBool(*widgets, "tray_system_icons").value_or(false);
+  s.tray_overflow_icons = json::GetBool(*widgets, "tray_overflow_icons").value_or(true);
   s.tray_hidden_keys = json::GetStringArray(*widgets, "tray_hidden_keys");
   if (s.tray_hidden_keys.size() > kTrayHiddenKeysMax) {
     s.tray_hidden_keys.erase(s.tray_hidden_keys.begin(),
