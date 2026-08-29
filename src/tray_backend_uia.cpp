@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <iterator>
 #include <new>
 #include <string>
 #include <utility>
@@ -20,6 +21,7 @@ namespace {
 
 constexpr wchar_t kTrayClass[] = L"Shell_TrayWnd";
 constexpr wchar_t kBridgeClass[] = L"Windows.UI.Composition.DesktopWindowContentBridge";
+constexpr wchar_t kOverflowIslandClass[] = L"TopLevelWindowForOverflowXamlIsland";
 
 std::wstring BstrTake(BSTR s) {
   if (s == nullptr) {
@@ -69,6 +71,14 @@ HWND FindBridge() {
     return nullptr;
   }
   return FindWindowExW(tray, nullptr, kBridgeClass, nullptr);
+}
+
+HWND FindOverflowBridge() {
+  HWND island = FindWindowW(kOverflowIslandClass, nullptr);
+  if (island == nullptr) {
+    return nullptr;
+  }
+  return FindWindowExW(island, nullptr, kBridgeClass, nullptr);
 }
 
 void SignalWake(HANDLE wake, volatile LONG* fired) {
@@ -173,6 +183,11 @@ class PropertyHandler final : public IUIAutomationPropertyChangedEventHandler {
   volatile LONG* fired_;
 };
 
+struct FoundEl {
+  TrayIconInfo info;
+  Microsoft::WRL::ComPtr<IUIAutomationElement> el;
+};
+
 class TrayBackendUia final : public TrayBackend {
  public:
   const char* Name() const override { return "uia"; }
@@ -190,48 +205,24 @@ class TrayBackendUia final : public TrayBackend {
     if (!EnsureUia() || !EnsureHwnd()) {
       return false;
     }
-    Microsoft::WRL::ComPtr<IUIAutomationElement> root;
-    if (FAILED(uia_->ElementFromHandle(bridge_, root.GetAddressOf())) || root == nullptr) {
+    std::vector<TrayIconInfo> tray;
+    if (!CollectFrom(bridge_, false, &tray)) {
       ResetHwnd();
       return false;
     }
-    Microsoft::WRL::ComPtr<IUIAutomationElementArray> arr;
-    if (FAILED(root->FindAllBuildCache(TreeScope_Descendants, cond_.Get(), cache_.Get(), arr.GetAddressOf())) ||
-        arr == nullptr) {
-      return false;
-    }
-    int n = 0;
-    arr->get_Length(&n);
-    out->reserve(static_cast<size_t>(n));
-    for (int i = 0; i < n; ++i) {
-      Microsoft::WRL::ComPtr<IUIAutomationElement> el;
-      if (FAILED(arr->GetElement(i, el.GetAddressOf())) || el == nullptr) {
-        continue;
+    std::sort(tray.begin(), tray.end(), [](const TrayIconInfo& a, const TrayIconInfo& b) {
+      return a.screen.left < b.screen.left;
+    });
+    std::vector<TrayIconInfo> hidden;
+    if (EnsureOverflowHwnd()) {
+      if (!CollectFrom(overflow_bridge_, true, &hidden)) {
+        overflow_bridge_ = nullptr;
       }
-      TrayIconInfo info;
-      FillCached(el.Get(), &info);
-      out->push_back(std::move(info));
     }
-    if (out->empty()) {
-      arr.Reset();
-      if (FAILED(root->FindAll(TreeScope_Descendants, cond_.Get(), arr.GetAddressOf())) || arr == nullptr) {
-        Log(L"tray", L"uia FindAll empty cache_n=%d", n);
-        return true;
-      }
-      int cur_n = 0;
-      arr->get_Length(&cur_n);
-      for (int i = 0; i < cur_n; ++i) {
-        Microsoft::WRL::ComPtr<IUIAutomationElement> el;
-        if (FAILED(arr->GetElement(i, el.GetAddressOf())) || el == nullptr) {
-          continue;
-        }
-        TrayIconInfo info;
-        FillCurrent(el.Get(), &info);
-        out->push_back(std::move(info));
-      }
-      Log(L"tray", L"uia FindAll fallback cache_n=%d current_n=%d kept=%zu", n, cur_n, out->size());
-    }
-    FinishList(out);
+    out->reserve(tray.size() + hidden.size());
+    out->insert(out->end(), tray.begin(), tray.end());
+    out->insert(out->end(), hidden.begin(), hidden.end());
+    AssignOrdersAndKeys(out);
     return true;
   }
 
@@ -241,38 +232,22 @@ class TrayBackendUia final : public TrayBackend {
     if (!EnsureUia() || !EnsureHwnd()) {
       return false;
     }
-    Microsoft::WRL::ComPtr<IUIAutomationElement> root;
-    if (FAILED(uia_->ElementFromHandle(bridge_, root.GetAddressOf())) || root == nullptr) {
+    std::vector<FoundEl> tray;
+    if (!CollectFound(bridge_, false, &tray)) {
       ResetHwnd();
       return false;
     }
-    Microsoft::WRL::ComPtr<IUIAutomationElementArray> arr;
-    if (FAILED(root->FindAll(TreeScope_Descendants, cond_.Get(), arr.GetAddressOf())) || arr == nullptr) {
-      return false;
-    }
-    int n = 0;
-    arr->get_Length(&n);
-    struct Found {
-      TrayIconInfo info;
-      Microsoft::WRL::ComPtr<IUIAutomationElement> el;
-    };
-    std::vector<Found> found;
-    found.reserve(static_cast<size_t>(n));
-    for (int i = 0; i < n; ++i) {
-      Microsoft::WRL::ComPtr<IUIAutomationElement> el;
-      if (FAILED(arr->GetElement(i, el.GetAddressOf())) || el == nullptr) {
-        continue;
-      }
-      Found one;
-      if (!FillCurrent(el.Get(), &one.info)) {
-        continue;
-      }
-      one.el = el;
-      found.push_back(std::move(one));
-    }
-    std::sort(found.begin(), found.end(), [](const Found& a, const Found& b) {
+    std::sort(tray.begin(), tray.end(), [](const FoundEl& a, const FoundEl& b) {
       return a.info.screen.left < b.info.screen.left;
     });
+    std::vector<FoundEl> hidden;
+    if (EnsureOverflowHwnd()) {
+      CollectFound(overflow_bridge_, true, &hidden);
+    }
+    std::vector<FoundEl> found;
+    found.reserve(tray.size() + hidden.size());
+    found.insert(found.end(), std::make_move_iterator(tray.begin()), std::make_move_iterator(tray.end()));
+    found.insert(found.end(), std::make_move_iterator(hidden.begin()), std::make_move_iterator(hidden.end()));
     for (int i = 0; i < static_cast<int>(found.size()); ++i) {
       found[i].info.order = i;
       if (found[i].info.key == 0) {
@@ -280,9 +255,11 @@ class TrayBackendUia final : public TrayBackend {
       }
     }
     Microsoft::WRL::ComPtr<IUIAutomationElement> match;
-    for (const Found& one : found) {
+    bool match_overflow = false;
+    for (const FoundEl& one : found) {
       if (one.info.key == icon.key) {
         match = one.el;
+        match_overflow = one.info.from_overflow;
         break;
       }
     }
@@ -295,9 +272,14 @@ class TrayBackendUia final : public TrayBackend {
     Microsoft::WRL::ComPtr<IUIAutomationInvokePattern> invoke;
     last_hr_ = match->GetCurrentPatternAs(UIA_InvokePatternId, IID_PPV_ARGS(invoke.GetAddressOf()));
     last_pattern_ = "Invoke";
+    HRESULT invoke_hr = last_hr_;
     if (SUCCEEDED(last_hr_) && invoke != nullptr) {
       last_hr_ = invoke->Invoke();
+      invoke_hr = last_hr_;
       if (SUCCEEDED(last_hr_)) {
+        if (match_overflow) {
+          Log(L"tray", L"overflow invoke hr=0x%08X fallback_hr=n/a ok=1", static_cast<unsigned>(invoke_hr));
+        }
         return true;
       }
     }
@@ -305,10 +287,20 @@ class TrayBackendUia final : public TrayBackend {
     Microsoft::WRL::ComPtr<IUIAutomationLegacyIAccessiblePattern> acc;
     last_hr_ = match->GetCurrentPatternAs(UIA_LegacyIAccessiblePatternId, IID_PPV_ARGS(acc.GetAddressOf()));
     last_pattern_ = "LegacyIAccessible";
+    HRESULT fallback_hr = last_hr_;
     if (SUCCEEDED(last_hr_) && acc != nullptr) {
       last_hr_ = acc->DoDefaultAction();
-      return SUCCEEDED(last_hr_);
+      fallback_hr = last_hr_;
+      if (SUCCEEDED(last_hr_)) {
+        if (match_overflow) {
+          Log(L"tray", L"overflow invoke hr=0x%08X fallback_hr=0x%08X ok=1", static_cast<unsigned>(invoke_hr),
+              static_cast<unsigned>(fallback_hr));
+        }
+        return true;
+      }
     }
+    Log(L"tray", L"invoke hr=0x%08X fallback_hr=0x%08X overflow=%d", static_cast<unsigned>(invoke_hr),
+        static_cast<unsigned>(fallback_hr), match_overflow ? 1 : 0);
     return false;
   }
 
@@ -389,6 +381,15 @@ class TrayBackendUia final : public TrayBackend {
         }
       }
     }
+    if (EnsureOverflowHwnd()) {
+      Microsoft::WRL::ComPtr<IUIAutomationElement> overflow_root;
+      if (SUCCEEDED(uia_->ElementFromHandle(overflow_bridge_, overflow_root.GetAddressOf())) &&
+          overflow_root != nullptr) {
+        uia_->AddStructureChangedEventHandler(overflow_root.Get(), TreeScope_Subtree, ev_cache.Get(), handler_.Get());
+        uia_->AddPropertyChangedEventHandlerNativeArray(overflow_root.Get(), TreeScope_Subtree, ev_cache.Get(),
+                                                        props_.Get(), changed, ARRAYSIZE(changed));
+      }
+    }
     UnhookWinEvent(hook_);
     hook_ = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY, nullptr, TrayWinEventProc, 0, 0,
                             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
@@ -443,7 +444,97 @@ class TrayBackendUia final : public TrayBackend {
     return bridge_ != nullptr;
   }
 
-  void ResetHwnd() { bridge_ = nullptr; }
+  bool EnsureOverflowHwnd() {
+    if (overflow_bridge_ != nullptr && IsWindow(overflow_bridge_)) {
+      return true;
+    }
+    overflow_bridge_ = FindOverflowBridge();
+    return overflow_bridge_ != nullptr;
+  }
+
+  void ResetHwnd() {
+    bridge_ = nullptr;
+    overflow_bridge_ = nullptr;
+  }
+
+  bool CollectFrom(HWND hwnd, bool from_overflow, std::vector<TrayIconInfo>* out) {
+    if (hwnd == nullptr || out == nullptr) {
+      return false;
+    }
+    Microsoft::WRL::ComPtr<IUIAutomationElement> root;
+    if (FAILED(uia_->ElementFromHandle(hwnd, root.GetAddressOf())) || root == nullptr) {
+      return false;
+    }
+    Microsoft::WRL::ComPtr<IUIAutomationElementArray> arr;
+    if (FAILED(root->FindAllBuildCache(TreeScope_Descendants, cond_.Get(), cache_.Get(), arr.GetAddressOf())) ||
+        arr == nullptr) {
+      return false;
+    }
+    int n = 0;
+    arr->get_Length(&n);
+    const size_t before = out->size();
+    out->reserve(before + static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+      Microsoft::WRL::ComPtr<IUIAutomationElement> el;
+      if (FAILED(arr->GetElement(i, el.GetAddressOf())) || el == nullptr) {
+        continue;
+      }
+      TrayIconInfo info;
+      FillCached(el.Get(), &info);
+      info.from_overflow = from_overflow;
+      out->push_back(std::move(info));
+    }
+    if (out->size() == before) {
+      arr.Reset();
+      if (FAILED(root->FindAll(TreeScope_Descendants, cond_.Get(), arr.GetAddressOf())) || arr == nullptr) {
+        return true;
+      }
+      int cur_n = 0;
+      arr->get_Length(&cur_n);
+      for (int i = 0; i < cur_n; ++i) {
+        Microsoft::WRL::ComPtr<IUIAutomationElement> el;
+        if (FAILED(arr->GetElement(i, el.GetAddressOf())) || el == nullptr) {
+          continue;
+        }
+        TrayIconInfo info;
+        FillCurrent(el.Get(), &info);
+        info.from_overflow = from_overflow;
+        out->push_back(std::move(info));
+      }
+    }
+    return true;
+  }
+
+  bool CollectFound(HWND hwnd, bool from_overflow, std::vector<FoundEl>* out) {
+    if (hwnd == nullptr || out == nullptr) {
+      return false;
+    }
+    Microsoft::WRL::ComPtr<IUIAutomationElement> root;
+    if (FAILED(uia_->ElementFromHandle(hwnd, root.GetAddressOf())) || root == nullptr) {
+      return false;
+    }
+    Microsoft::WRL::ComPtr<IUIAutomationElementArray> arr;
+    if (FAILED(root->FindAll(TreeScope_Descendants, cond_.Get(), arr.GetAddressOf())) || arr == nullptr) {
+      return false;
+    }
+    int n = 0;
+    arr->get_Length(&n);
+    out->reserve(out->size() + static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+      Microsoft::WRL::ComPtr<IUIAutomationElement> el;
+      if (FAILED(arr->GetElement(i, el.GetAddressOf())) || el == nullptr) {
+        continue;
+      }
+      FoundEl one;
+      if (!FillCurrent(el.Get(), &one.info)) {
+        continue;
+      }
+      one.info.from_overflow = from_overflow;
+      one.el = el;
+      out->push_back(std::move(one));
+    }
+    return true;
+  }
 
   bool EnsureUia() {
     if (uia_ != nullptr && cond_ != nullptr && cache_ != nullptr) {
@@ -559,10 +650,7 @@ class TrayBackendUia final : public TrayBackend {
     VariantClear(&rid);
   }
 
-  void FinishList(std::vector<TrayIconInfo>* out) {
-    std::sort(out->begin(), out->end(), [](const TrayIconInfo& a, const TrayIconInfo& b) {
-      return a.screen.left < b.screen.left;
-    });
+  void AssignOrdersAndKeys(std::vector<TrayIconInfo>* out) {
     for (int i = 0; i < static_cast<int>(out->size()); ++i) {
       (*out)[i].order = i;
       if ((*out)[i].key == 0) {
@@ -595,6 +683,7 @@ class TrayBackendUia final : public TrayBackend {
   }
 
   HWND bridge_ = nullptr;
+  HWND overflow_bridge_ = nullptr;
   Microsoft::WRL::ComPtr<IUIAutomation> uia_;
   Microsoft::WRL::ComPtr<IUIAutomationCondition> cond_;
   Microsoft::WRL::ComPtr<IUIAutomationCacheRequest> cache_;

@@ -17,6 +17,7 @@ struct TrayIconInfo {
   int order = 0;
   bool system_icon = false;
   bool has_image_child = false;
+  bool from_overflow = false;
   BOOL offscreen = FALSE;
 };
 

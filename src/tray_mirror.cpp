@@ -363,7 +363,9 @@ void TrayMirror::Publish(const TrayIconInfo& icon, int order) {
   item.tooltip = Truncate(icon.tip, kStatusPanelTextMaxChars);
   item.state = StatusState::kNormal;
   item.priority = kTrayPriorityBase - order;
-  item.visible = icon.offscreen == FALSE;
+  // 알림 영역 항목: explorer가 감춘 것이면 우리도 감춘다.
+  // 오버플로 항목: 원래 화면 밖이므로 IsOffscreen은 판단 근거가 되지 못한다.
+  item.visible = icon.from_overflow ? true : (icon.offscreen == FALSE);
   StatusSink* sink = nullptr;
   {
     std::lock_guard lock(mu_);
@@ -442,7 +444,7 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
     st.key = copy.key;
     st.tip = copy.tip;
     st.order = copy.order;
-    st.visible = copy.offscreen == FALSE;
+    st.visible = copy.from_overflow ? true : (copy.offscreen == FALSE);
     st.id = MakeId(copy.key);
     next.push_back(st);
     keep.push_back(std::move(copy));
@@ -488,7 +490,7 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
     }
     for (const TrayIconInfo& icon : keep) {
       const auto it = prev.find(icon.key);
-      const bool vis = icon.offscreen == FALSE;
+      const bool vis = icon.from_overflow ? true : (icon.offscreen == FALSE);
       if (it == prev.end() || it->second.tip != icon.tip || it->second.order != icon.order ||
           it->second.visible != vis) {
         if (it == prev.end()) {
@@ -570,7 +572,7 @@ void TrayMirror::WorkerLoop() {
     events_live = backend->SubscribeStructureChanged(struct_event_);
   }
   Log(L"tray",
-      L"backend=%hs capture=no hide_mode=hidden right_click=bamti_menu overflow=not_mirrored "
+      L"backend=%hs capture=no hide_mode=hidden right_click=bamti_menu overflow=mirrored "
       L"structure_changed=%d probe=%d",
       backend != nullptr ? backend->Name() : "none", events_live ? 1 : 0, probed ? 1 : 0);
 
