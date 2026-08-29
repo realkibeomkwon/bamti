@@ -18,6 +18,7 @@ constexpr UINT kSlowEnumMs = 200;
 constexpr int kSlowStreakStop = 3;
 constexpr wchar_t kClockClass[] = L"SystemTray.OmniButton";
 constexpr wchar_t kShowDesktopClass[] = L"SystemTray.ShowDesktopButton";
+constexpr wchar_t kOverflowButtonClass[] = L"SystemTray.NormalButton";
 
 std::wstring Truncate(std::wstring text, size_t max_chars) {
   if (text.size() <= max_chars) {
@@ -46,9 +47,12 @@ UINT ClampInterval(ULONGLONG enum_ms) {
 }
 
 int OverflowOrder(const std::vector<TrayIconInfo>& icons) {
-  // 오버플로 단추는 가장 왼쪽 SystemTrayIcon 중 자식 Image가 없는 버튼이다.
+  // 오버플로 단추는 가장 왼쪽 SystemTrayIcon 중
+  // ClassName이 NormalButton이면서 자식 Image가 없는 버튼이다.
+  // 다른 시스템 아이콘은 AccentButton, OmniButton, OmniButtonCenter,
+  // ShowDesktopButton이므로 이 조건에 걸리지 않는다.
   for (const TrayIconInfo& icon : icons) {
-    if (icon.system_icon && !icon.has_image_child) {
+    if (icon.system_icon && icon.class_name == kOverflowButtonClass && !icon.has_image_child) {
       return icon.order;
     }
   }
