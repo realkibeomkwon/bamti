@@ -30,6 +30,8 @@ add_executable(bamti WIN32
   src/start_menu.cpp
   src/spotlight.cpp
   src/tray_probe.cpp
+  src/tray_backend_uia.cpp
+  src/tray_mirror.cpp
 )
 
 target_include_directories(bamti PRIVATE src)
@@ -71,6 +73,7 @@ target_link_libraries(bamti PRIVATE
   gdi32
   uxtheme
   ole32
+  oleaut32
   advapi32
   shcore
   comctl32

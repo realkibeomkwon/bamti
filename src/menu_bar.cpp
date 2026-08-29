@@ -36,6 +36,8 @@ constexpr UINT kWidgetCpuCmd = 11;
 constexpr UINT kWidgetNetworkCmd = 12;
 constexpr UINT kWidgetBoardCmd = 13;
 
+UINT g_taskbar_created = 0;
+
 MenuBar* g_menu_bar = nullptr;
 HHOOK g_key_hook = nullptr;
 UINT g_status_msg_count = 0;
@@ -205,7 +207,14 @@ bool MenuBar::Create(HINSTANCE instance) {
   CreateTooltip();
   status_.SetNotify(hwnd_);
   status_.Register(&pipe_);
+  status_.Register(&tray_);
   status_.Register(&widgets_);
+  if (g_taskbar_created == 0) {
+    g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
+  }
+  if (g_taskbar_created != 0) {
+    ChangeWindowMessageFilterEx(hwnd_, g_taskbar_created, MSGFLT_ALLOW, nullptr);
+  }
   if (!status_.StartAll()) {
     return false;
   }
@@ -547,6 +556,11 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       PostQuitMessage(0);
       return 0;
     default:
+      if (g_taskbar_created != 0 && msg == g_taskbar_created) {
+        tray_.OnExplorerRestart();
+        TaskbarController::RewatchTray();
+        return 0;
+      }
       return DefWindowProcW(hwnd_, msg, wparam, lparam);
   }
   return DefWindowProcW(hwnd_, msg, wparam, lparam);

@@ -135,6 +135,10 @@ std::string FormatSettings(const WidgetSettings& s, std::string_view extra_topba
   out += s.network ? "true" : "false";
   out += ", \"widget_board_button\": ";
   out += s.widget_board ? "true" : "false";
+  out += ", \"tray_mirror\": ";
+  out += s.tray_mirror ? "true" : "false";
+  out += ", \"tray_system_icons\": ";
+  out += s.tray_system_icons ? "true" : "false";
   out += '}';
   out.append(extra_topbar.data(), extra_topbar.size());
   out += "\n  }";
@@ -207,6 +211,8 @@ WidgetSettings LoadWidgetSettings() {
   } else {
     s.widget_board = json::GetBool(*widgets, "widget_board").value_or(false);
   }
+  s.tray_mirror = json::GetBool(*widgets, "tray_mirror").value_or(true);
+  s.tray_system_icons = json::GetBool(*widgets, "tray_system_icons").value_or(false);
   return s;
 }
 

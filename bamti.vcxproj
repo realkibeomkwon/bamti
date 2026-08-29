@@ -53,7 +53,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>dwmapi.lib;d2d1.lib;dwrite.lib;shell32.lib;user32.lib;gdi32.lib;uxtheme.lib;ole32.lib;advapi32.lib;shcore.lib;comctl32.lib;propsys.lib;uuid.lib;msimg32.lib;windowscodecs.lib;powrprof.lib;imm32.lib;shlwapi.lib;winmm.lib;iphlpapi.lib;wtsapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwmapi.lib;d2d1.lib;dwrite.lib;shell32.lib;user32.lib;gdi32.lib;uxtheme.lib;ole32.lib;oleaut32.lib;advapi32.lib;shcore.lib;comctl32.lib;propsys.lib;uuid.lib;msimg32.lib;windowscodecs.lib;powrprof.lib;imm32.lib;shlwapi.lib;winmm.lib;iphlpapi.lib;wtsapi32.lib;uiautomationcore.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -96,6 +96,8 @@
     <ClCompile Include="src\popup_surface.cpp" />
     <ClCompile Include="src\start_menu.cpp" />
     <ClCompile Include="src\spotlight.cpp" />
+    <ClCompile Include="src\tray_backend_uia.cpp" />
+    <ClCompile Include="src\tray_mirror.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\host.hpp" />
@@ -117,6 +119,8 @@
     <ClInclude Include="src\popup_surface.hpp" />
     <ClInclude Include="src\start_menu.hpp" />
     <ClInclude Include="src\spotlight.hpp" />
+    <ClInclude Include="src\tray_backend.hpp" />
+    <ClInclude Include="src\tray_mirror.hpp" />
     <ClInclude Include="src\json_line.hpp" />
     <None Include="src\bamti.manifest" />
   </ItemGroup>

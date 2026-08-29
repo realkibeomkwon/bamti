@@ -9,6 +9,8 @@ struct WidgetSettings {
   bool cpu = false;
   bool network = false;
   bool widget_board = false;
+  bool tray_mirror = true;
+  bool tray_system_icons = false;
   bool Any() const { return battery || cpu || network || widget_board; }
 };
 
