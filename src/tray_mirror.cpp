@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <iterator>
 
 namespace bamti {
 namespace {
@@ -496,6 +497,8 @@ void TrayMirror::DoRound(TrayBackend* backend) {
   }
   std::sort(keys.begin(), keys.end());
   bool log_stable = false;
+  bool log_deferred = false;
+  size_t common_n = 0;
   int stable = 0;
   unsigned churn = 0;
   {
@@ -504,26 +507,25 @@ void TrayMirror::DoRound(TrayBackend* backend) {
       key_rounds_[key_round_n_] = keys;
       ++key_round_n_;
       if (key_round_n_ == 5) {
-        log_stable = true;
-        stable = 1;
+        std::vector<uint64_t> common = key_rounds_[0];
         std::vector<uint64_t> all = key_rounds_[0];
         for (int i = 1; i < 5; ++i) {
-          if (key_rounds_[i] != key_rounds_[0]) {
-            stable = 0;
-          }
-          std::vector<uint64_t> merged = all;
-          merged.insert(merged.end(), key_rounds_[i].begin(), key_rounds_[i].end());
-          std::sort(merged.begin(), merged.end());
-          merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
-          all.swap(merged);
+          std::vector<uint64_t> next_common;
+          std::set_intersection(common.begin(), common.end(), key_rounds_[i].begin(), key_rounds_[i].end(),
+                                std::back_inserter(next_common));
+          common.swap(next_common);
+          all.insert(all.end(), key_rounds_[i].begin(), key_rounds_[i].end());
         }
-        size_t min_n = key_rounds_[0].size();
-        for (int i = 1; i < 5; ++i) {
-          min_n = (std::min)(min_n, key_rounds_[i].size());
-        }
-        churn = static_cast<unsigned>(all.size() - min_n);
-        if (stable == 0) {
-          use_runtime_id_ = false;
+        std::sort(all.begin(), all.end());
+        all.erase(std::unique(all.begin(), all.end()), all.end());
+        if (common.size() < 2) {
+          key_round_n_ = 0;
+          log_deferred = true;
+          common_n = common.size();
+        } else {
+          log_stable = true;
+          stable = 1;
+          churn = static_cast<unsigned>(all.size() - common.size());
         }
       }
     }
@@ -532,6 +534,9 @@ void TrayMirror::DoRound(TrayBackend* backend) {
       last_perf_log_ = now;
       Log(L"tray", L"enum_ms=%llu interval_ms=%u items=%zu", last_enum_ms_, interval_ms_, keep.size());
     }
+  }
+  if (log_deferred) {
+    Log(L"tray", L"key stable deferred common=%zu", common_n);
   }
   if (log_stable) {
     Log(L"tray", L"key stable=%d churn=%u", stable, churn);

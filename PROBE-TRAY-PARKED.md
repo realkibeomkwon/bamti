@@ -40,7 +40,8 @@ PNG: `%USERPROFILE%\.bamti\probe-parked-bridge.png`, `probe-parked-notify.png`
 
 - 아이콘 사각형 안쪽 표준편차가 8 이상인 사각형이 절반을 넘지 않는다. 두 창 모두 캡처 대상이 될 수 없다.
 - PNG는 사람 눈으로도 완전 검정이다. 경계값 판정이 필요 없다.
-- `kParkedVisible`은 이 컴퓨터의 XAML 태스크바에서 픽셀을 주지 못한다. Win32 창 사각형만 화면 밖으로 가고, DWM/XAML 합성은 원래 가장자리에 남는다. 따라서 14절 3번 커밋(`HideMode`)과 5번 커밋(캡처·배경 제거)은 건너뛴다.
+- 캡처 경로를 포기한 결론은 그대로다. 원인은 확정하지 못했다. 관측된 것은 태스크바를 `SetWindowPos`로 옮긴 뒤에는 대상 창이 원위치로 돌아온 상태에서도 `PrintWindow`가 검정을 돌려준다는 사실이다. 근거: 3·4절의 `Shell_TrayWnd` rect `(0,32000,5120,32072)`, 5절 UIA `BoundingRectangle` y=2158, 6절 캡처 대상 rect `(0,2158,5120,2230)`인데도 `non_black_pct=0.00`. 정상 상태 `PROBE-TRAY.md`의 같은 `TrayNotifyWnd`는 99.78%였다.
+- 따라서 14절 3번 커밋(`HideMode`)과 5번 커밋(캡처·배경 제거)은 건너뛴다.
 - UIA 열거는 주차 뒤에도 동작한다(7개, 31ms). 글리프 폴백 미러의 열거 경로는 유효하다.
 
 ## 원본 보고서
