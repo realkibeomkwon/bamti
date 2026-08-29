@@ -129,9 +129,19 @@ class StructureHandler final : public IUIAutomationStructureChangedEventHandler 
     return E_NOINTERFACE;
   }
 
-  HRESULT STDMETHODCALLTYPE HandleStructureChangedEvent(IUIAutomationElement*, StructureChangeType,
+  HRESULT STDMETHODCALLTYPE HandleStructureChangedEvent(IUIAutomationElement*, StructureChangeType change,
                                                         SAFEARRAY*) override {
-    SignalWake(wake_, fired_);
+    switch (change) {
+      case StructureChangeType_ChildAdded:
+      case StructureChangeType_ChildRemoved:
+      case StructureChangeType_ChildrenBulkAdded:
+      case StructureChangeType_ChildrenBulkRemoved:
+      case StructureChangeType_ChildrenInvalidated:
+        SignalWake(wake_, fired_);
+        break;
+      default:
+        break;
+    }
     return S_OK;
   }
 
@@ -423,6 +433,8 @@ class TrayBackendUia final : public TrayBackend {
     UnsubscribeStructureChanged();
     abandoned_ = true;
   }
+
+  void AllowStructureRetry() override { abandoned_ = false; }
 
   ~TrayBackendUia() { UnsubscribeStructureChanged(); }
 

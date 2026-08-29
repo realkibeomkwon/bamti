@@ -20,7 +20,8 @@ constexpr UINT kEventDebounceMs = 300;
 constexpr UINT kEventMinIntervalMs = 1000;
 constexpr UINT kSafetyIntervalMs = 5000;
 constexpr UINT kFloodWindowMs = 10000;
-constexpr long kFloodMaxEvents = 50;
+constexpr long kFloodMaxEnums = 8;
+constexpr ULONGLONG kFloodRetryMs = 300000;
 constexpr wchar_t kClockClass[] = L"SystemTray.OmniButton";
 constexpr wchar_t kShowDesktopClass[] = L"SystemTray.ShowDesktopButton";
 constexpr wchar_t kOverflowButtonClass[] = L"SystemTray.NormalButton";
@@ -660,6 +661,8 @@ void TrayMirror::WorkerLoop() {
   bool probed = backend != nullptr && backend->Probe();
   bool intercept = intercept_ != nullptr && backend == intercept_.get();
   bool events_abandoned = false;
+  bool events_retried = false;
+  bool events_gave_up = false;
   bool events_live = false;
   if (backend != nullptr && !events_abandoned && !intercept) {
     events_live = backend->SubscribeStructureChanged(struct_event_);
@@ -680,6 +683,7 @@ void TrayMirror::WorkerLoop() {
   ULONGLONG last_struct = 0;
   ULONGLONG flood_t0 = 0;
   long flood_n = 0;
+  ULONGLONG flood_abandon_at = 0;
 
   for (;;) {
     if (stop_event_ != nullptr && WaitForSingleObject(stop_event_, 0) == WAIT_OBJECT_0) {
@@ -702,6 +706,20 @@ void TrayMirror::WorkerLoop() {
     }
     if (slow_stop) {
       break;
+    }
+    if (!intercept && events_abandoned && !events_gave_up && !events_retried && flood_abandon_at != 0) {
+      const ULONGLONG now = GetTickCount64();
+      if (now - flood_abandon_at >= kFloodRetryMs) {
+        events_abandoned = false;
+        events_retried = true;
+        flood_n = 0;
+        flood_t0 = 0;
+        if (backend != nullptr) {
+          backend->AllowStructureRetry();
+          events_live = backend->SubscribeStructureChanged(struct_event_);
+        }
+        Log(L"tray", L"structure_changed retry after flood structure_changed=%d", events_live ? 1 : 0);
+      }
     }
     if (intercept && (intercept_ == nullptr || !intercept_->ParseLive())) {
       Log(L"tray", L"intercept parse failed; switching to uia");
@@ -740,6 +758,29 @@ void TrayMirror::WorkerLoop() {
       last_enum = GetTickCount64();
       run_enum = false;
       struct_pending = false;
+      if (!intercept && events_live && !events_abandoned) {
+        if (flood_n == 0 || last_enum - flood_t0 >= kFloodWindowMs) {
+          flood_t0 = last_enum;
+          flood_n = 0;
+        }
+        ++flood_n;
+        if (flood_n > kFloodMaxEnums) {
+          events_abandoned = true;
+          events_live = false;
+          flood_abandon_at = last_enum;
+          if (backend != nullptr) {
+            backend->AbandonStructureChanged();
+          }
+          if (events_retried) {
+            events_gave_up = true;
+            Log(L"tray", L"structure_changed flood enums=%ld window_ms=%llu; polling only (no retry)", flood_n,
+                last_enum - flood_t0);
+          } else {
+            Log(L"tray", L"structure_changed flood enums=%ld window_ms=%llu; polling only", flood_n,
+                last_enum - flood_t0);
+          }
+        }
+      }
       std::lock_guard lock(mu_);
       interval = interval_ms_;
       slow_stop = stopped_slow_;
@@ -817,24 +858,11 @@ void TrayMirror::WorkerLoop() {
       continue;
     }
     if (wait == WAIT_OBJECT_0 + 2) {
-      const long nfire = backend != nullptr ? backend->TakeStructureChangedCount() : 0;
+      if (backend != nullptr) {
+        backend->TakeStructureChangedCount();
+      }
       if (active) {
-        const ULONGLONG now = GetTickCount64();
-        if (flood_n == 0 || now - flood_t0 >= kFloodWindowMs) {
-          flood_t0 = now;
-          flood_n = 0;
-        }
-        flood_n += nfire > 0 ? nfire : 1;
-        if (!events_abandoned && flood_n > kFloodMaxEvents) {
-          events_abandoned = true;
-          events_live = false;
-          if (backend != nullptr) {
-            backend->AbandonStructureChanged();
-          }
-          Log(L"tray", L"structure_changed flood count=%ld window_ms=%llu; polling only", flood_n,
-              now - flood_t0);
-        }
-        last_struct = now;
+        last_struct = GetTickCount64();
         struct_pending = true;
       }
       continue;

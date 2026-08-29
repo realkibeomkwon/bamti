@@ -53,6 +53,7 @@ class TrayBackend {
   virtual bool StructureChangedLive() const { return false; }
   virtual long TakeStructureChangedCount() { return 0; }
   virtual void AbandonStructureChanged() {}
+  virtual void AllowStructureRetry() {}
   virtual void LastInvokeError(HRESULT* hr, const char** pattern) const {
     if (hr != nullptr) {
       *hr = S_OK;
