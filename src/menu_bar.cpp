@@ -1179,7 +1179,7 @@ void MenuBar::ShowTrayIconMenu(POINT screen, const std::string& id) {
   AppendMenuW(menu, MF_STRING, kTrayMirrorOffCmd, L"트레이 미러 끄기");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"앱 메뉴는 알림 영역 잠시 표시로 엽니다");
-  AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"숨긴 아이콘은 Windows 설정에서 항상 표시해야 미러됩니다");
+  AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"숨긴 아이콘도 미러합니다. 클릭 반응이 없으면 알림 영역 잠시 표시로 여세요");
   AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"지금은 글리프만 표시합니다");
   TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, screen.x, screen.y, hwnd_, nullptr);
   DestroyMenu(menu);
