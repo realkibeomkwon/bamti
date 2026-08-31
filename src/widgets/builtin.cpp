@@ -2,6 +2,7 @@
 
 #include "log.hpp"
 #include "status_item.hpp"
+#include "theme.hpp"
 #include "widgets/volume.hpp"
 
 // netioapi.h (via iphlpapi.h) needs _WS2IPDEF_. Do not include winsock2.h.
@@ -39,11 +40,10 @@ constexpr ULONGLONG kVolumePeriodMs = 1000;
 constexpr ULONGLONG kVolumeRefreshMs = 20000;
 constexpr ULONGLONG kFirstSampleMs = 1000;
 
-constexpr wchar_t kBatteryGlyphs[] = L"▁▃▅▇█";
-constexpr wchar_t kCpuGlyph[] = L"▦";
-constexpr wchar_t kNetGlyph[] = L"⇅";
-constexpr wchar_t kVolumeGlyph[] = L"♪";
-constexpr wchar_t kVolumeMuteGlyph[] = L"♪";
+// Segoe Fluent Icons가 없을 때 DrawVectorIcon이 되돌리는 문자.
+[[maybe_unused]] constexpr wchar_t kNetGlyph[] = L"⇅";
+[[maybe_unused]] constexpr wchar_t kVolumeGlyph[] = L"♪";
+[[maybe_unused]] constexpr wchar_t kVolumeMuteGlyph[] = L"♪";
 constexpr wchar_t kBoardGlyph[] = L"▤";
 
 uint64_t FileTimeToU64(const FILETIME& ft) {
@@ -146,6 +146,15 @@ void SetGlyph(StatusItem* item, const wchar_t* glyph) {
   if (item->icon.glyph.size() > kStatusGlyphMaxChars) {
     item->icon.glyph.resize(kStatusGlyphMaxChars);
   }
+  item->icon.cache_key = HashStatusIcon(item->icon);
+}
+
+void SetVectorIcon(StatusItem* item, VectorIcon vector, float value, uint32_t flags) {
+  item->icon.kind = IconKind::kVector;
+  item->icon.vector = vector;
+  item->icon.value = ClampUnit(value);
+  item->icon.flags = flags;
+  item->icon.glyph.clear();
   item->icon.cache_key = HashStatusIcon(item->icon);
 }
 
@@ -849,16 +858,12 @@ void BuiltinWidgets::SampleBattery() {
   const int pct = static_cast<int>(status.BatteryLifePercent);
   const bool charging = (status.BatteryFlag & BATTERY_FLAG_CHARGING) != 0 ||
                         (status.ACLineStatus == 1 && pct < 100);
-  size_t glyph_i = static_cast<size_t>(pct / 20);
-  if (glyph_i > 4) {
-    glyph_i = 4;
-  }
-  wchar_t glyph[2] = {kBatteryGlyphs[glyph_i], 0};
+  const float level = static_cast<float>(pct) / 100.0f;
 
   StatusItem item;
   item.id = kBatteryId;
   item.priority = kBatteryPriority;
-  SetGlyph(&item, glyph);
+  SetVectorIcon(&item, VectorIcon::kBattery, level, charging ? kVectorFlagCharging : 0);
   item.text = Truncate(PercentText(pct, charging), kStatusTextMaxChars);
   std::wstring tip = L"배터리 ";
   tip += PercentText(pct, false);
@@ -888,8 +893,9 @@ void BuiltinWidgets::SampleBattery() {
   } else if (status.ACLineStatus == 1) {
     ac = L"연결됨";
   }
-  panel.rows.push_back(GaugeRow(L"잔량", static_cast<float>(pct) / 100.0f, PercentText(pct, false),
+  panel.rows.push_back(GaugeRow(L"잔량", level, PercentText(pct, false),
                                 charging ? std::wstring{} : RemainText(status.BatteryLifeTime)));
+  panel.rows.back().fill_rgb = BatteryFillRgb(ShellUsesDarkMode(), level, charging);
   panel.rows.push_back(KvRow(L"전원", std::move(ac)));
   panel.rows.push_back(KvRow(L"절전 모드", (status.SystemStatusFlag & 1) != 0 ? L"켜짐" : L"꺼짐"));
   panel.rows.push_back(SepRow());
@@ -964,7 +970,7 @@ void BuiltinWidgets::SampleCpu() {
   StatusItem item;
   item.id = kCpuId;
   item.priority = kCpuPriority;
-  SetGlyph(&item, kCpuGlyph);
+  SetVectorIcon(&item, VectorIcon::kCpu, static_cast<float>(pct) / 100.0f, 0);
   item.text = Truncate(PercentText(pct, false), kStatusTextMaxChars);
   wchar_t tip[128]{};
   swprintf_s(tip, L"CPU %d%% · 사용자 %d%% · 커널 %d%%", pct, user_pct, kernel_pct);
@@ -1073,7 +1079,7 @@ void BuiltinWidgets::SampleNet() {
   StatusItem item;
   item.id = kNetId;
   item.priority = kNetPriority;
-  SetGlyph(&item, kNetGlyph);
+  SetVectorIcon(&item, VectorIcon::kNetwork, 0.0f, 0);
   item.text = Truncate(std::move(text), kStatusTextMaxChars);
   item.tooltip = Truncate(std::move(tip), kStatusPanelTextMaxChars);
   item.state = StatusState::kNormal;
@@ -1137,7 +1143,7 @@ void BuiltinWidgets::SampleVolume() {
   StatusItem item;
   item.id = kVolumeId;
   item.priority = kVolumePriority;
-  SetGlyph(&item, state.muted ? kVolumeMuteGlyph : kVolumeGlyph);
+  SetVectorIcon(&item, VectorIcon::kVolume, state.level, state.muted ? kVectorFlagMuted : 0);
   if (state.muted) {
     item.text = Truncate(L"음소거", kStatusTextMaxChars);
     item.state = StatusState::kOff;
