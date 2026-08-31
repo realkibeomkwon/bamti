@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <d2d1.h>
 
 namespace bamti {
@@ -11,5 +12,8 @@ D2D1_COLOR_F MenuItemHoverFill(bool dark, bool pressed);
 D2D1_COLOR_F DockFillColor(bool dark);
 D2D1_COLOR_F DockStrokeColor(bool dark);
 D2D1_COLOR_F DockIndicatorColor(bool dark);
+D2D1_COLOR_F BatteryFillColor(bool dark, float level, bool charging);
+uint32_t BatteryFillRgb(bool dark, float level, bool charging);
+D2D1_COLOR_F CpuRingColor(bool dark, float usage);
 
 }  // namespace bamti

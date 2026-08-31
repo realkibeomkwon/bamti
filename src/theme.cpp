@@ -64,4 +64,37 @@ D2D1_COLOR_F DockIndicatorColor(bool dark) {
   return D2D1::ColorF(0.22f, 0.22f, 0.22f, 0.55f);
 }
 
+D2D1_COLOR_F BatteryFillColor(bool dark, float level, bool charging) {
+  if (charging || level > 0.20f) {
+    return dark ? D2D1::ColorF(0x5BC85B) : D2D1::ColorF(0x0F7B0F);
+  }
+  if (level <= 0.10f) {
+    return dark ? D2D1::ColorF(0xFF99A4) : D2D1::ColorF(0xC42B1C);
+  }
+  return dark ? D2D1::ColorF(0xFCE100) : D2D1::ColorF(0x9D5D00);
+}
+
+uint32_t BatteryFillRgb(bool dark, float level, bool charging) {
+  if (charging || level > 0.20f) {
+    return dark ? 0x5BC85Bu : 0x0F7B0Fu;
+  }
+  if (level <= 0.10f) {
+    return dark ? 0xFF99A4u : 0xC42B1Cu;
+  }
+  return dark ? 0xFCE100u : 0x9D5D00u;
+}
+
+D2D1_COLOR_F CpuRingColor(bool dark, float usage) {
+  if (usage < 0.30f) {
+    return dark ? D2D1::ColorF(0x5BC85B) : D2D1::ColorF(0x0F7B0F);
+  }
+  if (usage < 0.60f) {
+    return dark ? D2D1::ColorF(0xFCE100) : D2D1::ColorF(0x9D5D00);
+  }
+  if (usage < 0.85f) {
+    return dark ? D2D1::ColorF(0xFF8C00) : D2D1::ColorF(0xC4520A);
+  }
+  return dark ? D2D1::ColorF(0xFF99A4) : D2D1::ColorF(0xC42B1C);
+}
+
 }  // namespace bamti
