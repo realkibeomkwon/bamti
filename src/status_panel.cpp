@@ -324,9 +324,15 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
       const float bar_top = static_cast<float>(y);
       const float bar_bottom = bar_top + static_cast<float>(bar_h);
       target->FillRectangle(D2D1::RectF(left, bar_top, right, bar_bottom), track.Get());
+      if (row.fill_rgb != 0) {
+        fill->SetColor(D2D1::ColorF(row.fill_rgb));
+      }
       const float filled = left + (right - left) * row.value;
       if (filled > left) {
         target->FillRectangle(D2D1::RectF(left, bar_top, filled, bar_bottom), fill.Get());
+      }
+      if (row.fill_rgb != 0) {
+        fill->SetColor(fill_c);
       }
       y += bar_h;
       if (value_right && !row.detail.empty()) {
