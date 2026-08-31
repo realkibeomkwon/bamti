@@ -1324,7 +1324,13 @@ void MenuBar::ShowContextMenu(POINT screen) {
               L"로그인 시 bamti 시작");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kExitCommand, L"종료");
+  const HWND prev = GetForegroundWindow();
+  SetForegroundWindow(hwnd_);
   TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, screen.x, screen.y, hwnd_, nullptr);
+  PostMessageW(hwnd_, WM_NULL, 0, 0);
+  if (GetForegroundWindow() == hwnd_ && prev != nullptr && prev != hwnd_) {
+    SetForegroundWindow(prev);
+  }
   DestroyMenu(menu);
 }
 
@@ -1341,7 +1347,13 @@ void MenuBar::ShowTrayIconMenu(POINT screen, const std::string& id) {
   AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"앱 메뉴는 알림 영역 잠시 표시로 엽니다");
   AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"숨긴 아이콘도 미러합니다. 클릭 반응이 없으면 알림 영역 잠시 표시로 여세요");
   AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"지금은 글리프만 표시합니다");
+  const HWND prev = GetForegroundWindow();
+  SetForegroundWindow(hwnd_);
   TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, screen.x, screen.y, hwnd_, nullptr);
+  PostMessageW(hwnd_, WM_NULL, 0, 0);
+  if (GetForegroundWindow() == hwnd_ && prev != nullptr && prev != hwnd_) {
+    SetForegroundWindow(prev);
+  }
   DestroyMenu(menu);
 }
 
