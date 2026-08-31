@@ -25,6 +25,7 @@ struct TrayIconInfo {
   UINT uid = 0;
   UINT callback_message = 0;
   UINT version = 0;
+  GUID guid_item{};  // 등록에 GUID가 쓰였을 때만 채운다. UIA 백엔드는 채우지 않는다.
 };
 
 class TrayBackend {
@@ -44,6 +45,10 @@ class TrayBackend {
     (void)right;
     return Invoke(icon);
   }
+  virtual bool Invoke(const TrayIconInfo& icon, bool right, bool dblclk) {
+    (void)dblclk;
+    return Invoke(icon, right);
+  }
   virtual bool ForwardsContextMenu() const { return false; }
   virtual bool SubscribeStructureChanged(HANDLE wake) {
     (void)wake;
@@ -62,6 +67,8 @@ class TrayBackend {
       *pattern = "";
     }
   }
+  // 셸이 재시작했다. 기본 구현은 아무 일도 하지 않는다.
+  virtual void OnShellRestart() {}
 };
 
 std::unique_ptr<TrayBackend> MakeUiaTrayBackend();

@@ -26,6 +26,7 @@ add_executable(bamti WIN32
   src/fullscreen.cpp
   src/task_list.cpp
   src/dock.cpp
+  src/autostart.cpp
   src/popup_surface.cpp
   src/start_menu.cpp
   src/spotlight.cpp

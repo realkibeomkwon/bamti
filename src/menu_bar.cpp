@@ -1,5 +1,6 @@
 #include "menu_bar.hpp"
 
+#include "autostart.hpp"
 #include "dwm.hpp"
 #include "fullscreen.hpp"
 #include "log.hpp"
@@ -14,6 +15,7 @@
 #include <wtsapi32.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <string_view>
 
@@ -39,9 +41,11 @@ constexpr UINT kTrayMirrorToggleCmd = 14;
 constexpr UINT kTraySystemIconsCmd = 15;
 constexpr UINT kTrayOverflowIconsCmd = 16;
 constexpr UINT kTrayInterceptCmd = 17;
+constexpr UINT kAutostartCmd = 18;
 constexpr UINT kTrayPeekCmd = 20;
 constexpr UINT kTrayHideIconCmd = 21;
 constexpr UINT kTrayMirrorOffCmd = 22;
+constexpr UINT kTrayItemCmdBase = 4000;
 constexpr UINT_PTR kPeekTimerId = 4;
 constexpr UINT kPeekMs = 10000;
 
@@ -185,7 +189,7 @@ bool MenuBar::Create(HINSTANCE instance) {
 
   WNDCLASSEXW wc{};
   wc.cbSize = sizeof(wc);
-  wc.style = CS_HREDRAW | CS_VREDRAW;
+  wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
   wc.lpfnWndProc = WndProc;
   wc.hInstance = instance;
   wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
@@ -432,6 +436,10 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         ToggleStartMenu();
         return 0;
       }
+      if (skip_left_up_) {
+        skip_left_up_ = false;
+        return 0;
+      }
       if (const BarSegment* seg = HitSegment(pt)) {
         if (seg->kind == SegmentKind::kOverflow) {
           OpenOverflow();
@@ -446,6 +454,22 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         ev.button = "left";
         status_.Dispatch(ev);
         OpenStatusPanel(*hit);
+      }
+      return 0;
+    }
+    case WM_LBUTTONDBLCLK: {
+      POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      if (HitStart(pt)) {
+        return 0;
+      }
+      if (const auto hit = HitTest(pt)) {
+        skip_left_up_ = true;
+        status_popup_.Close();
+        StatusEvent ev;
+        ev.id = hit->id;
+        ev.event = "dblclick";
+        ev.button = "left";
+        status_.Dispatch(ev);
       }
       return 0;
     }
@@ -555,6 +579,11 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (cmd == kTrayPeekCmd) {
         StartTrayPeek();
       }
+      if (cmd == kAutostartCmd) {
+        if (!SetAutostart(!AutostartEnabled())) {
+          Log(L"bar", L"autostart toggle failed");
+        }
+      }
       if (cmd == kTrayHideIconCmd) {
         const uint64_t key = TrayMirror::ParseId(tray_menu_id_);
         if (key != 0) {
@@ -574,6 +603,45 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
           }
           if (!have) {
+            next.tray_hidden_keys.push_back(hex);
+            if (next.tray_hidden_keys.size() > kTrayHiddenKeysMax) {
+              next.tray_hidden_keys.erase(next.tray_hidden_keys.begin());
+            }
+          }
+          ApplySettings(next);
+        }
+      }
+      if (cmd >= kTrayItemCmdBase && cmd < kTrayItemCmdBase + kTrayHiddenKeysMax) {
+        const size_t idx = static_cast<size_t>(cmd - kTrayItemCmdBase);
+        if (idx < tray_menu_keys_.size()) {
+          const uint64_t key = tray_menu_keys_[idx];
+          WidgetSettings next = widgets_.settings();
+          const WidgetSettings tray = tray_.settings();
+          next.tray_mirror = tray.tray_mirror;
+          next.tray_system_icons = tray.tray_system_icons;
+          next.tray_overflow_icons = tray.tray_overflow_icons;
+          next.tray_backend = tray.tray_backend;
+          next.tray_hidden_keys = tray.tray_hidden_keys;
+          const std::string hex = TrayMirror::KeyText(key);
+          std::vector<std::string> kept;
+          kept.reserve(next.tray_hidden_keys.size());
+          bool have = false;
+          for (const std::string& one : next.tray_hidden_keys) {
+            uint64_t parsed = 0;
+            if (one.size() >= 2 && one[0] == '0' && (one[1] == 'x' || one[1] == 'X')) {
+              parsed = static_cast<uint64_t>(strtoull(one.c_str() + 2, nullptr, 16));
+            } else {
+              parsed = static_cast<uint64_t>(strtoull(one.c_str(), nullptr, 16));
+            }
+            if (parsed == key || one == hex) {
+              have = true;
+              continue;
+            }
+            kept.push_back(one);
+          }
+          if (have) {
+            next.tray_hidden_keys = std::move(kept);
+          } else {
             next.tray_hidden_keys.push_back(hex);
             if (next.tray_hidden_keys.size() > kTrayHiddenKeysMax) {
               next.tray_hidden_keys.erase(next.tray_hidden_keys.begin());
@@ -1202,7 +1270,29 @@ void MenuBar::ShowContextMenu(POINT screen) {
   AppendMenuW(menu, MF_STRING | (tray.tray_overflow_icons ? MF_CHECKED : 0), kTrayOverflowIconsCmd, L"숨긴 아이콘도 표시");
   AppendMenuW(menu, MF_STRING | (tray.tray_backend == "intercept" ? MF_CHECKED : 0), kTrayInterceptCmd,
               L"트레이 아이콘 가로채기(실험)");
+  const HMENU tray_items = CreatePopupMenu();
+  tray_menu_keys_.clear();
+  if (tray_items != nullptr) {
+    const std::vector<TrayMirror::MenuItem> entries = tray_.MenuItems();
+    if (entries.empty()) {
+      AppendMenuW(tray_items, MF_STRING | MF_GRAYED, 0, L"미러 중인 아이콘이 없습니다");
+    } else {
+      const size_t n = (std::min)(entries.size(), kTrayHiddenKeysMax);
+      tray_menu_keys_.reserve(n);
+      for (size_t i = 0; i < n; ++i) {
+        const UINT flags = MF_STRING | (entries[i].shown ? MF_CHECKED : 0);
+        AppendMenuW(tray_items, flags, kTrayItemCmdBase + static_cast<UINT>(i), entries[i].label.c_str());
+        tray_menu_keys_.push_back(entries[i].key);
+      }
+      if (entries.size() > kTrayHiddenKeysMax) {
+        AppendMenuW(tray_items, MF_STRING | MF_GRAYED, 0, L"이하 생략");
+      }
+    }
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(tray_items), L"트레이 아이콘");
+  }
   AppendMenuW(menu, MF_STRING, kTrayPeekCmd, L"알림 영역 잠시 표시");
+  AppendMenuW(menu, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), kAutostartCmd,
+              L"로그인 시 bamti 시작");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kExitCommand, L"종료");
   TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, screen.x, screen.y, hwnd_, nullptr);

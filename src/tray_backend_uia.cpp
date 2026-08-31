@@ -12,6 +12,7 @@
 #include <iterator>
 #include <new>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -233,6 +234,7 @@ class TrayBackendUia final : public TrayBackend {
     out->insert(out->end(), tray.begin(), tray.end());
     out->insert(out->end(), hidden.begin(), hidden.end());
     AssignOrdersAndKeys(out);
+    NoteNewItems(*out);
     return true;
   }
 
@@ -671,6 +673,17 @@ class TrayBackendUia final : public TrayBackend {
     }
   }
 
+  void NoteNewItems(const std::vector<TrayIconInfo>& icons) {
+    for (const TrayIconInfo& icon : icons) {
+      if (!diag_logged_.insert(icon.key).second) {
+        continue;
+      }
+      const std::wstring safe = SanitizeTipForLog(icon.tip);
+      Log(L"tray", L"uia item tip=\"%s\" system=%d overflow=%d", safe.c_str(), icon.system_icon ? 1 : 0,
+          icon.from_overflow ? 1 : 0);
+    }
+  }
+
   bool FillCurrent(IUIAutomationElement* el, TrayIconInfo* out) {
     BSTR name = nullptr;
     BSTR autoid = nullptr;
@@ -707,6 +720,7 @@ class TrayBackendUia final : public TrayBackend {
   bool abandoned_ = false;
   HRESULT last_hr_ = S_OK;
   const char* last_pattern_ = "";
+  std::unordered_set<uint64_t> diag_logged_;
 };
 
 }  // namespace

@@ -147,7 +147,9 @@ class MenuBar {
   PendingToggle pending_toggle_{};
   bool toggle_armed_ = false;
   bool tray_peeking_ = false;
+  bool skip_left_up_ = false;
   std::string tray_menu_id_;
+  std::vector<uint64_t> tray_menu_keys_;
 };
 
 }  // namespace bamti

@@ -1,9 +1,11 @@
 #include "icon_cache.hpp"
 
 #include "log.hpp"
+#include "theme.hpp"
 
 #include <algorithm>
 #include <cstring>
+#include <d2d1helper.h>
 
 namespace bamti {
 namespace {
@@ -53,6 +55,51 @@ Microsoft::WRL::ComPtr<ID2D1Bitmap> ScaleWicToBitmap(ID2D1RenderTarget* rt, IWIC
     out.Reset();
   }
   return out;
+}
+
+bool IsBrightMonochrome(const BgraImage& image) {
+  int ink = 0;
+  int bright = 0;
+  int colorful = 0;
+  const size_t n = image.pixels.size() / 4;
+  for (size_t i = 0; i < n; ++i) {
+    const int b = image.pixels[i * 4 + 0];
+    const int g = image.pixels[i * 4 + 1];
+    const int r = image.pixels[i * 4 + 2];
+    const int a = image.pixels[i * 4 + 3];
+    if (a < 160) {
+      continue;
+    }
+    ++ink;
+    const int mx = (std::max)(r, (std::max)(g, b));
+    const int mn = (std::min)(r, (std::min)(g, b));
+    if (mx - mn > 28) {
+      ++colorful;
+      continue;
+    }
+    if (mn >= 160) {
+      ++bright;
+    }
+  }
+  if (ink < 8 || colorful > 0) {
+    return false;
+  }
+  return bright * 10 >= ink * 9;
+}
+
+void RecolorKeepAlpha(BgraImage& image, D2D1_COLOR_F color) {
+  const std::uint8_t cr = static_cast<std::uint8_t>(color.r * 255.0f + 0.5f);
+  const std::uint8_t cg = static_cast<std::uint8_t>(color.g * 255.0f + 0.5f);
+  const std::uint8_t cb = static_cast<std::uint8_t>(color.b * 255.0f + 0.5f);
+  const size_t n = image.pixels.size() / 4;
+  for (size_t i = 0; i < n; ++i) {
+    if (image.pixels[i * 4 + 3] == 0) {
+      continue;
+    }
+    image.pixels[i * 4 + 0] = cb;
+    image.pixels[i * 4 + 1] = cg;
+    image.pixels[i * 4 + 2] = cr;
+  }
 }
 
 }  // namespace
@@ -166,6 +213,29 @@ void StraightToPremul(BgraImage& image) {
     image.pixels[i * 4 + 0] = static_cast<std::uint8_t>((image.pixels[i * 4 + 0] * a + 127) / 255);
     image.pixels[i * 4 + 1] = static_cast<std::uint8_t>((image.pixels[i * 4 + 1] * a + 127) / 255);
     image.pixels[i * 4 + 2] = static_cast<std::uint8_t>((image.pixels[i * 4 + 2] * a + 127) / 255);
+  }
+}
+
+void PremulToStraight(BgraImage& image) {
+  auto unpremul = [](int c, int a) -> std::uint8_t {
+    const int v = (c * 255 + a / 2) / a;
+    return static_cast<std::uint8_t>(v > 255 ? 255 : v);
+  };
+  const size_t n = image.pixels.size() / 4;
+  for (size_t i = 0; i < n; ++i) {
+    const int a = image.pixels[i * 4 + 3];
+    if (a == 0) {
+      image.pixels[i * 4 + 0] = 0;
+      image.pixels[i * 4 + 1] = 0;
+      image.pixels[i * 4 + 2] = 0;
+      continue;
+    }
+    if (a == 255) {
+      continue;
+    }
+    image.pixels[i * 4 + 0] = unpremul(image.pixels[i * 4 + 0], a);
+    image.pixels[i * 4 + 1] = unpremul(image.pixels[i * 4 + 1], a);
+    image.pixels[i * 4 + 2] = unpremul(image.pixels[i * 4 + 2], a);
   }
 }
 
@@ -355,7 +425,7 @@ HBITMAP BitmapFromIcon(HICON icon, int px) {
   DrawIconEx(dc, 0, 0, icon, native, native, 0, nullptr, DI_NORMAL);
   SelectObject(dc, old);
   DeleteDC(dc);
-  return FinalizeIconBitmap(bmp, px, true);
+  return FinalizeIconBitmap(bmp, px, false);
 }
 
 void IconCache::SetRenderTarget(ID2D1RenderTarget* rt) {
@@ -364,6 +434,14 @@ void IconCache::SetRenderTarget(ID2D1RenderTarget* rt) {
   }
   Clear();
   rt_ = rt;
+}
+
+void IconCache::SetDark(bool dark) {
+  if (dark_ == dark) {
+    return;
+  }
+  dark_ = dark;
+  Clear();
 }
 
 void IconCache::Clear() {
@@ -461,7 +539,32 @@ Microsoft::WRL::ComPtr<ID2D1Bitmap> IconCache::Decode(const StatusIcon& icon, in
       Log(L"icon", L"png too large %ux%u", w, h);
       return out;
     }
-    return BitmapFromWic(frame.Get(), px);
+    Microsoft::WRL::ComPtr<IWICFormatConverter> bgra;
+    if (FAILED(wic->CreateFormatConverter(bgra.GetAddressOf())) ||
+        FAILED(bgra->Initialize(frame.Get(), GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0.0,
+                                WICBitmapPaletteTypeCustom))) {
+      Log(L"icon", L"png decode failed");
+      return out;
+    }
+    BgraImage image;
+    image.width = static_cast<int>(w);
+    image.height = static_cast<int>(h);
+    image.pixels.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
+    if (FAILED(bgra->CopyPixels(nullptr, w * 4, static_cast<UINT>(image.pixels.size()), image.pixels.data()))) {
+      Log(L"icon", L"png decode failed");
+      return out;
+    }
+    if (IsBrightMonochrome(image)) {
+      RecolorKeepAlpha(image, ClockTextColor(dark_));
+    }
+    Microsoft::WRL::ComPtr<IWICBitmap> mem;
+    if (FAILED(wic->CreateBitmapFromMemory(w, h, GUID_WICPixelFormat32bppBGRA, w * 4,
+                                           static_cast<UINT>(image.pixels.size()), image.pixels.data(),
+                                           mem.GetAddressOf()))) {
+      Log(L"icon", L"png decode failed");
+      return out;
+    }
+    return BitmapFromWic(mem.Get(), px);
   }
   if (icon.kind == IconKind::kFile) {
     if (icon.path.empty()) {

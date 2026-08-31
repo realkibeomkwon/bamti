@@ -141,6 +141,7 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
     }
     icons_.SetRenderTarget(rt_.Get());
   }
+  icons_.SetDark(dark);
 
   LARGE_INTEGER t0{};
   LARGE_INTEGER t1{};

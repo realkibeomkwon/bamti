@@ -2,6 +2,7 @@
 
 #include "icon_cache.hpp"
 #include "log.hpp"
+#include "settings.hpp"
 #include "status_item.hpp"
 
 #include <objbase.h>
@@ -11,6 +12,7 @@
 #include <windows.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -19,6 +21,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace bamti {
@@ -26,11 +30,22 @@ namespace {
 
 constexpr wchar_t kSpyClass[] = L"Shell_TrayWnd";
 constexpr UINT kStopMsg = WM_APP + 40;
+constexpr UINT kShellRestartMsg = WM_APP + 41;
 constexpr UINT kPrioTimerId = 1;
-constexpr UINT kPrioTimerMs = 1000;
+constexpr UINT kPrioTimerFastMs = 100;
+constexpr UINT kPrioTimerSlowMs = 1000;
+constexpr ULONGLONG kFastWindowMs = 5000;
+constexpr UINT kPrioAcquireMs = 500;
+constexpr UINT kPrioAcquireStepMs = 20;
 constexpr UINT kForwardTimeoutMs = 1000;
 constexpr size_t kPendingMax = 64;
 constexpr DWORD kCopyDataMax = 65536;
+constexpr ULONGLONG kSelfBroadcastSuppressMs = 2000;
+constexpr ULONGLONG kRebroadcastWindowMs = 60000;
+constexpr int kRebroadcastMax = 3;
+
+std::unique_ptr<TrayBackend> g_prestarted;
+ULONGLONG g_prestart_tick = 0;
 
 struct PendingMsg {
   UINT msg = 0;
@@ -42,7 +57,8 @@ struct PendingMsg {
 };
 
 constexpr long kParseFailMax = 10;
-constexpr int kIconPx = 24;
+// 상단바 16 DIP. 200% DPI에서 32px. 48px는 PNG 한도(8192)를 넘길 수 있다.
+constexpr int kIconPx = 32;
 
 #pragma pack(push, 1)
 struct TrayNotifyIconData {
@@ -91,6 +107,37 @@ bool OwnProcess(HWND hwnd) {
   DWORD pid = 0;
   GetWindowThreadProcessId(hwnd, &pid);
   return pid == GetCurrentProcessId();
+}
+
+std::wstring OwnerExeName(HWND owner) {
+  if (owner == nullptr) {
+    return L"?";
+  }
+  DWORD pid = 0;
+  GetWindowThreadProcessId(owner, &pid);
+  if (pid == 0) {
+    return L"?";
+  }
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (process == nullptr) {
+    return L"?";
+  }
+  wchar_t buf[MAX_PATH]{};
+  DWORD n = MAX_PATH;
+  std::wstring name = L"?";
+  if (QueryFullProcessImageNameW(process, 0, buf, &n) != FALSE && n > 0) {
+    const wchar_t* file = buf;
+    for (DWORD i = 0; i < n; ++i) {
+      if (buf[i] == L'\\' || buf[i] == L'/') {
+        file = buf + i + 1;
+      }
+    }
+    if (file[0] != 0) {
+      name = file;
+    }
+  }
+  CloseHandle(process);
+  return name;
 }
 
 HWND FindRealTray(HWND spy) {
@@ -197,30 +244,71 @@ bool IconToPng(HICON icon, std::vector<uint8_t>* out) {
   if (icon == nullptr || out == nullptr) {
     return false;
   }
-  BITMAPINFO bmi{};
-  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-  bmi.bmiHeader.biWidth = kIconPx;
-  bmi.bmiHeader.biHeight = -kIconPx;
-  bmi.bmiHeader.biPlanes = 1;
-  bmi.bmiHeader.biBitCount = 32;
-  bmi.bmiHeader.biCompression = BI_RGB;
-  void* bits = nullptr;
-  HBITMAP bmp = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-  if (bmp == nullptr) {
+  HBITMAP src = BitmapFromIcon(icon, kIconPx);
+  if (src == nullptr) {
     return false;
   }
-  const HDC dc = CreateCompatibleDC(nullptr);
-  const HGDIOBJ old = SelectObject(dc, bmp);
-  DrawIconEx(dc, 0, 0, icon, kIconPx, kIconPx, 0, nullptr, DI_NORMAL);
-  SelectObject(dc, old);
-  DeleteDC(dc);
   BgraImage image;
-  const bool ok = BitmapToBgra(bmp, image);
-  DeleteObject(bmp);
+  const bool ok = BitmapToBgra(src, image);
+  DeleteObject(src);
   if (!ok) {
     return false;
   }
+  PremulToStraight(image);
   return EncodePng(image, out);
+}
+
+const wchar_t* NotifyEventName(UINT event) {
+  switch (event) {
+    case WM_LBUTTONDOWN:
+      return L"WM_LBUTTONDOWN";
+    case WM_LBUTTONUP:
+      return L"WM_LBUTTONUP";
+    case WM_LBUTTONDBLCLK:
+      return L"WM_LBUTTONDBLCLK";
+    case WM_RBUTTONDOWN:
+      return L"WM_RBUTTONDOWN";
+    case WM_RBUTTONUP:
+      return L"WM_RBUTTONUP";
+    case WM_CONTEXTMENU:
+      return L"WM_CONTEXTMENU";
+    case NIN_SELECT:
+      return L"NIN_SELECT";
+    case NIN_KEYSELECT:
+      return L"NIN_KEYSELECT";
+    default:
+      return L"?";
+  }
+}
+
+void PostNotify(HWND owner, UINT callback, WPARAM wp, LPARAM lp, UINT event, uint64_t key, UINT uid, UINT version,
+                bool right, BOOL asfw, DWORD asfw_err) {
+  const BOOL posted = PostMessageW(owner, callback, wp, lp);
+  if (posted == FALSE) {
+    const DWORD err = GetLastError();
+    if (asfw == FALSE) {
+      Log(L"tray",
+          L"intercept invoke key=0x%llX uid=%u version=%u right=%d event=%s owner=0x%llX posted=0 err=%lu asfw=0 asfw_err=%lu",
+          static_cast<unsigned long long>(key), uid, version, right ? 1 : 0, NotifyEventName(event),
+          static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(owner)), err, asfw_err);
+      return;
+    }
+    Log(L"tray",
+        L"intercept invoke key=0x%llX uid=%u version=%u right=%d event=%s owner=0x%llX posted=0 err=%lu asfw=1",
+        static_cast<unsigned long long>(key), uid, version, right ? 1 : 0, NotifyEventName(event),
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(owner)), err);
+    return;
+  }
+  if (asfw == FALSE) {
+    Log(L"tray",
+        L"intercept invoke key=0x%llX uid=%u version=%u right=%d event=%s owner=0x%llX posted=1 asfw=0 asfw_err=%lu",
+        static_cast<unsigned long long>(key), uid, version, right ? 1 : 0, NotifyEventName(event),
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(owner)), asfw_err);
+    return;
+  }
+  Log(L"tray", L"intercept invoke key=0x%llX uid=%u version=%u right=%d event=%s owner=0x%llX posted=1 asfw=1",
+      static_cast<unsigned long long>(key), uid, version, right ? 1 : 0, NotifyEventName(event),
+      static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(owner)));
 }
 
 class TrayBackendIntercept final : public TrayBackend {
@@ -254,12 +342,15 @@ class TrayBackendIntercept final : public TrayBackend {
 
   bool Invoke(const TrayIconInfo&) override { return false; }
 
-  bool Invoke(const TrayIconInfo& icon, bool right) override {
+  bool Invoke(const TrayIconInfo& icon, bool right) override { return Invoke(icon, right, false); }
+
+  bool Invoke(const TrayIconInfo& icon, bool right, bool dblclk) override {
     HWND owner = nullptr;
     UINT uid = 0;
     UINT callback = 0;
     UINT version = 0;
     uint64_t key = icon.key;
+    std::wstring tip;
     {
       std::lock_guard lock(mu_);
       for (const StoredIcon& one : items_) {
@@ -268,17 +359,32 @@ class TrayBackendIntercept final : public TrayBackend {
           uid = one.info.uid;
           callback = one.info.callback_message;
           version = one.info.version;
+          tip = one.info.tip;
           break;
         }
       }
     }
     if (owner == nullptr || callback == 0 || IsWindow(owner) == FALSE) {
+      const wchar_t* reason = L"no_owner";
+      if (owner != nullptr && callback == 0) {
+        reason = L"no_callback";
+      } else if (owner != nullptr) {
+        reason = L"dead_window";
+      }
+      const std::wstring safe = SanitizeTipForLog(tip);
+      Log(L"tray", L"intercept invoke skipped key=0x%llX uid=%u tip=\"%s\" reason=%s",
+          static_cast<unsigned long long>(key), uid, safe.c_str(), reason);
       return false;
     }
     DWORD pid = 0;
     GetWindowThreadProcessId(owner, &pid);
+    BOOL asfw = TRUE;
+    DWORD asfw_err = 0;
     if (pid != 0) {
-      AllowSetForegroundWindow(pid);
+      asfw = AllowSetForegroundWindow(pid);
+      if (asfw == FALSE) {
+        asfw_err = GetLastError();
+      }
     }
     POINT pt{};
     RECT rc{};
@@ -295,21 +401,26 @@ class TrayBackendIntercept final : public TrayBackend {
     } else {
       GetCursorPos(&pt);
     }
-    const UINT down = right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
-    const UINT up = right ? WM_RBUTTONUP : WM_LBUTTONUP;
-    if (version >= 4) {
+    if (version >= NOTIFYICON_VERSION_4) {
+      // NOTIFYICON_VERSION_4 규약에는 더블클릭 이벤트가 없다. 더블클릭도 NIN_SELECT 한 번이다.
+      if (pt.x > 32767 || pt.y > 32767 || pt.x < -32768 || pt.y < -32768) {
+        Log(L"tray", L"intercept invoke coord overflow x=%ld y=%ld", pt.x, pt.y);
+      }
       const WPARAM wp = MAKEWPARAM(static_cast<UINT>(pt.x), static_cast<UINT>(pt.y));
-      PostMessageW(owner, callback, wp, MAKELPARAM(down, uid));
-      PostMessageW(owner, callback, wp, MAKELPARAM(up, uid));
-      if (right) {
-        PostMessageW(owner, callback, wp, MAKELPARAM(WM_CONTEXTMENU, uid));
-      }
+      const UINT event = right ? WM_CONTEXTMENU : NIN_SELECT;
+      PostNotify(owner, callback, wp, MAKELPARAM(event, uid), event, key, uid, version, right, asfw, asfw_err);
+    } else if (dblclk && !right) {
+      PostNotify(owner, callback, uid, WM_LBUTTONDBLCLK, WM_LBUTTONDBLCLK, key, uid, version, right, asfw, asfw_err);
+    } else if (version >= NOTIFYICON_VERSION) {
+      const UINT down = right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
+      const UINT action = right ? WM_CONTEXTMENU : NIN_SELECT;
+      PostNotify(owner, callback, uid, down, down, key, uid, version, right, asfw, asfw_err);
+      PostNotify(owner, callback, uid, action, action, key, uid, version, right, asfw, asfw_err);
     } else {
-      PostMessageW(owner, callback, uid, down);
-      PostMessageW(owner, callback, uid, up);
-      if (right) {
-        PostMessageW(owner, callback, uid, WM_CONTEXTMENU);
-      }
+      const UINT down = right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
+      const UINT up = right ? WM_RBUTTONUP : WM_LBUTTONUP;
+      PostNotify(owner, callback, uid, down, down, key, uid, version, right, asfw, asfw_err);
+      PostNotify(owner, callback, uid, up, up, key, uid, version, right, asfw, asfw_err);
     }
     return true;
   }
@@ -328,6 +439,23 @@ class TrayBackendIntercept final : public TrayBackend {
   void SetChangeSink(std::function<void()> on_change) override {
     std::lock_guard lock(mu_);
     on_change_ = std::move(on_change);
+  }
+
+  void OnShellRestart() override {
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG last = last_self_broadcast_.load(std::memory_order_acquire);
+    if (last != 0 && now - last < kSelfBroadcastSuppressMs) {
+      Log(L"tray", L"intercept shell restart suppressed");
+      return;
+    }
+    HWND spy = nullptr;
+    {
+      std::lock_guard lock(mu_);
+      spy = spy_;
+    }
+    if (spy != nullptr && IsWindow(spy)) {
+      PostMessageW(spy, kShellRestartMsg, 0, 0);
+    }
   }
 
  private:
@@ -434,20 +562,29 @@ class TrayBackendIntercept final : public TrayBackend {
       std::lock_guard lock(mu_);
       spy_ = spy;
     }
-    SetTimer(spy, kPrioTimerId, kPrioTimerMs, nullptr);
+    SetTimer(spy, kPrioTimerId, kPrioTimerSlowMs, nullptr);
+    prio_timer_ms_ = kPrioTimerSlowMs;
     SetWindowPos(spy, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     if (ready_ != nullptr) {
       SetEvent(ready_);
     }
+    if (g_prestart_tick != 0) {
+      Log(L"tray", L"intercept prestart elapsed_ms=%llu spy=0x%llX", GetTickCount64() - g_prestart_tick,
+          static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(spy)));
+      g_prestart_tick = 0;
+    }
     Log(L"tray", L"intercept pass-through spy=0x%llX explorer=0x%llX timer_ms=%u sizeof_msg=%zu",
         static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(spy)),
-        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(FindRealTray(spy))), kPrioTimerMs,
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(FindRealTray(spy))), prio_timer_ms_,
         sizeof(ShellTrayMessage));
 
+    WaitForPriority(spy);
     const UINT created = RegisterWindowMessageW(L"TaskbarCreated");
     if (created != 0) {
+      NoteSelfBroadcast();
       SendNotifyMessageW(HWND_BROADCAST, created, 0, 0);
     }
+    EnterFast(spy);
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -465,6 +602,7 @@ class TrayBackendIntercept final : public TrayBackend {
     }
     FlushPending();
     if (created != 0) {
+      NoteSelfBroadcast();
       SendNotifyMessageW(HWND_BROADCAST, created, 0, 0);
     }
     UnregisterClassW(kSpyClass, wc.hInstance);
@@ -497,8 +635,15 @@ class TrayBackendIntercept final : public TrayBackend {
       PostQuitMessage(0);
       return 0;
     }
+    if (msg == kShellRestartMsg) {
+      HandleShellRestart(hwnd);
+      return 0;
+    }
     if (msg == WM_TIMER && wp == kPrioTimerId) {
       KeepPriority(hwnd);
+      if (prio_timer_ms_ == kPrioTimerFastMs && GetTickCount64() >= fast_until_) {
+        SetPrioPeriod(hwnd, kPrioTimerSlowMs);
+      }
       FlushPending();
       return 0;
     }
@@ -533,6 +678,91 @@ class TrayBackendIntercept final : public TrayBackend {
     if (after == spy) {
       Log(L"tray", L"intercept z-order restored");
     }
+    EnterFast(spy);
+  }
+
+  bool WaitForPriority(HWND spy) {
+    const ULONGLONG t0 = GetTickCount64();
+    for (;;) {
+      SetWindowPos(spy, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+      const HWND first = FindWindowW(kSpyClass, nullptr);
+      if (first == spy) {
+        Log(L"tray", L"intercept priority acquired ms=%llu", GetTickCount64() - t0);
+        return true;
+      }
+      if (GetTickCount64() - t0 >= kPrioAcquireMs) {
+        Log(L"tray", L"intercept priority not acquired first=0x%llX",
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(first)));
+        return false;
+      }
+      Sleep(kPrioAcquireStepMs);
+    }
+  }
+
+  void SetPrioPeriod(HWND spy, UINT ms) {
+    if (prio_timer_ms_ == ms) {
+      return;
+    }
+    prio_timer_ms_ = ms;
+    SetTimer(spy, kPrioTimerId, ms, nullptr);
+  }
+
+  void EnterFast(HWND spy) {
+    fast_until_ = GetTickCount64() + kFastWindowMs;
+    SetPrioPeriod(spy, kPrioTimerFastMs);
+  }
+
+  void NoteSelfBroadcast() {
+    const ULONGLONG now = GetTickCount64();
+    last_self_broadcast_.store(now, std::memory_order_release);
+    if (rebroadcast_window_start_ == 0 || now - rebroadcast_window_start_ >= kRebroadcastWindowMs) {
+      rebroadcast_window_start_ = now;
+      rebroadcast_count_ = 1;
+    } else {
+      ++rebroadcast_count_;
+    }
+  }
+
+  bool RebroadcastThrottled() const {
+    const ULONGLONG now = GetTickCount64();
+    return rebroadcast_window_start_ != 0 && now - rebroadcast_window_start_ < kRebroadcastWindowMs &&
+           rebroadcast_count_ >= kRebroadcastMax;
+  }
+
+  void HandleShellRestart(HWND spy) {
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG last = last_self_broadcast_.load(std::memory_order_acquire);
+    if (last != 0 && now - last < kSelfBroadcastSuppressMs) {
+      Log(L"tray", L"intercept shell restart suppressed");
+      return;
+    }
+    Log(L"tray", L"intercept shell restart");
+    const bool acquired = WaitForPriority(spy);
+    EnterFast(spy);
+    if (!acquired) {
+      return;
+    }
+    if (RebroadcastThrottled()) {
+      Log(L"tray", L"intercept rebroadcast throttled");
+      return;
+    }
+    const UINT created = RegisterWindowMessageW(L"TaskbarCreated");
+    if (created != 0) {
+      NoteSelfBroadcast();
+      SendNotifyMessageW(HWND_BROADCAST, created, 0, 0);
+    }
+  }
+
+  void MaybeLogNewItem(const TrayNotifyIconData& data, HWND owner, const std::wstring& tip, UINT version) {
+    const uint64_t key = ItemKey(data);
+    if (!item_logged_.insert(key).second) {
+      return;
+    }
+    const std::wstring exe = OwnerExeName(owner);
+    const std::wstring safe = SanitizeTipForLog(tip);
+    Log(L"tray", L"intercept item tip=\"%s\" exe=%s hwnd=0x%llX uid=%u guid=%d version=%u", safe.c_str(), exe.c_str(),
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(owner)), data.uid, GuidEmpty(data.guid_item) ? 0 : 1,
+        version);
   }
 
   void ForwardOrQueue(HWND spy, UINT msg, WPARAM wp, LPARAM lp) {
@@ -784,6 +1014,7 @@ class TrayBackendIntercept final : public TrayBackend {
     {
       std::lock_guard lock(mu_);
       if (parsed.message_type == NIM_DELETE) {
+        pending_version_.erase(key);
         for (auto it = items_.begin(); it != items_.end(); ++it) {
           if (it->info.key == key) {
             items_.erase(it);
@@ -800,6 +1031,7 @@ class TrayBackendIntercept final : public TrayBackend {
             break;
           }
         }
+        bool created_now = false;
         if (slot == nullptr && parsed.message_type != NIM_SETVERSION) {
           StoredIcon created;
           created.info.key = key;
@@ -807,18 +1039,41 @@ class TrayBackendIntercept final : public TrayBackend {
           created.info.automation_id = L"NotifyItemIcon";
           items_.push_back(std::move(created));
           slot = &items_.back();
+          created_now = true;
         }
         if (slot == nullptr) {
+          if (parsed.message_type == NIM_SETVERSION) {
+            pending_version_[key] = data.anonymous;
+            if (version_logged_.insert(key).second) {
+              Log(L"tray", L"intercept version key=0x%llX uid=%u version=0->%u",
+                  static_cast<unsigned long long>(key), data.uid, data.anonymous);
+            }
+          }
           return;
         }
         slot->owner = owner;
         slot->info.owner = owner;
         slot->info.uid = data.uid;
-        slot->info.callback_message = data.callback_message;
+        if (!GuidEmpty(data.guid_item)) {
+          slot->info.guid_item = data.guid_item;
+        }
+        if ((data.flags & NIF_MESSAGE) != 0) {
+          slot->info.callback_message = data.callback_message;
+        }
+        const UINT old_version = slot->info.version;
         if (parsed.message_type == NIM_SETVERSION) {
           slot->info.version = data.anonymous;
-        } else if (parsed.version != 0) {
-          slot->info.version = parsed.version;
+          pending_version_.erase(key);
+        } else {
+          auto pending = pending_version_.find(key);
+          if (pending != pending_version_.end()) {
+            slot->info.version = pending->second;
+            pending_version_.erase(pending);
+          }
+        }
+        if (!created_now && slot->info.version != old_version && version_logged_.insert(key).second) {
+          Log(L"tray", L"intercept version key=0x%llX uid=%u version=%u->%u", static_cast<unsigned long long>(key),
+              data.uid, old_version, slot->info.version);
         }
         if ((data.flags & NIF_TIP) != 0) {
           slot->info.tip = TipFrom(data.tooltip, 128);
@@ -833,6 +1088,9 @@ class TrayBackendIntercept final : public TrayBackend {
         if (converted) {
           slot->info.png = std::move(png);
           slot->icon_handle = data.icon_handle;
+        }
+        if (created_now) {
+          MaybeLogNewItem(data, owner, slot->info.tip, slot->info.version);
         }
         sink = on_change_;
       }
@@ -862,12 +1120,39 @@ class TrayBackendIntercept final : public TrayBackend {
   std::vector<StoredIcon> items_;
   std::function<void()> on_change_;
   std::function<bool(uint64_t, RECT*)> rect_lookup_;
+  UINT prio_timer_ms_ = kPrioTimerSlowMs;
+  ULONGLONG fast_until_ = 0;
+  std::atomic<ULONGLONG> last_self_broadcast_{0};
+  ULONGLONG rebroadcast_window_start_ = 0;
+  int rebroadcast_count_ = 0;
+  std::unordered_set<uint64_t> item_logged_;
+  std::unordered_set<uint64_t> version_logged_;
+  std::unordered_map<uint64_t, UINT> pending_version_;
 };
 
 }  // namespace
 
 std::unique_ptr<TrayBackend> MakeInterceptTrayBackend() {
   return std::make_unique<TrayBackendIntercept>();
+}
+
+void PrestartInterceptTrayBackend() {
+  const WidgetSettings s = LoadWidgetSettings();
+  if (s.tray_backend != "intercept") {
+    return;
+  }
+  g_prestart_tick = GetTickCount64();
+  auto backend = MakeInterceptTrayBackend();
+  if (backend == nullptr || !backend->Probe()) {
+    Log(L"tray", L"intercept prestart failed");
+    g_prestart_tick = 0;
+    return;
+  }
+  g_prestarted = std::move(backend);
+}
+
+std::unique_ptr<TrayBackend> TakePrestartedInterceptTrayBackend() {
+  return std::move(g_prestarted);
 }
 
 }  // namespace bamti

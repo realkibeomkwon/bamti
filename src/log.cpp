@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <mutex>
 #include <share.h>
+#include <string>
 
 namespace bamti {
 namespace {
@@ -103,6 +104,31 @@ void Log(const wchar_t* area, const wchar_t* fmt, ...) {
 
 bool LogBusy() {
   return g_log_depth.load(std::memory_order_acquire) > 0;
+}
+
+std::wstring SanitizeTipForLog(const std::wstring& tip) {
+  constexpr size_t kMax = 128;
+  std::wstring out;
+  out.reserve(tip.size() < kMax ? tip.size() : kMax);
+  bool pending_space = false;
+  for (const wchar_t ch : tip) {
+    if (ch == L'\r' || ch == L'\n' || ch == L'\t' || ch == L' ') {
+      pending_space = true;
+      continue;
+    }
+    if (out.size() >= kMax) {
+      break;
+    }
+    if (pending_space && !out.empty()) {
+      if (out.size() + 1 >= kMax) {
+        break;
+      }
+      out.push_back(L' ');
+    }
+    pending_space = false;
+    out.push_back(ch);
+  }
+  return out;
 }
 
 void NotePostedStorm(const wchar_t* label, unsigned& count, unsigned long long& window_start) {

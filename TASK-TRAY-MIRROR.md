@@ -413,6 +413,8 @@ const bool need = (mode_ == HideMode::kHidden && IsWindowVisible(hwnd)) || rc.to
 | 클릭 전달 실패 | 실패한 패턴 이름과 `HRESULT`. |
 | 자동 정지 | 6-1절의 200ms 조건으로 멈췄을 때. |
 
+2026-08-31: 가로채기 선점 작업에서 진단 목적으로 이 결정을 뒤집었습니다. 가로채기와 UIA는 항목이 목록에 처음 들어올 때 툴팁을 키당 프로세스 수명에 한 번 남깁니다. 진단 창이 닫힐 때 로스터 한 줄씩을 남깁니다. `TASK-TRAY-PREEMPT.md` 8절, `FIX-TRAY-PREEMPT-DIAG.md`.
+
 변경이 없는 회차에는 **아무것도 남기지 마십시오.**
 
 ---

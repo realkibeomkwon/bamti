@@ -5,6 +5,7 @@
 #include "menu_bar.hpp"
 #include "paths.hpp"
 #include "taskbar_controller.hpp"
+#include "tray_intercept.hpp"
 #include "tray_probe.hpp"
 #include "watchdog.hpp"
 
@@ -227,6 +228,8 @@ int Run(HINSTANCE instance) {
     CloseHandle(mutex);
     return 0;
   }
+
+  PrestartInterceptTrayBackend();
 
   if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
     Log(L"host", L"CoInitializeEx failed");

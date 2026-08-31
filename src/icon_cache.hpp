@@ -26,6 +26,7 @@ void CropPaddedJumbo(BgraImage& image);
 void ZeroTransparentRgb(BgraImage& image);
 bool HasStraightAlpha(const BgraImage& image);
 void StraightToPremul(BgraImage& image);
+void PremulToStraight(BgraImage& image);
 void DefringePremul(BgraImage& image);
 HBITMAP BgraToBitmap(const BgraImage& image, int px);
 HBITMAP FinalizeIconBitmap(HBITMAP source, int px, bool straight_alpha);
@@ -34,6 +35,7 @@ HBITMAP BitmapFromIcon(HICON icon, int px);
 class IconCache {
  public:
   void SetRenderTarget(ID2D1RenderTarget* rt);
+  void SetDark(bool dark);
   ID2D1Bitmap* Get(const StatusIcon& icon, int px);
   void Clear();
 
@@ -58,6 +60,7 @@ class IconCache {
   Microsoft::WRL::ComPtr<ID2D1Bitmap> BitmapFromHbitmap(HBITMAP bmp, int px);
 
   ID2D1RenderTarget* rt_ = nullptr;
+  bool dark_ = true;
   std::list<Key> lru_;
   std::unordered_map<Key, Slot, KeyHash> map_;
 };

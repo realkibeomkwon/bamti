@@ -28,18 +28,31 @@ class TrayMirror : public StatusSource {
   void OnEvent(const StatusEvent& ev) override;
   void SetActive(bool active) override;
 
+  struct MenuItem {
+    uint64_t key = 0;
+    std::wstring label;
+    bool shown = true;
+  };
+
   WidgetSettings settings() const;
   void SetSettings(const WidgetSettings& next);
   void OnExplorerRestart();
   void SetRectLookup(std::function<bool(uint64_t key, RECT* screen)> lookup);
   bool ForwardsContextMenu() const;
+  std::vector<MenuItem> MenuItems() const;
   static uint64_t ParseId(const std::string& id);
   static std::string KeyText(uint64_t key);
 
  private:
+  struct LastTip {
+    std::wstring tip;
+    GUID guid{};
+  };
+
   struct ItemState {
     uint64_t key = 0;
     std::wstring tip;
+    GUID guid{};
     int order = 0;
     bool visible = true;
     uint64_t icon_hash = 0;
@@ -71,6 +84,7 @@ class TrayMirror : public StatusSource {
   bool reset_pending_ = false;
   bool stopped_slow_ = false;
   std::unordered_map<uint64_t, ItemState> items_;
+  std::unordered_map<uint64_t, LastTip> last_tips_;
   std::vector<uint64_t> key_rounds_[5];
   int key_round_n_ = 0;
   bool use_runtime_id_ = true;
@@ -80,6 +94,7 @@ class TrayMirror : public StatusSource {
   ULONGLONG last_perf_log_ = 0;
   uint64_t pending_invoke_ = 0;
   bool pending_right_ = false;
+  bool pending_dblclk_ = false;
   std::unique_ptr<TrayBackend> intercept_;
   std::function<bool(uint64_t, RECT*)> rect_lookup_;
 };

@@ -200,13 +200,18 @@ bamti는 named pipe `\\.\pipe\bamti-status`의 서버다. 사용량 표시 앱�
 
 UIA는 알림 영역 버튼을 열거하고 좌클릭은 `Invoke`로 위임한다. 아이콘 픽셀을 주는 패턴이 없고, 우클릭 컨텍스트 메뉴를 앱에 넘기는 패턴도 없다. 그래서 기본 경로에서는 툴팁 첫 글자 글리프와 bamti 자체 우클릭 메뉴(“알림 영역 잠시 표시”)만 제공한다. 오버플로에 숨긴 아이콘은 `TopLevelWindowForOverflowXamlIsland`의 자식 브리지에서 열거하며, `tray_overflow_icons`로 끌 수 있다.
 
-가로채기 백엔드는 `Shell_TrayWnd` 클래스의 숨은 창으로 `WM_COPYDATA`를 받은 뒤, 같은 메시지를 explorer의 진짜 `Shell_TrayWnd`로 전달한다. 페이로드의 `HICON`을 즉시 24px PNG로 바꿔 상단바에 그리고, 소유 창과 콜백으로 우클릭을 앱에 전달한다. 전달에 실패하면 explorer가 그 앱을 영영 모르게 되므로, 파싱 실패와 무관하게 전달은 유지한다. `dwData == 3`(`Shell_NotifyIconGetRect`)만 전달하지 않고 상단바 좌표로 응답한다.
+가로채기 백엔드는 `Shell_TrayWnd` 클래스의 숨은 창으로 `WM_COPYDATA`를 받은 뒤, 같은 메시지를 explorer의 진짜 `Shell_TrayWnd`로 전달한다. 페이로드의 `HICON`을 즉시 24px PNG로 바꿔 상단바에 그리고, 소유 창과 콜백으로 우클릭을 앱에 전달한다. 전달에 실패하면 explorer가 그 앱을 영영 모르게 되므로, 파싱 실패와 무관하게 전달은 유지한다. `dwData == 3`(`Shell_NotifyIconGetRect`)만 전달하지 않고 상단바 좌표로 응답한다. 가로채기 항목의 키는 GUID가 있으면 GUID에서, 없으면 `(hwnd, uid)`에서 만든다. hwnd 기반 키는 앱을 다시 띄우면 바뀌므로 숨김이 풀린다.
+
+설정이 `intercept`이면 메뉴 바 창을 만들기 전에 스파이를 세운다(`PrestartInterceptTrayBackend`). 브로드캐스트 전에 `FindWindowW`가 스파이 창을 돌려줄 때까지 최대 500ms 기다리고, 직후 5초는 우선순위 확인을 100ms로 촘촘히 한다. explorer가 재시작하면 우선순위를 다시 잡고, 잡혔을 때만 `TaskbarCreated`를 다시 보낸다. 자체 브로드캐스트는 2초 억제와 60초 3회 상한으로 루프를 막는다.
+
+bamti 자신은 `HKCU\...\Run`의 `bamti` 값으로 로그온 자동 시작을 켠다. `StartupApproved\Run`으로 꺼져 있으면 켜진 것으로 보지 않으며, 이 상태는 `settings.json`에 저장하지 않는다. 상단바 우클릭 메뉴의 “로그인 시 bamti 시작”으로 토글한다.
 
 가로채기 한계는 문서화된 제약이다.
 
 - 관리자 권한 앱의 메시지는 UIPI 때문에 받지 못한다.
 - `TaskbarCreated`에 재등록하지 않는 앱은, bamti가 켜진 뒤에 등록한 것만 미러에 나온다.
 - `TaskbarCreated` 브로드캐스트는 explorer도 받아 트레이를 재구성한다. 태스크바가 주차된 상태면 `EnsureHidden()`으로 다시 숨긴다.
+- explorer가 자기 `Shell_NotifyIcon`으로 등록하는 아이콘 가운데 일부는 클릭을 XAML 트리에서 처리하므로, 콜백 메시지를 보내도 반응하지 않는다. 볼륨과 배터리가 그렇고 블루투스는 정상 동작한다. 반응하지 않는 항목은 상단바 우클릭 메뉴의 `트레이 아이콘` 하위 메뉴에서 숨긴다.
 - Windows.Graphics.Capture는 가로채기가 실패했을 때의 대안으로 남긴다. `TASK-TRAY-ICONS.md`를 따른다.
 
 상단바 우클릭 메뉴의 “트레이 아이콘 가로채기(실험)”으로 켠다. 스파이 창 생성 실패나 파싱 연속 실패 때는 UIA로 자동 전환한다.

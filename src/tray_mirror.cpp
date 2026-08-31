@@ -1,6 +1,7 @@
 #include "tray_mirror.hpp"
 
 #include "log.hpp"
+#include "tray_intercept.hpp"
 
 #include <objbase.h>
 
@@ -8,6 +9,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
+#include <string>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace bamti {
 namespace {
@@ -15,10 +20,84 @@ namespace {
 constexpr int kTrayPriorityBase = 5;
 constexpr ULONGLONG kPerfLogMs = 300000;
 constexpr UINT kSlowEnumMs = 200;
+constexpr size_t kTrayMenuLabelMax = 40;
+
+uint64_t ParseKeyText(const std::string& one) {
+  if (one.size() >= 2 && one[0] == '0' && (one[1] == 'x' || one[1] == 'X')) {
+    return static_cast<uint64_t>(strtoull(one.c_str() + 2, nullptr, 16));
+  }
+  return static_cast<uint64_t>(strtoull(one.c_str(), nullptr, 16));
+}
+
+std::wstring ClipMenuLabel(std::wstring text) {
+  if (text.size() > kTrayMenuLabelMax) {
+    text.resize(kTrayMenuLabelMax);
+  }
+  return text;
+}
+
+std::wstring HiddenKeyLabel(uint64_t key) {
+  const std::string hex = TrayMirror::KeyText(key);
+  std::wstring out = L"(숨김) ";
+  const size_t start = (hex.size() >= 2 && hex[0] == '0' && (hex[1] == 'x' || hex[1] == 'X')) ? 2 : 0;
+  for (size_t i = 0; i < 6 && start + i < hex.size(); ++i) {
+    out.push_back(static_cast<wchar_t>(hex[start + i]));
+  }
+  return out;
+}
+
+bool GuidEmpty(const GUID& g) {
+  const auto* p = reinterpret_cast<const uint8_t*>(&g);
+  for (size_t i = 0; i < sizeof(GUID); ++i) {
+    if (p[i] != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+struct KnownIcon {
+  GUID guid;
+  const wchar_t* label;
+};
+
+const KnownIcon kKnownIcons[] = {
+    // 볼륨. explorer, 관측 tip "DELL U4025QW: 100%"
+    {{0x7820AE73, 0x23E3, 0x4229, {0x82, 0xC1, 0xE4, 0x1C, 0xB6, 0x7D, 0x5B, 0x9C}}, L"볼륨"},
+    // 배터리. explorer, 관측 tip 빈 값 후 "배터리 상태: …"
+    {{0x7820AE75, 0x23E3, 0x4229, {0x82, 0xC1, 0xE4, 0x1C, 0xB6, 0x7D, 0x5B, 0x9C}}, L"배터리"},
+};
+
+const wchar_t* LabelForGuid(const GUID& guid) {
+  if (GuidEmpty(guid)) {
+    return nullptr;
+  }
+  for (const KnownIcon& one : kKnownIcons) {
+    if (InlineIsEqualGUID(one.guid, guid)) {
+      return one.label;
+    }
+  }
+  return nullptr;
+}
+
+std::wstring MenuLabel(const std::wstring& tip, const GUID& guid, bool hidden, uint64_t key) {
+  if (const wchar_t* known = LabelForGuid(guid)) {
+    return ClipMenuLabel(known);
+  }
+  if (!tip.empty()) {
+    return ClipMenuLabel(tip);
+  }
+  if (hidden) {
+    return HiddenKeyLabel(key);
+  }
+  return ClipMenuLabel(L"(이름 없음)");
+}
 constexpr int kSlowStreakStop = 3;
 constexpr UINT kEventDebounceMs = 300;
 constexpr UINT kEventMinIntervalMs = 1000;
 constexpr UINT kSafetyIntervalMs = 5000;
+constexpr ULONGLONG kDiagWindowMs = 180000;
+constexpr ULONGLONG kDiagEnumMinMs = 5000;
 constexpr UINT kFloodWindowMs = 10000;
 constexpr long kFloodMaxEnums = 8;
 constexpr ULONGLONG kFloodRetryMs = 300000;
@@ -50,6 +129,43 @@ UINT ClampInterval(ULONGLONG enum_ms) {
     return 5000;
   }
   return static_cast<UINT>(scaled);
+}
+
+std::wstring RosterTips(const std::vector<TrayIconInfo>& icons) {
+  std::wstring tips;
+  for (size_t i = 0; i < icons.size(); ++i) {
+    if (i != 0) {
+      tips.push_back(L'|');
+    }
+    std::wstring one = SanitizeTipForLog(icons[i].tip);
+    if (one.empty()) {
+      one = L"(no tip)";
+    }
+    tips += one;
+  }
+  if (tips.size() > 1000) {
+    tips.resize(1000);
+    tips += L"...";
+  }
+  return tips;
+}
+
+void LogRoster(const wchar_t* which, const std::vector<TrayIconInfo>& icons) {
+  const std::wstring tips = RosterTips(icons);
+  Log(L"tray", L"%s roster n=%u tips=\"%s\"", which, static_cast<unsigned>(icons.size()), tips.c_str());
+}
+
+void LogDiagRosters(TrayBackend* intercept, TrayBackend* uia) {
+  std::vector<TrayIconInfo> uia_icons;
+  std::vector<TrayIconInfo> intercept_icons;
+  if (uia != nullptr) {
+    uia->Enumerate(&uia_icons);
+  }
+  if (intercept != nullptr) {
+    intercept->Enumerate(&intercept_icons);
+  }
+  LogRoster(L"intercept", intercept_icons);
+  LogRoster(L"uia", uia_icons);
 }
 
 int OverflowOrder(const std::vector<TrayIconInfo>& icons) {
@@ -106,8 +222,11 @@ bool TrayMirror::Start(StatusSink* sink) {
     items_.clear();
     if (!settings_.tray_mirror) {
       Log(L"tray", L"disabled");
-      return true;
     }
+  }
+  if (!settings_.tray_mirror) {
+    TakePrestartedInterceptTrayBackend();
+    return true;
   }
   if (settings_.tray_backend == "intercept") {
     StartIntercept();
@@ -115,8 +234,11 @@ bool TrayMirror::Start(StatusSink* sink) {
       Log(L"tray", L"intercept unavailable; using uia");
     }
   }
-  std::lock_guard lock(mu_);
-  StartWorkerLocked();
+  {
+    std::lock_guard lock(mu_);
+    StartWorkerLocked();
+  }
+  TakePrestartedInterceptTrayBackend();
   return true;
 }
 
@@ -166,12 +288,17 @@ WidgetSettings TrayMirror::settings() const {
 }
 
 void TrayMirror::StartIntercept() {
+  auto pre = TakePrestartedInterceptTrayBackend();
   StopIntercept();
-  intercept_ = MakeInterceptTrayBackend();
-  if (intercept_ == nullptr || !intercept_->Probe()) {
-    Log(L"tray", L"intercept spy failed; explorer receives icons directly");
-    intercept_.reset();
-    return;
+  if (pre != nullptr) {
+    intercept_ = std::move(pre);
+  } else {
+    intercept_ = MakeInterceptTrayBackend();
+    if (intercept_ == nullptr || !intercept_->Probe()) {
+      Log(L"tray", L"intercept spy failed; explorer receives icons directly");
+      intercept_.reset();
+      return;
+    }
   }
   if (rect_lookup_) {
     intercept_->SetRectLookup(rect_lookup_);
@@ -265,10 +392,17 @@ void TrayMirror::SetSettings(const WidgetSettings& next) {
 }
 
 void TrayMirror::OnExplorerRestart() {
-  std::lock_guard lock(mu_);
-  reset_pending_ = true;
-  if (wake_event_ != nullptr) {
-    SetEvent(wake_event_);
+  TrayBackend* intercept = nullptr;
+  {
+    std::lock_guard lock(mu_);
+    reset_pending_ = true;
+    intercept = intercept_.get();
+    if (wake_event_ != nullptr) {
+      SetEvent(wake_event_);
+    }
+  }
+  if (intercept != nullptr) {
+    intercept->OnShellRestart();
   }
 }
 
@@ -334,6 +468,60 @@ std::string TrayMirror::KeyText(uint64_t key) {
   return buf;
 }
 
+std::vector<TrayMirror::MenuItem> TrayMirror::MenuItems() const {
+  std::lock_guard lock(mu_);
+  std::vector<ItemState> vis;
+  vis.reserve(items_.size());
+  for (const auto& [key, st] : items_) {
+    vis.push_back(st);
+  }
+  std::sort(vis.begin(), vis.end(), [](const ItemState& a, const ItemState& b) {
+    if (a.order != b.order) {
+      return a.order < b.order;
+    }
+    return a.key < b.key;
+  });
+
+  std::vector<MenuItem> out;
+  std::unordered_set<uint64_t> seen;
+  out.reserve(vis.size() + settings_.tray_hidden_keys.size());
+  for (const ItemState& st : vis) {
+    MenuItem row;
+    row.key = st.key;
+    row.shown = true;
+    GUID guid = st.guid;
+    if (GuidEmpty(guid)) {
+      const auto remembered = last_tips_.find(st.key);
+      if (remembered != last_tips_.end()) {
+        guid = remembered->second.guid;
+      }
+    }
+    row.label = MenuLabel(st.tip, guid, false, st.key);
+    out.push_back(std::move(row));
+    seen.insert(st.key);
+  }
+  for (const std::string& one : settings_.tray_hidden_keys) {
+    const uint64_t key = ParseKeyText(one);
+    if (key == 0 || seen.find(key) != seen.end()) {
+      continue;
+    }
+    MenuItem row;
+    row.key = key;
+    row.shown = false;
+    std::wstring tip;
+    GUID guid{};
+    const auto remembered = last_tips_.find(key);
+    if (remembered != last_tips_.end()) {
+      tip = remembered->second.tip;
+      guid = remembered->second.guid;
+    }
+    row.label = MenuLabel(tip, guid, true, key);
+    out.push_back(std::move(row));
+    seen.insert(key);
+  }
+  return out;
+}
+
 uint64_t TrayMirror::ParseId(const std::string& id) {
   constexpr char kPrefix[] = "bamti.tray/";
   if (id.size() <= 11 || id.compare(0, 11, kPrefix) != 0) {
@@ -361,7 +549,8 @@ bool TrayMirror::KeyHidden(uint64_t key, const std::vector<std::string>& hidden)
 }
 
 void TrayMirror::OnEvent(const StatusEvent& ev) {
-  if (ev.event != "click" || (ev.button != "left" && ev.button != "right")) {
+  const bool dblclk = ev.event == "dblclick";
+  if ((!dblclk && ev.event != "click") || (ev.button != "left" && ev.button != "right")) {
     return;
   }
   const uint64_t key = ParseId(ev.id);
@@ -372,6 +561,7 @@ void TrayMirror::OnEvent(const StatusEvent& ev) {
     std::lock_guard lock(mu_);
     pending_invoke_ = key;
     pending_right_ = ev.button == "right";
+    pending_dblclk_ = dblclk;
   }
   if (wake_event_ != nullptr) {
     SetEvent(wake_event_);
@@ -381,19 +571,22 @@ void TrayMirror::OnEvent(const StatusEvent& ev) {
 void TrayMirror::DrainInvoke(TrayBackend* backend) {
   uint64_t key = 0;
   bool right = false;
+  bool dblclk = false;
   {
     std::lock_guard lock(mu_);
     key = pending_invoke_;
     pending_invoke_ = 0;
     right = pending_right_;
     pending_right_ = false;
+    dblclk = pending_dblclk_;
+    pending_dblclk_ = false;
   }
   if (key == 0 || backend == nullptr) {
     return;
   }
   TrayIconInfo icon;
   icon.key = key;
-  if (backend->Invoke(icon, right)) {
+  if (backend->Invoke(icon, right, dblclk)) {
     return;
   }
   HRESULT hr = E_FAIL;
@@ -449,9 +642,19 @@ void TrayMirror::Publish(const TrayIconInfo& icon, int order) {
   {
     std::lock_guard lock(mu_);
     sink = sink_;
+    if (!icon.tip.empty() || !GuidEmpty(icon.guid_item)) {
+      LastTip& rec = last_tips_[icon.key];
+      if (!icon.tip.empty()) {
+        rec.tip = icon.tip;
+      }
+      if (!GuidEmpty(icon.guid_item)) {
+        rec.guid = icon.guid_item;
+      }
+    }
     ItemState st;
     st.key = icon.key;
     st.tip = icon.tip;
+    st.guid = icon.guid_item;
     st.order = order;
     st.visible = item.visible;
     st.icon_hash = item.icon.cache_key;
@@ -502,8 +705,12 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
   const int overflow = OverflowOrder(raw);
   std::vector<ItemState> next;
   std::vector<TrayIconInfo> keep;
+  std::vector<LastTip> tips;
+  std::vector<uint64_t> tip_keys;
   next.reserve(raw.size());
   keep.reserve(raw.size());
+  tips.reserve(raw.size());
+  tip_keys.reserve(raw.size());
   for (const TrayIconInfo& icon : raw) {
     TrayIconInfo copy = icon;
     if (!use_runtime) {
@@ -517,12 +724,20 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
       const int32_t ord = copy.order;
       copy.key = Fnv1a64(reinterpret_cast<const uint8_t*>(&ord), sizeof(ord), hash);
     }
+    if (copy.key != 0 && (!copy.tip.empty() || !GuidEmpty(copy.guid_item))) {
+      LastTip rec;
+      rec.tip = copy.tip;
+      rec.guid = copy.guid_item;
+      tip_keys.push_back(copy.key);
+      tips.push_back(std::move(rec));
+    }
     if (!Include(copy, overflow, settings)) {
       continue;
     }
     ItemState st;
     st.key = copy.key;
     st.tip = copy.tip;
+    st.guid = copy.guid_item;
     st.order = copy.order;
     st.visible = copy.from_overflow ? true : (copy.offscreen == FALSE);
     st.icon_hash = copy.png.empty() ? 0 : Fnv1a64(copy.png.data(), copy.png.size());
@@ -535,6 +750,15 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
   {
     std::lock_guard lock(mu_);
     prev = items_;
+    for (size_t i = 0; i < tips.size(); ++i) {
+      LastTip& rec = last_tips_[tip_keys[i]];
+      if (!tips[i].tip.empty()) {
+        rec.tip = tips[i].tip;
+      }
+      if (!GuidEmpty(tips[i].guid)) {
+        rec.guid = tips[i].guid;
+      }
+    }
   }
 
   bool same = prev.size() == next.size();
@@ -664,6 +888,16 @@ void TrayMirror::WorkerLoop() {
   bool events_retried = false;
   bool events_gave_up = false;
   bool events_live = false;
+  std::unique_ptr<TrayBackend> diag_uia;
+  ULONGLONG diag_started = 0;
+  ULONGLONG last_diag_enum = 0;
+  if (intercept) {
+    diag_uia = MakeUiaTrayBackend();
+    if (diag_uia != nullptr) {
+      diag_uia->Probe();
+      diag_started = GetTickCount64();
+    }
+  }
   if (backend != nullptr && !events_abandoned && !intercept) {
     events_live = backend->SubscribeStructureChanged(struct_event_);
   }
@@ -723,6 +957,10 @@ void TrayMirror::WorkerLoop() {
     }
     if (intercept && (intercept_ == nullptr || !intercept_->ParseLive())) {
       Log(L"tray", L"intercept parse failed; switching to uia");
+      if (diag_uia != nullptr) {
+        LogDiagRosters(intercept_.get(), diag_uia.get());
+        diag_uia.reset();
+      }
       if (backend != nullptr) {
         backend->UnsubscribeStructureChanged();
       }
@@ -755,6 +993,17 @@ void TrayMirror::WorkerLoop() {
     }
     if (active && backend != nullptr && run_enum) {
       DoRound(backend, events_live);
+      if (diag_uia != nullptr) {
+        const ULONGLONG now = GetTickCount64();
+        if (diag_started != 0 && now - diag_started >= kDiagWindowMs) {
+          LogDiagRosters(backend, diag_uia.get());
+          diag_uia.reset();
+        } else if (last_diag_enum == 0 || now - last_diag_enum >= kDiagEnumMinMs) {
+          std::vector<TrayIconInfo> diag;
+          diag_uia->Enumerate(&diag);
+          last_diag_enum = now;
+        }
+      }
       last_enum = GetTickCount64();
       run_enum = false;
       struct_pending = false;
@@ -879,6 +1128,10 @@ void TrayMirror::WorkerLoop() {
 
   if (backend != nullptr) {
     backend->UnsubscribeStructureChanged();
+  }
+  if (diag_uia != nullptr) {
+    LogDiagRosters(backend, diag_uia.get());
+    diag_uia.reset();
   }
   owned.reset();
   if (timer != nullptr) {
