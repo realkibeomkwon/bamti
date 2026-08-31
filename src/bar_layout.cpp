@@ -17,15 +17,16 @@ constexpr float kStatusIconGapDip = 4.0f;
 constexpr size_t kLayoutCacheMax = 64;
 constexpr wchar_t kOverflowGlyph[] = L"\u2039";  // ‹
 
-bool IconIsBitmap(IconKind kind) {
-  return kind == IconKind::kPng || kind == IconKind::kFile || kind == IconKind::kHicon;
+bool IconHasArt(IconKind kind) {
+  return kind == IconKind::kPng || kind == IconKind::kFile || kind == IconKind::kHicon ||
+         kind == IconKind::kVector;
 }
 
 bool ItemOnBar(const StatusItem& item) {
   if (!item.visible) {
     return false;
   }
-  if (IconIsBitmap(item.icon.kind)) {
+  if (IconHasArt(item.icon.kind)) {
     return true;
   }
   return !StatusBarText(item).empty();
@@ -209,7 +210,7 @@ const BarLayoutResult& BarLayout::Compute(const RECT& client, const std::wstring
       continue;
     }
     const std::wstring label = StatusBarText(item);
-    const bool bitmap = IconIsBitmap(item.icon.kind);
+    const bool bitmap = IconHasArt(item.icon.kind);
     float text_w = 0.0f;
     if (!label.empty()) {
       CacheEntry* entry = GetOrCreate(label);
@@ -244,7 +245,7 @@ const BarLayoutResult& BarLayout::Compute(const RECT& client, const std::wstring
     seg.text = label;
     seg.tooltip = item.tooltip;
     seg.accent = item.accent;
-    if (bitmap) {
+    if (IconHasArt(item.icon.kind)) {
       seg.icon_kind = item.icon.kind;
       seg.icon_key = item.icon.cache_key;
       seg.icon = item.icon;

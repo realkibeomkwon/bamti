@@ -21,8 +21,19 @@ inline constexpr size_t kStatusIconPngMaxBytes = 8192;
 inline constexpr size_t kStatusLineMaxBytes = 65536;
 
 enum class StatusState { kNormal, kWarn, kError, kOn, kOff, kBusy };
-enum class IconKind { kNone, kGlyph, kPng, kFile, kHicon };
+enum class IconKind { kNone, kGlyph, kPng, kFile, kHicon, kVector };
 enum class RowType { kGauge, kKeyValue, kText, kSeparator, kToggle, kButton, kSlider };
+
+enum class VectorIcon : uint8_t {
+  kNone = 0,
+  kBattery,
+  kCpu,
+  kNetwork,
+  kVolume,
+};
+
+inline constexpr uint32_t kVectorFlagCharging = 1u << 0;
+inline constexpr uint32_t kVectorFlagMuted = 1u << 1;
 
 struct StatusIcon {
   IconKind kind = IconKind::kNone;
@@ -30,6 +41,9 @@ struct StatusIcon {
   std::vector<uint8_t> bytes;
   std::wstring path;
   HICON hicon = nullptr;
+  VectorIcon vector = VectorIcon::kNone;
+  float value = 0.0f;
+  uint32_t flags = 0;
   uint64_t cache_key = 0;
 };
 
@@ -42,6 +56,7 @@ struct StatusRow {
   std::wstring note;
   std::wstring fallback_text;
   float value = 0.0f;
+  uint32_t fill_rgb = 0;
   bool on = false;
   bool danger = false;
   bool muted = false;
@@ -117,6 +132,12 @@ inline uint64_t HashStatusIcon(const StatusIcon& icon) {
       const uintptr_t handle = reinterpret_cast<uintptr_t>(icon.hicon);
       return Fnv1a64(reinterpret_cast<const uint8_t*>(&handle), sizeof(handle), hash);
     }
+    case IconKind::kVector: {
+      const uint8_t v = static_cast<uint8_t>(icon.vector);
+      hash = Fnv1a64(&v, 1, hash);
+      hash = Fnv1a64(reinterpret_cast<const uint8_t*>(&icon.value), sizeof(icon.value), hash);
+      return Fnv1a64(reinterpret_cast<const uint8_t*>(&icon.flags), sizeof(icon.flags), hash);
+    }
     case IconKind::kNone:
     default:
       return hash;
@@ -124,6 +145,9 @@ inline uint64_t HashStatusIcon(const StatusIcon& icon) {
 }
 
 inline std::wstring StatusBarText(const StatusItem& item) {
+  if (item.icon.kind == IconKind::kVector) {
+    return item.text;
+  }
   const bool glyph = item.icon.kind == IconKind::kGlyph && !item.icon.glyph.empty();
   if (!glyph) {
     return item.text;
