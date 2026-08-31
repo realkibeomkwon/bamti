@@ -19,7 +19,7 @@ bamti 상단바에 아이콘과 값, 아이콘과 토글, 아이콘과 팝업 �
 
 ```json
 {"v":2,"op":"hello","renderer":"bamti","version":"1.2.0","proto":[1,2],
- "features":["icon_glyph","icon_png","gauge","kv","toggle","button","text","separator","events"],
+ "features":["icon_glyph","icon_png","gauge","kv","toggle","button","text","separator","slider","events"],
  "limits":{"segment_text":32,"panel_rows":32,"panel_text":128,"icon_png_bytes":8192,"upserts_per_sec":10}}
 ```
 
@@ -47,6 +47,7 @@ bamti 상단바에 아이콘과 값, 아이콘과 토글, 아이콘과 팝업 �
 | `bamti.widget/battery` | 배터리 |
 | `bamti.widget/cpu` | CPU |
 | `bamti.widget/net` | 네트워크 |
+| `bamti.widget/volume` | 볼륨 |
 | `bamti.widget/board` | 위젯 보드 단추 |
 | `bamti.tray/<key>` | 알림 영역 미러. `<key>`는 16자리 16진수 |
 
@@ -82,6 +83,7 @@ bamti 상단바에 아이콘과 값, 아이콘과 토글, 아이콘과 팝업 �
       {"type":"separator"},
       {"type":"kv","label":"Plan","value":"Pro"},
       {"type":"toggle","row_id":"auto_refresh","label":"Auto refresh","on":true},
+      {"type":"slider","row_id":"volume_level","label":"Volume","value":0.72,"value_text":"72%"},
       {"type":"button","row_id":"settings","label":"Settings…"},
       {"type":"button","row_id":"quit","label":"Quit","style":"danger"}
     ]
@@ -114,6 +116,7 @@ bamti 상단바에 아이콘과 값, 아이콘과 토글, 아이콘과 팝업 �
 | `text` | `text`, `style`(`body` \| `note`) | 한 줄. `note`면 흐린 색 |
 | `separator` | 없음 | 구분선 |
 | `toggle` | `row_id`, `label`, `on` | 레이블과 스위치 |
+| `slider` | `row_id`, `label`, `value`(0.0~1.0), `value_text`(선택) | 레이블과 우측 값, 조절 가능한 막대. 값은 0.02 단위로 스냅합니다 |
 | `button` | `row_id`, `label`, `style`(`normal` \| `danger`) | 버튼. `danger`면 경고색 |
 
 연속한 `button`은 한 줄에 최대 세 개입니다.
@@ -149,6 +152,7 @@ v2 연결:
 {"v":2,"op":"event","id":"...","event":"panel_close"}
 {"v":2,"op":"event","id":"...","event":"invoke","row_id":"settings"}
 {"v":2,"op":"event","id":"...","event":"toggle","row_id":"auto_refresh","on":false}
+{"v":2,"op":"event","id":"...","event":"slide","row_id":"volume_level","value":0.720}
 ```
 
 v1 연결에는 `{"v":1,"op":"click","id":"...","button":"..."}`만 보냅니다. 버튼의 `button` 값은 액션 문자열입니다.
@@ -160,6 +164,12 @@ v1 연결에는 `{"v":1,"op":"click","id":"...","button":"..."}`만 보냅니다
 1. 스위치를 누르면 bamti가 즉시 시각 상태를 뒤집습니다.
 2. `toggle` 이벤트를 보냅니다.
 3. 2초 안에 그 `id`의 `upsert` 또는 `patch`가 없으면 스위치를 되돌리고 항목을 `error`로 표시합니다.
+
+## 슬라이더
+
+1. 손잡이를 끌거나 트랙을 클릭하면 bamti가 즉시 표시 값을 바꿉니다.
+2. `slide` 이벤트를 보냅니다. `value`는 0.0~1.0이며 0.02 단위로 스냅하고, JSON에는 소수점 셋째 자리까지 적습니다.
+3. 끄는 동안 패널은 닫히지 않습니다. 실패 시 되돌리기 타이머는 없습니다. 다음 표본이 실제 값을 가져옵니다.
 
 ## 상한
 
