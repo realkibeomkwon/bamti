@@ -84,3 +84,11 @@ hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, kMe
 ```
 fix: 상단바 메뉴가 바깥을 눌러도 닫히게 한다
 ```
+
+---
+
+## 6. 검증 기록
+
+시각: 2026-09-01. Release `build\Release\bamti.exe`.
+
+`SetForegroundWindow`는 성공했고, 메뉴가 열린 동안 포그라운드는 `bamti.MenuBar`였다. Esc로 닫으면 상단바가 포그라운드로 남아 메모장 입력이 끊겼으므로, `TrackPopupMenuEx`가 돌아온 뒤 포그라운드가 여전히 상단바라면 직전 창을 되돌린다. 다른 창을 눌러 닫으면 그 창이 이미 포그라운드이므로 되돌리지 않는다.
