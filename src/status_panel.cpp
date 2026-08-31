@@ -49,6 +49,18 @@ float ClampUnit(float value) {
   return value;
 }
 
+struct SliderGeometry {
+  float lo = 0.0f;
+  float hi = 0.0f;
+  float thumb_r = 0.0f;
+};
+
+SliderGeometry SliderGeom(float left, float right, UINT dpi) {
+  const float d = static_cast<float>(DipToPx(kPanelSliderThumbDip, dpi));
+  const float r = d * 0.5f;
+  return SliderGeometry{left + r, right - r, r};
+}
+
 int ButtonRunLen(const std::vector<StatusRow>& rows, size_t start) {
   int n = 0;
   while (start + static_cast<size_t>(n) < rows.size() && rows[start + static_cast<size_t>(n)].type == RowType::kButton) {
@@ -399,16 +411,14 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
           const D2D1_ROUNDED_RECT track_rc{D2D1::RectF(left, track_top, right, track_bottom), radius, radius};
           target->FillRoundedRectangle(track_rc, track.Get());
           const float value = ClampUnit(row.value);
-          const float filled = left + (right - left) * value;
-          if (filled > left) {
-            const D2D1_ROUNDED_RECT fill_rc{D2D1::RectF(left, track_top, filled, track_bottom), radius, radius};
+          const SliderGeometry geom = SliderGeom(left, right, dpi);
+          const float cx = geom.hi > geom.lo ? geom.lo + (geom.hi - geom.lo) * value : geom.lo;
+          const float cy = track_top + radius;
+          if (cx > left) {
+            const D2D1_ROUNDED_RECT fill_rc{D2D1::RectF(left, track_top, cx, track_bottom), radius, radius};
             target->FillRoundedRectangle(fill_rc, fill.Get());
           }
-          const float thumb_d = static_cast<float>(DipToPx(kPanelSliderThumbDip, dpi));
-          const float thumb_r = thumb_d * 0.5f;
-          const float cx = left + (right - left - thumb_d) * value + thumb_r;
-          const float cy = track_top + radius;
-          float draw_r = thumb_r;
+          float draw_r = geom.thumb_r;
           if (hot_index == hit_i - 1 || drag_row_ == static_cast<int>(i)) {
             draw_r += 2.0f;
           }
@@ -468,10 +478,8 @@ void StatusPanelContent::DragTo(int index, POINT client, UINT dpi) {
     return;
   }
   const RECT& rc = hits_[static_cast<size_t>(index)].rc;
-  const float thumb_d = static_cast<float>(DipToPx(kPanelSliderThumbDip, dpi));
-  const float lo = static_cast<float>(rc.left) + thumb_d * 0.5f;
-  const float hi = static_cast<float>(rc.right) - thumb_d * 0.5f;
-  float v = hi > lo ? (static_cast<float>(client.x) - lo) / (hi - lo) : 0.0f;
+  const SliderGeometry geom = SliderGeom(static_cast<float>(rc.left), static_cast<float>(rc.right), dpi);
+  float v = geom.hi > geom.lo ? (static_cast<float>(client.x) - geom.lo) / (geom.hi - geom.lo) : 0.0f;
   v = ClampUnit(v);
   v = std::round(v / 0.02f) * 0.02f;
   v = ClampUnit(v);

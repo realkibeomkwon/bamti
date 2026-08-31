@@ -145,10 +145,17 @@ bool VolumeControl::SetLevel(float level) {
   if (!Ensure() || !volume_) {
     return false;
   }
-  const HRESULT hr = volume_->SetMasterVolumeLevelScalar(ClampUnit(level), nullptr);
+  const float want = ClampUnit(level);
+  const HRESULT hr = volume_->SetMasterVolumeLevelScalar(want, nullptr);
   if (FAILED(hr)) {
     Release();
     return false;
+  }
+  if (want <= 0.02f || want >= 0.98f) {
+    float got = 0.0f;
+    if (SUCCEEDED(volume_->GetMasterVolumeLevelScalar(&got))) {
+      Log(L"widget", L"volume set %.4f -> read %.4f", want, got);
+    }
   }
   return true;
 }
