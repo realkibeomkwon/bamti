@@ -2,6 +2,7 @@
 
 #include "log.hpp"
 #include "status_item.hpp"
+#include "widgets/volume.hpp"
 
 // netioapi.h (via iphlpapi.h) needs _WS2IPDEF_. Do not include winsock2.h.
 #include <ws2def.h>
@@ -12,6 +13,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <optional>
 
 namespace bamti {
 namespace {
@@ -19,9 +21,11 @@ namespace {
 constexpr char kBatteryId[] = "bamti.widget/battery";
 constexpr char kCpuId[] = "bamti.widget/cpu";
 constexpr char kNetId[] = "bamti.widget/net";
+constexpr char kVolumeId[] = "bamti.widget/volume";
 constexpr char kBoardId[] = "bamti.widget/board";
 
 constexpr int kBatteryPriority = 40;
+constexpr int kVolumePriority = 35;
 constexpr int kCpuPriority = 30;
 constexpr int kNetPriority = 20;
 constexpr int kBoardPriority = 10;
@@ -29,11 +33,15 @@ constexpr int kBoardPriority = 10;
 constexpr ULONGLONG kBatteryPeriodMs = 60000;
 constexpr ULONGLONG kCpuPeriodMs = 5000;
 constexpr ULONGLONG kNetPeriodMs = 2000;
+constexpr ULONGLONG kVolumePeriodMs = 1000;
+constexpr ULONGLONG kVolumeRefreshMs = 20000;
 constexpr ULONGLONG kFirstSampleMs = 1000;
 
 constexpr wchar_t kBatteryGlyphs[] = L"▁▃▅▇█";
 constexpr wchar_t kCpuGlyph[] = L"▦";
 constexpr wchar_t kNetGlyph[] = L"⇅";
+constexpr wchar_t kVolumeGlyph[] = L"♪";
+constexpr wchar_t kVolumeMuteGlyph[] = L"♪";
 constexpr wchar_t kBoardGlyph[] = L"▤";
 
 uint64_t FileTimeToU64(const FILETIME& ft) {
@@ -179,6 +187,25 @@ StatusRow ButtonRow(const char* row_id, std::wstring label) {
   return row;
 }
 
+StatusRow ToggleRow(const char* row_id, std::wstring label, bool on) {
+  StatusRow row;
+  row.type = RowType::kToggle;
+  row.row_id = row_id;
+  row.label = Truncate(std::move(label), kStatusPanelTextMaxChars);
+  row.on = on;
+  return row;
+}
+
+StatusRow SliderRow(const char* row_id, std::wstring label, float value, std::wstring value_text) {
+  StatusRow row;
+  row.type = RowType::kSlider;
+  row.row_id = row_id;
+  row.label = Truncate(std::move(label), kStatusPanelTextMaxChars);
+  row.value = ClampUnit(value);
+  row.value_text = Truncate(std::move(value_text), kStatusPanelTextMaxChars);
+  return row;
+}
+
 std::wstring Fingerprint(const StatusItem& item) {
   std::wstring fp = item.icon.glyph;
   fp.push_back(L'\x1f');
@@ -307,6 +334,7 @@ INT_PTR ShellOpen(const wchar_t* target) {
 }  // namespace
 
 BuiltinWidgets::BuiltinWidgets() {
+  volume_ = std::make_unique<VolumeControl>();
   stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   wake_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   save_idle_event_ = CreateEventW(nullptr, TRUE, TRUE, nullptr);
@@ -399,7 +427,7 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
   bool stop_worker = false;
   bool submit_save = false;
   StatusSink* sink = nullptr;
-  const char* drop[4]{};
+  const char* drop[5]{};
   size_t drop_n = 0;
   {
     std::lock_guard lock(mu_);
@@ -424,6 +452,7 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
     note_drop(prev.battery, next.battery, kBatteryId, &fp_battery_);
     note_drop(prev.cpu, next.cpu, kCpuId, &fp_cpu_);
     note_drop(prev.network, next.network, kNetId, &fp_net_);
+    note_drop(prev.volume, next.volume, kVolumeId, &fp_volume_);
     note_drop(prev.widget_board, next.widget_board, kBoardId, &fp_board_);
     const ULONGLONG now = GetTickCount64();
     if (!prev.battery && next.battery) {
@@ -437,6 +466,11 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
     if (!prev.network && next.network) {
       net_has_baseline_ = false;
       net_due_ = now;
+    }
+    if (!prev.volume && next.volume) {
+      volume_due_ = now;
+      volume_refresh_due_ = 0;
+      logged_no_volume_ = false;
     }
     if (next.Any()) {
       StartWorkerLocked();
@@ -491,7 +525,16 @@ void BuiltinWidgets::SetActive(bool active) {
 void BuiltinWidgets::OnEvent(const StatusEvent& ev) {
   PendingAction action{};
   bool have = false;
-  if (ev.event == "click" && ev.id == kBoardId && ev.button == "left") {
+  bool wake = false;
+  if (ev.event == "slide" && ev.id == kVolumeId && ev.row_id == "volume_level") {
+    std::lock_guard lock(mu_);
+    pending_level_ = ClampUnit(ev.value);
+    wake = true;
+  } else if (ev.event == "toggle" && ev.id == kVolumeId && ev.row_id == "volume_mute") {
+    std::lock_guard lock(mu_);
+    pending_mute_ = ev.on;
+    wake = true;
+  } else if (ev.event == "click" && ev.id == kBoardId && ev.button == "left") {
     action = PendingAction::kWidgetBoard;
     have = true;
   } else if (ev.event == "invoke") {
@@ -504,16 +547,17 @@ void BuiltinWidgets::OnEvent(const StatusEvent& ev) {
     } else if (ev.row_id == "task_manager") {
       action = PendingAction::kTaskManager;
       have = true;
+    } else if (ev.row_id == "sound_settings") {
+      action = PendingAction::kSoundSettings;
+      have = true;
     }
   }
-  if (!have) {
-    return;
-  }
-  {
+  if (have) {
     std::lock_guard lock(mu_);
     actions_.push_back(action);
+    wake = true;
   }
-  if (wake_event_ != nullptr) {
+  if (wake && wake_event_ != nullptr) {
     SetEvent(wake_event_);
   }
 }
@@ -581,6 +625,7 @@ void BuiltinWidgets::ResetBaselines() {
   cpu_due_ = now + kFirstSampleMs;
   net_due_ = now + kFirstSampleMs;
   battery_due_ = now;
+  volume_due_ = now;
   if (net.enum_ms > 1.0 && !logged_slow_if_) {
     logged_slow_if_ = true;
     Log(L"widget", L"GetIfTable2 took %.2f ms", net.enum_ms);
@@ -588,7 +633,7 @@ void BuiltinWidgets::ResetBaselines() {
 }
 
 bool BuiltinWidgets::HasSampleDeadlineLocked() const {
-  return settings_.battery || settings_.cpu || settings_.network;
+  return settings_.battery || settings_.cpu || settings_.network || settings_.volume;
 }
 
 ULONGLONG BuiltinWidgets::NextDeadlineLocked(ULONGLONG now) const {
@@ -602,6 +647,9 @@ ULONGLONG BuiltinWidgets::NextDeadlineLocked(ULONGLONG now) const {
   }
   if (settings_.network && net_due_ < due) {
     due = net_due_;
+  }
+  if (settings_.volume && volume_due_ < due) {
+    due = volume_due_;
   }
   return due;
 }
@@ -619,6 +667,8 @@ void BuiltinWidgets::Publish(StatusItem item) {
       slot = &fp_cpu_;
     } else if (item.id == kNetId) {
       slot = &fp_net_;
+    } else if (item.id == kVolumeId) {
+      slot = &fp_volume_;
     } else if (item.id == kBoardId) {
       slot = &fp_board_;
     }
@@ -651,6 +701,8 @@ void BuiltinWidgets::DropItem(const char* id) {
       fp_cpu_.clear();
     } else if (std::strcmp(id, kNetId) == 0) {
       fp_net_.clear();
+    } else if (std::strcmp(id, kVolumeId) == 0) {
+      fp_volume_.clear();
     } else if (std::strcmp(id, kBoardId) == 0) {
       fp_board_.clear();
     }
@@ -672,6 +724,9 @@ void BuiltinWidgets::Execute(PendingAction action) {
       break;
     case PendingAction::kTaskManager:
       rc = ShellOpen(L"taskmgr.exe");
+      break;
+    case PendingAction::kSoundSettings:
+      rc = ShellOpen(L"ms-settings:sound");
       break;
     case PendingAction::kWidgetBoard:
       OpenWidgetBoard();
@@ -962,10 +1017,89 @@ void BuiltinWidgets::SampleNet() {
   Publish(std::move(item));
 }
 
+void BuiltinWidgets::SampleVolume() {
+  const ULONGLONG now = GetTickCount64();
+  bool refresh = false;
+  bool enabled = false;
+  {
+    std::lock_guard lock(mu_);
+    volume_due_ = now + kVolumePeriodMs;
+    if (volume_refresh_due_ == 0) {
+      volume_refresh_due_ = now + kVolumeRefreshMs;
+    } else if (now >= volume_refresh_due_) {
+      refresh = true;
+      volume_refresh_due_ = now + kVolumeRefreshMs;
+    }
+    enabled = settings_.volume && active_ && sink_ != nullptr;
+  }
+  if (!enabled) {
+    volume_->Release();
+    return;
+  }
+  if (refresh) {
+    volume_->Release();
+  }
+  const VolumeState state = volume_->Read();
+  if (!state.ok) {
+    bool log_now = false;
+    {
+      std::lock_guard lock(mu_);
+      if (!logged_no_volume_) {
+        logged_no_volume_ = true;
+        log_now = true;
+      }
+    }
+    if (log_now) {
+      Log(L"widget", L"no audio device; hiding %hs", kVolumeId);
+    }
+    DropItem(kVolumeId);
+    return;
+  }
+  {
+    std::lock_guard lock(mu_);
+    logged_no_volume_ = false;
+  }
+
+  const int pct = static_cast<int>(state.level * 100.0f + 0.5f);
+  StatusItem item;
+  item.id = kVolumeId;
+  item.priority = kVolumePriority;
+  SetGlyph(&item, state.muted ? kVolumeMuteGlyph : kVolumeGlyph);
+  if (state.muted) {
+    item.text = Truncate(L"음소거", kStatusTextMaxChars);
+    item.state = StatusState::kOff;
+  } else {
+    item.text = Truncate(PercentText(pct, false), kStatusTextMaxChars);
+    item.state = StatusState::kNormal;
+  }
+  std::wstring tip = L"볼륨 ";
+  if (state.muted) {
+    tip += L"음소거";
+  } else {
+    tip += PercentText(pct, false);
+  }
+  if (!state.device.empty()) {
+    tip += L" · ";
+    tip += state.device;
+  }
+  item.tooltip = Truncate(std::move(tip), kStatusPanelTextMaxChars);
+
+  StatusPanel panel;
+  panel.title = L"볼륨";
+  panel.subtitle = Truncate(state.device, kStatusPanelTextMaxChars);
+  panel.rows.push_back(SliderRow("volume_level", L"볼륨", state.level, PercentText(pct, false)));
+  panel.rows.push_back(ToggleRow("volume_mute", L"음소거", state.muted));
+  panel.rows.push_back(SepRow());
+  panel.rows.push_back(ButtonRow("sound_settings", L"소리 설정 열기"));
+  item.panel = std::move(panel);
+  Publish(std::move(item));
+}
+
 void BuiltinWidgets::SampleDue(ULONGLONG now) {
   bool bat = false;
   bool cpu = false;
   bool net = false;
+  bool volume = false;
   {
     std::lock_guard lock(mu_);
     if (!active_) {
@@ -974,6 +1108,7 @@ void BuiltinWidgets::SampleDue(ULONGLONG now) {
     bat = settings_.battery && battery_due_ <= now;
     cpu = settings_.cpu && cpu_due_ <= now;
     net = settings_.network && net_due_ <= now;
+    volume = settings_.volume && volume_due_ <= now;
   }
   if (bat) {
     SampleBattery();
@@ -983,6 +1118,9 @@ void BuiltinWidgets::SampleDue(ULONGLONG now) {
   }
   if (net) {
     SampleNet();
+  }
+  if (volume) {
+    SampleVolume();
   }
 }
 
@@ -997,6 +1135,8 @@ void BuiltinWidgets::WorkerLoop() {
     }
 
     std::vector<PendingAction> acts;
+    std::optional<float> level;
+    std::optional<bool> mute;
     bool do_reset = false;
     bool do_power = false;
     WidgetSettings s{};
@@ -1004,6 +1144,8 @@ void BuiltinWidgets::WorkerLoop() {
     {
       std::lock_guard lock(mu_);
       acts.swap(actions_);
+      level.swap(pending_level_);
+      mute.swap(pending_mute_);
       do_reset = reset_pending_;
       reset_pending_ = false;
       do_power = power_pending_;
@@ -1015,17 +1157,32 @@ void BuiltinWidgets::WorkerLoop() {
     for (const PendingAction action : acts) {
       Execute(action);
     }
+    bool volume_changed = false;
+    if (level) {
+      volume_->SetLevel(*level);
+      volume_changed = true;
+    }
+    if (mute) {
+      volume_->SetMute(*mute);
+      volume_changed = true;
+    }
     if (do_reset) {
       ResetBaselines();
     }
     if (s.widget_board) {
       PublishBoard();
     }
+    if (!s.volume) {
+      volume_->Release();
+    }
     if (active) {
       if (do_power || do_reset) {
         if (s.battery) {
           SampleBattery();
         }
+      }
+      if (volume_changed && s.volume) {
+        SampleVolume();
       }
       SampleDue(GetTickCount64());
     }
@@ -1079,6 +1236,7 @@ void BuiltinWidgets::WorkerLoop() {
   if (timer != nullptr) {
     CloseHandle(timer);
   }
+  volume_->Release();
   if (SUCCEEDED(co)) {
     CoUninitialize();
   }

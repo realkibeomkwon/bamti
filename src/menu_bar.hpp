@@ -73,6 +73,7 @@ class MenuBar {
   StatusPanelHost MakePanelHost();
   const BarSegment* HitSegment(POINT client) const;
   void ArmToggle(std::string id, std::string row_id, uint64_t revision, bool on);
+  void ArmSlider(std::string id, std::string row_id, uint64_t revision, float value);
   void OnToggleTimeout();
   bool InstallWinHook();
   void RemoveWinHook();
@@ -146,6 +147,14 @@ class MenuBar {
   };
   PendingToggle pending_toggle_{};
   bool toggle_armed_ = false;
+  struct PendingSlider {
+    std::string id;
+    std::string row_id;
+    uint64_t revision = 0;
+    float value = 0.0f;
+  };
+  PendingSlider pending_slider_{};
+  bool slider_armed_ = false;
   bool tray_peeking_ = false;
   bool skip_left_up_ = false;
   std::string tray_menu_id_;

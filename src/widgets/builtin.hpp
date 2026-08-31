@@ -4,13 +4,17 @@
 #include "status_source.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
 #include <windows.h>
 
 namespace bamti {
+
+class VolumeControl;
 
 class BuiltinWidgets : public StatusSource {
  public:
@@ -30,7 +34,7 @@ class BuiltinWidgets : public StatusSource {
   void NotePowerEvent(bool resumed);
 
  private:
-  enum class PendingAction { kPowerSettings, kNetworkSettings, kTaskManager, kWidgetBoard };
+  enum class PendingAction { kPowerSettings, kNetworkSettings, kTaskManager, kWidgetBoard, kSoundSettings };
 
   void WorkerLoop();
   void StartWorkerLocked();
@@ -43,6 +47,7 @@ class BuiltinWidgets : public StatusSource {
   void SampleBattery();
   void SampleCpu();
   void SampleNet();
+  void SampleVolume();
   void PublishBoard();
   void Publish(StatusItem item);
   void DropItem(const char* id);
@@ -64,9 +69,14 @@ class BuiltinWidgets : public StatusSource {
   bool reset_pending_ = true;
   bool power_pending_ = false;
   std::vector<PendingAction> actions_;
+  std::optional<float> pending_level_;
+  std::optional<bool> pending_mute_;
+  std::unique_ptr<VolumeControl> volume_;
   ULONGLONG battery_due_ = 0;
   ULONGLONG cpu_due_ = 0;
   ULONGLONG net_due_ = 0;
+  ULONGLONG volume_due_ = 0;
+  ULONGLONG volume_refresh_due_ = 0;
   bool cpu_has_baseline_ = false;
   bool net_has_baseline_ = false;
   uint64_t cpu_idle_ = 0;
@@ -80,8 +90,10 @@ class BuiltinWidgets : public StatusSource {
   std::wstring fp_battery_;
   std::wstring fp_cpu_;
   std::wstring fp_net_;
+  std::wstring fp_volume_;
   std::wstring fp_board_;
   bool logged_no_battery_ = false;
+  bool logged_no_volume_ = false;
   bool logged_slow_if_ = false;
 };
 

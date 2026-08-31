@@ -42,6 +42,7 @@ constexpr UINT kTraySystemIconsCmd = 15;
 constexpr UINT kTrayOverflowIconsCmd = 16;
 constexpr UINT kTrayInterceptCmd = 17;
 constexpr UINT kAutostartCmd = 18;
+constexpr UINT kWidgetVolumeCmd = 19;
 constexpr UINT kTrayPeekCmd = 20;
 constexpr UINT kTrayHideIconCmd = 21;
 constexpr UINT kTrayMirrorOffCmd = 22;
@@ -530,7 +531,8 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         DestroyWindow(hwnd_);
         return 0;
       }
-      if (cmd >= kWidgetBatteryCmd && cmd <= kWidgetBoardCmd) {
+      if (cmd == kWidgetBatteryCmd || cmd == kWidgetCpuCmd || cmd == kWidgetNetworkCmd ||
+          cmd == kWidgetVolumeCmd || cmd == kWidgetBoardCmd) {
         WidgetSettings next = widgets_.settings();
         const WidgetSettings tray = tray_.settings();
         next.tray_mirror = tray.tray_mirror;
@@ -544,7 +546,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           next.cpu = !next.cpu;
         } else if (cmd == kWidgetNetworkCmd) {
           next.network = !next.network;
-        } else {
+        } else if (cmd == kWidgetVolumeCmd) {
+          next.volume = !next.volume;
+        } else if (cmd == kWidgetBoardCmd) {
           next.widget_board = !next.widget_board;
         }
         ApplySettings(next);
@@ -1155,10 +1159,16 @@ StatusPanelHost MenuBar::MakePanelHost() {
   host.arm_toggle = [this](std::string id, std::string row_id, uint64_t revision, bool on) {
     ArmToggle(std::move(id), std::move(row_id), revision, on);
   };
+  host.arm_slider = [this](std::string id, std::string row_id, uint64_t revision, float value) {
+    ArmSlider(std::move(id), std::move(row_id), revision, value);
+  };
   return host;
 }
 
 void MenuBar::RefreshOpenPanel() {
+  if (status_popup_.Dragging()) {
+    return;
+  }
   if (!status_popup_.IsOpen() || open_panel_id_.empty() || status_panel_ == nullptr) {
     return;
   }
@@ -1170,6 +1180,9 @@ void MenuBar::RefreshOpenPanel() {
   if (toggle_armed_ && item->revision == pending_toggle_.revision) {
     return;
   }
+  if (slider_armed_ && item->revision == pending_slider_.revision) {
+    return;
+  }
   if (item->revision == open_panel_revision_) {
     return;
   }
@@ -1178,6 +1191,7 @@ void MenuBar::RefreshOpenPanel() {
     return;
   }
   open_panel_revision_ = item->revision;
+  slider_armed_ = false;
   status_panel_->Reset(std::move(*item), MakePanelHost());
   if (status_popup_.hwnd() != nullptr) {
     InvalidateRect(status_popup_.hwnd(), nullptr, FALSE);
@@ -1193,6 +1207,14 @@ void MenuBar::ArmToggle(std::string id, std::string row_id, uint64_t revision, b
   if (hwnd_ != nullptr) {
     SetTimer(hwnd_, kToggleTimerId, kToggleTimeoutMs, nullptr);
   }
+}
+
+void MenuBar::ArmSlider(std::string id, std::string row_id, uint64_t revision, float value) {
+  pending_slider_.id = std::move(id);
+  pending_slider_.row_id = std::move(row_id);
+  pending_slider_.revision = revision;
+  pending_slider_.value = value;
+  slider_armed_ = true;
 }
 
 void MenuBar::OnToggleTimeout() {
@@ -1263,6 +1285,7 @@ void MenuBar::ShowContextMenu(POINT screen) {
   AppendMenuW(menu, MF_STRING | (s.battery ? MF_CHECKED : 0), kWidgetBatteryCmd, L"배터리");
   AppendMenuW(menu, MF_STRING | (s.cpu ? MF_CHECKED : 0), kWidgetCpuCmd, L"CPU");
   AppendMenuW(menu, MF_STRING | (s.network ? MF_CHECKED : 0), kWidgetNetworkCmd, L"네트워크");
+  AppendMenuW(menu, MF_STRING | (s.volume ? MF_CHECKED : 0), kWidgetVolumeCmd, L"볼륨");
   AppendMenuW(menu, MF_STRING | (s.widget_board ? MF_CHECKED : 0), kWidgetBoardCmd, L"위젯 보드 단추");
   const WidgetSettings tray = tray_.settings();
   AppendMenuW(menu, MF_STRING | (tray.tray_mirror ? MF_CHECKED : 0), kTrayMirrorToggleCmd, L"트레이 미러");
