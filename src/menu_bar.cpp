@@ -1286,7 +1286,13 @@ void MenuBar::ShowContextMenu(POINT screen) {
   AppendMenuW(menu, MF_STRING | (s.cpu ? MF_CHECKED : 0), kWidgetCpuCmd, L"CPU");
   AppendMenuW(menu, MF_STRING | (s.network ? MF_CHECKED : 0), kWidgetNetworkCmd, L"네트워크");
   AppendMenuW(menu, MF_STRING | (s.volume ? MF_CHECKED : 0), kWidgetVolumeCmd, L"볼륨");
-  AppendMenuW(menu, MF_STRING | (s.widget_board ? MF_CHECKED : 0), kWidgetBoardCmd, L"위젯 보드 단추");
+  const bool board_ok = IsWidgetBoardAvailable();
+  UINT board_flags = MF_STRING | (s.widget_board ? MF_CHECKED : 0);
+  if (!board_ok) {
+    board_flags |= MF_GRAYED;
+  }
+  AppendMenuW(menu, board_flags, kWidgetBoardCmd,
+              board_ok ? L"위젯 보드 단추" : L"위젯 보드 단추 (이 PC에서 사용할 수 없습니다)");
   const WidgetSettings tray = tray_.settings();
   AppendMenuW(menu, MF_STRING | (tray.tray_mirror ? MF_CHECKED : 0), kTrayMirrorToggleCmd, L"트레이 미러");
   AppendMenuW(menu, MF_STRING | (tray.tray_system_icons ? MF_CHECKED : 0), kTraySystemIconsCmd, L"시스템 아이콘도 표시");

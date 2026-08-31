@@ -7,10 +7,12 @@
 // netioapi.h (via iphlpapi.h) needs _WS2IPDEF_. Do not include winsock2.h.
 #include <ws2def.h>
 #include <ws2ipdef.h>
+#include <appmodel.h>
 #include <iphlpapi.h>
 #include <objbase.h>
 #include <shellapi.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <optional>
@@ -331,7 +333,65 @@ INT_PTR ShellOpen(const wchar_t* target) {
   return reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", target, nullptr, nullptr, SW_SHOWNORMAL));
 }
 
+constexpr ULONGLONG kBoardCheckPeriodMs = 30000;
+
+bool WebExperienceInstalled() {
+  UINT32 count = 0;
+  UINT32 bytes = 0;
+  const LONG rc = FindPackagesByPackageFamily(
+      L"MicrosoftWindows.Client.WebExperience_cw5n1h2txyewy", PACKAGE_FILTER_HEAD | PACKAGE_FILTER_DIRECT, &count,
+      nullptr, &bytes, nullptr, nullptr);
+  if (rc == ERROR_INSUFFICIENT_BUFFER) {
+    return count > 0;
+  }
+  if (rc == ERROR_SUCCESS) {
+    return count > 0;
+  }
+  return false;
+}
+
+std::optional<int> ReadTaskbarDa() {
+  DWORD value = 1;
+  DWORD size = sizeof(value);
+  const LSTATUS rc = RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                                  L"TaskbarDa", RRF_RT_REG_DWORD, nullptr, &value, &size);
+  if (rc != ERROR_SUCCESS) {
+    return std::nullopt;
+  }
+  return static_cast<int>(value);
+}
+
+bool TaskbarWidgetsEnabled() {
+  const std::optional<int> value = ReadTaskbarDa();
+  if (!value) {
+    return true;
+  }
+  return *value != 0;
+}
+
+bool WidgetBoardAvailable() {
+  static const bool package = WebExperienceInstalled();
+  static std::atomic<ULONGLONG> checked_at{0};
+  static std::atomic<bool> enabled{false};
+  if (!package) {
+    return false;
+  }
+  const ULONGLONG now = GetTickCount64();
+  const ULONGLONG checked = checked_at.load(std::memory_order_relaxed);
+  if (checked == 0 || now - checked >= kBoardCheckPeriodMs) {
+    const bool next = TaskbarWidgetsEnabled();
+    enabled.store(next, std::memory_order_relaxed);
+    checked_at.store(now, std::memory_order_relaxed);
+    return next;
+  }
+  return enabled.load(std::memory_order_relaxed);
+}
+
 }  // namespace
+
+bool IsWidgetBoardAvailable() {
+  return WidgetBoardAvailable();
+}
 
 BuiltinWidgets::BuiltinWidgets() {
   volume_ = std::make_unique<VolumeControl>();
@@ -362,6 +422,11 @@ const char* BuiltinWidgets::Name() const {
 
 bool BuiltinWidgets::Start(StatusSink* sink) {
   Stop();
+  const bool package = WebExperienceInstalled();
+  const std::optional<int> da = ReadTaskbarDa();
+  const int da_log = da ? *da : -1;
+  const bool available = package && (!da || *da != 0);
+  Log(L"widget", L"board available=%d package=%d taskbar_da=%d", available ? 1 : 0, package ? 1 : 0, da_log);
   std::lock_guard lock(mu_);
   sink_ = sink;
   // 메시지 루프 전의 1KB 미만 읽기라 UI 응답성 문제가 없고, 백그라운드로 넘기면 위젯 생성 경합만 생긴다.
@@ -729,6 +794,14 @@ void BuiltinWidgets::Execute(PendingAction action) {
       rc = ShellOpen(L"ms-settings:sound");
       break;
     case PendingAction::kWidgetBoard:
+      if (!WidgetBoardAvailable()) {
+        static bool logged = false;
+        if (!logged) {
+          logged = true;
+          Log(L"widget", L"widget board unavailable; ignoring click");
+        }
+        return;
+      }
       OpenWidgetBoard();
       return;
   }
@@ -1169,8 +1242,10 @@ void BuiltinWidgets::WorkerLoop() {
     if (do_reset) {
       ResetBaselines();
     }
-    if (s.widget_board) {
+    if (s.widget_board && WidgetBoardAvailable()) {
       PublishBoard();
+    } else if (s.widget_board) {
+      DropItem(kBoardId);
     }
     if (!s.volume) {
       volume_->Release();

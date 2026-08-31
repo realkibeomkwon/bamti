@@ -97,4 +97,6 @@ class BuiltinWidgets : public StatusSource {
   bool logged_slow_if_ = false;
 };
 
+bool IsWidgetBoardAvailable();
+
 }  // namespace bamti
