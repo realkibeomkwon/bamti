@@ -75,7 +75,7 @@ float ClampUnit(double value) {
   return static_cast<float>(value);
 }
 
-enum class ScaleStyle { kCompact, kBytes, kBytesPerSec };
+enum class ScaleStyle { kCompact, kCompactPerSec, kBytes, kBytesPerSec };
 
 std::wstring FormatScaled(double n, ScaleStyle style) {
   if (!std::isfinite(n) || n < 0.0) {
@@ -100,9 +100,12 @@ std::wstring FormatScaled(double n, ScaleStyle style) {
     swprintf_s(num, L"%.0f", v);
   }
   std::wstring out = num;
-  if (style == ScaleStyle::kCompact) {
+  if (style == ScaleStyle::kCompact || style == ScaleStyle::kCompactPerSec) {
     static const wchar_t* kSuf[] = {L"", L"K", L"M", L"G"};
     out += kSuf[tier];
+    if (style == ScaleStyle::kCompactPerSec) {
+      out += L"B/s";
+    }
   } else {
     static const wchar_t* kSuf[] = {L" B", L" KB", L" MB", L" GB"};
     out += kSuf[tier];
@@ -1056,10 +1059,10 @@ void BuiltinWidgets::SampleNet() {
     return;
   }
 
-  const std::wstring in_c = FormatScaled(in_bps, ScaleStyle::kCompact);
-  const std::wstring out_c = FormatScaled(out_bps, ScaleStyle::kCompact);
+  const std::wstring in_c = FormatScaled(in_bps, ScaleStyle::kCompactPerSec);
+  const std::wstring out_c = FormatScaled(out_bps, ScaleStyle::kCompactPerSec);
   std::wstring text = in_c;
-  text += L'/';
+  text += L" · ";
   text += out_c;
 
   std::wstring tip = L"받기 ";
@@ -1071,10 +1074,10 @@ void BuiltinWidgets::SampleNet() {
     tip += kind;
   }
 
-  std::wstring since = L"bamti 시작 이후 받기 ";
-  since += FormatScaled(static_cast<double>(session_in), ScaleStyle::kCompact);
+  std::wstring since = L"누적 받기 ";
+  since += FormatScaled(static_cast<double>(session_in), ScaleStyle::kBytes);
   since += L" · 보내기 ";
-  since += FormatScaled(static_cast<double>(session_out), ScaleStyle::kCompact);
+  since += FormatScaled(static_cast<double>(session_out), ScaleStyle::kBytes);
 
   StatusItem item;
   item.id = kNetId;
