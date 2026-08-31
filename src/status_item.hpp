@@ -22,7 +22,7 @@ inline constexpr size_t kStatusLineMaxBytes = 65536;
 
 enum class StatusState { kNormal, kWarn, kError, kOn, kOff, kBusy };
 enum class IconKind { kNone, kGlyph, kPng, kFile, kHicon };
-enum class RowType { kGauge, kKeyValue, kText, kSeparator, kToggle, kButton };
+enum class RowType { kGauge, kKeyValue, kText, kSeparator, kToggle, kButton, kSlider };
 
 struct StatusIcon {
   IconKind kind = IconKind::kNone;

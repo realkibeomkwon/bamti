@@ -40,7 +40,7 @@ class PipeServer : public StatusSource {
   void PublishUpsert(StatusItem item, uint64_t owner);
   void PublishRemove(const std::string& id, uint64_t owner);
   void SendEvent(const std::string& id, std::string_view event, std::string_view row_id = {},
-                 std::string_view button = {}, bool on = false);
+                 std::string_view button = {}, bool on = false, float value = 0.0f);
   HANDLE CreateListenPipe();
   void CloseClientPipe(Client* client);
   bool WriteLine(Client* client, std::string_view line);

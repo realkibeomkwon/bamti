@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <optional>
 
 namespace bamti {
@@ -286,6 +287,8 @@ void ParseRowsV2(std::string_view raw, std::vector<StatusRow>* rows) {
       row.type = RowType::kToggle;
     } else if (*type == "button") {
       row.type = RowType::kButton;
+    } else if (*type == "slider") {
+      row.type = RowType::kSlider;
     } else {
       if (const auto fallback = json::GetString(one, "fallback_text")) {
         row.type = RowType::kText;
@@ -604,11 +607,11 @@ void PipeServer::DropStale() {
 }
 
 void PipeServer::OnEvent(const StatusEvent& ev) {
-  SendEvent(ev.id, ev.event, ev.row_id, ev.button, ev.on);
+  SendEvent(ev.id, ev.event, ev.row_id, ev.button, ev.on, ev.value);
 }
 
 void PipeServer::SendEvent(const std::string& id, std::string_view event, std::string_view row_id,
-                           std::string_view button, bool on) {
+                           std::string_view button, bool on, float value) {
   uint64_t owner = 0;
   {
     std::lock_guard lock(mu_);
@@ -649,6 +652,11 @@ void PipeServer::SendEvent(const std::string& id, std::string_view event, std::s
     }
     if (event == "toggle") {
       line += on ? ",\"on\":true" : ",\"on\":false";
+    }
+    if (event == "slide") {
+      char buf[32]{};
+      std::snprintf(buf, sizeof(buf), ",\"value\":%.3f", static_cast<double>(value));
+      line += buf;
     }
     line += "}";
     WriteLine(target, line);
@@ -779,7 +787,7 @@ void PipeServer::ClientLoop(Client* client) {
   WriteLine(client,
             "{\"v\":2,\"op\":\"hello\",\"renderer\":\"bamti\",\"version\":\"1.2.0\",\"proto\":[1,2],"
             "\"features\":[\"icon_glyph\",\"icon_png\",\"gauge\",\"kv\",\"toggle\",\"button\",\"text\","
-            "\"separator\",\"events\"],\"limits\":{\"segment_text\":32,\"panel_rows\":32,\"panel_text\":128,"
+            "\"separator\",\"slider\",\"events\"],\"limits\":{\"segment_text\":32,\"panel_rows\":32,\"panel_text\":128,"
             "\"icon_png_bytes\":8192,\"upserts_per_sec\":10}}");
 
   std::string pending;

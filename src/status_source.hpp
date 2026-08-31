@@ -14,6 +14,7 @@ struct StatusEvent {
   std::string row_id;
   std::string button;
   bool on = false;
+  float value = 0.0f;  // event == "slide"일 때만 의미가 있다
 };
 
 class StatusSink {

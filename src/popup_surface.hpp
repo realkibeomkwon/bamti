@@ -22,6 +22,9 @@ class PopupContent {
   virtual int RowCount() const { return 0; }
   virtual bool StickyRow(int /*index*/) const { return false; }
   virtual void StickyInvoke(int /*index*/) {}
+  virtual bool DragRow(int /*index*/) const { return false; }
+  virtual void DragTo(int /*index*/, POINT /*client*/, UINT /*dpi*/) {}
+  virtual void DragEnd(int /*index*/) {}
 };
 
 float PopupTextWidth(UINT dpi, const std::wstring& text);
@@ -56,6 +59,7 @@ class PopupSurface {
   bool Open(PopupContent* content, POINT anchor_screen, Anchor mode, bool capture = true);
   void Close();
   bool IsOpen() const { return open_; }
+  bool Dragging() const { return drag_index_ >= 0; }
   HWND hwnd() const { return hwnd_; }
   int Hot() const { return hot_; }
 
@@ -101,6 +105,7 @@ class PopupSurface {
   bool dark_ = true;
   bool capture_ = true;
   int hot_ = -1;
+  int drag_index_ = -1;
   unsigned tick_ = 0;
   Anchor mode_ = Anchor::AboveAt;
   POINT anchor_{};

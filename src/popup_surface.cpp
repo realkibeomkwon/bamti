@@ -307,6 +307,7 @@ void PopupSurface::SetDark(bool dark) {
 
 void PopupSurface::Dismiss(int invoke_index, DismissReason reason) {
   WatchdogStage(L"popup.dismiss");
+  drag_index_ = -1;
   if (!open_) {
     return;
   }
@@ -480,7 +481,7 @@ void PopupSurface::Tick(const wchar_t* src) {
   const bool down = left.down || right.down || middle.down;
   const bool pressed_since = left.pressed_since || right.pressed_since || middle.pressed_since;
   const bool saw_press = down || pressed_since;
-  if (saw_press && !mouse_down_) {
+  if (drag_index_ < 0 && saw_press && !mouse_down_) {
     if (armed_ && got_cursor && !inside) {
       Dismiss(-1, DismissReason::kOutsidePoll);
       return;
@@ -503,7 +504,7 @@ void PopupSurface::Tick(const wchar_t* src) {
         armed_ ? 1 : 0, hot_, inside ? 1 : 0);
   }
 
-  if (content_ != nullptr) {
+  if (drag_index_ < 0 && content_ != nullptr) {
     int hot = hot_;
     if (in_self) {
       POINT client = cursor;
@@ -647,6 +648,12 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
       }
       const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+      if (drag_index_ >= 0) {
+        content_->DragTo(drag_index_, pt, Dpi());
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        UpdateWindow(hwnd_);
+        return 0;
+      }
       POINT screen = pt;
       ClientToScreen(hwnd_, &screen);
       bool in_self = false;
@@ -691,6 +698,17 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       }
       if (armed_ && !inside) {
         Dismiss(-1, DismissReason::kOutsideClick);
+        return 0;
+      }
+      if (msg == WM_LBUTTONDOWN && in_self && content_ != nullptr) {
+        const int index = content_->HitTest(pt, Dpi());
+        if (index >= 0 && content_->DragRow(index)) {
+          drag_index_ = index;
+          content_->DragTo(index, pt, Dpi());
+          InvalidateRect(hwnd_, nullptr, FALSE);
+          UpdateWindow(hwnd_);
+          return 0;
+        }
       }
       return 0;
     }
@@ -705,6 +723,18 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       const int inside = (in_self || in_allied) ? 1 : 0;
       Log(L"popup", L"msg=%s pt=%d,%d inside=%d", MouseMsgName(msg), pt.x, pt.y, inside);
       if (!open_ || content_ == nullptr || !armed_) {
+        return 0;
+      }
+      if (drag_index_ >= 0) {
+        const int index = drag_index_;
+        drag_index_ = -1;
+        press_inside_ = false;
+        mouse_down_ = false;
+        content_->DragEnd(index);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        if (after_tick_ != nullptr) {
+          after_tick_(after_tick_ctx_);
+        }
         return 0;
       }
       if (in_allied && allied_ != nullptr) {
@@ -755,6 +785,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
       open_ = false;
       content_ = nullptr;
+      drag_index_ = -1;
       hwnd_ = nullptr;
       target_.Reset();
       fill_.Reset();

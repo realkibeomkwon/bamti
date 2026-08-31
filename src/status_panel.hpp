@@ -14,6 +14,7 @@ struct StatusPanelHost {
   bool dark = false;
   std::function<void(const StatusEvent&)> dispatch;
   std::function<void(std::string id, std::string row_id, uint64_t revision, bool on)> arm_toggle;
+  std::function<void(std::string id, std::string row_id, uint64_t revision, float value)> arm_slider;
 };
 
 class StatusPanelContent : public PopupContent {
@@ -27,6 +28,9 @@ class StatusPanelContent : public PopupContent {
   void Invoke(int index) override;
   bool StickyRow(int index) const override;
   void StickyInvoke(int index) override;
+  bool DragRow(int index) const override;
+  void DragTo(int index, POINT client, UINT dpi) override;
+  void DragEnd(int index) override;
 
  private:
   struct Hit {
@@ -40,6 +44,8 @@ class StatusPanelContent : public PopupContent {
   StatusItem item_{};
   StatusPanelHost host_{};
   std::vector<Hit> hits_;
+  int drag_row_ = -1;
+  float drag_value_ = 0.0f;
 };
 
 struct OverflowHost {

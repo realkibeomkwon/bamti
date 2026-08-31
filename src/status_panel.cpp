@@ -29,9 +29,24 @@ constexpr int kToggleTrackWDip = 34;
 constexpr int kToggleTrackHDip = 18;
 constexpr int kButtonGapDip = 8;
 constexpr int kButtonsPerLine = 3;
+constexpr int kPanelSliderLabelDip = 18;
+constexpr int kPanelSliderTrackDip = 6;
+constexpr int kPanelSliderThumbDip = 14;
+constexpr int kPanelSliderPadDip = 8;
+constexpr int kPanelSliderGapDip = 10;
 
 int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
+}
+
+float ClampUnit(float value) {
+  if (!std::isfinite(value) || value < 0.0f) {
+    return 0.0f;
+  }
+  if (value > 1.0f) {
+    return 1.0f;
+  }
+  return value;
 }
 
 int ButtonRunLen(const std::vector<StatusRow>& rows, size_t start) {
@@ -56,6 +71,7 @@ void NoteHitOutOfRange(int hit_i, size_t n, int row, size_t rows) {
 void StatusPanelContent::Reset(StatusItem item, StatusPanelHost host) {
   item_ = std::move(item);
   host_ = std::move(host);
+  drag_row_ = -1;
   // hits_는 Open 때 Measure가 채운다. 값만 바꿀 때는 호버/히트 영역을 유지한다.
 }
 
@@ -104,6 +120,10 @@ SIZE StatusPanelContent::Measure(UINT dpi) {
     } else if (row.type == RowType::kToggle) {
       consider(row.label);
       inner = (std::max)(inner, static_cast<int>(PopupTextWidth(dpi, row.label) + 0.5f) + DipToPx(kToggleTrackWDip + 12, dpi));
+    } else if (row.type == RowType::kSlider) {
+      const int label = static_cast<int>(PopupTextWidth(dpi, row.label) + 0.5f);
+      const int right = static_cast<int>(PopupTextWidth(dpi, row.value_text) + 0.5f);
+      inner = (std::max)(inner, label + DipToPx(12, dpi) + right);
     } else if (row.type == RowType::kButton) {
       consider(row.label);
     }
@@ -173,6 +193,15 @@ SIZE StatusPanelContent::Measure(UINT dpi) {
       hit.rc = RECT{pad, y, width - pad, y + h};
       hits_.push_back(hit);
       y += h;
+    } else if (row.type == RowType::kSlider) {
+      y += DipToPx(kPanelSliderLabelDip, dpi);
+      const int track = DipToPx(kPanelSliderTrackDip, dpi);
+      const int spad = DipToPx(kPanelSliderPadDip, dpi);
+      Hit hit;
+      hit.row = static_cast<int>(i);
+      hit.rc = RECT{pad, y, width - pad, y + spad * 2 + track};
+      hits_.push_back(hit);
+      y += spad * 2 + track + DipToPx(kPanelSliderGapDip, dpi);
     }
     ++i;
   }
@@ -345,6 +374,48 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
         }
       }
       y += DipToPx(kPanelActionDip, dpi);
+    } else if (row.type == RowType::kSlider) {
+      const int s_label_h = DipToPx(kPanelSliderLabelDip, dpi);
+      const int s_track_h = DipToPx(kPanelSliderTrackDip, dpi);
+      const int spad = DipToPx(kPanelSliderPadDip, dpi);
+      const int sgap = DipToPx(kPanelSliderGapDip, dpi);
+      DrawPopupText(target, dpi, row.label,
+                    D2D1::RectF(left, static_cast<float>(y), right * 0.55f, static_cast<float>(y + s_label_h)),
+                    text.Get());
+      DrawPopupText(target, dpi, row.value_text,
+                    D2D1::RectF(right * 0.55f, static_cast<float>(y), right, static_cast<float>(y + s_label_h)),
+                    muted.Get());
+      y += s_label_h;
+      if (static_cast<size_t>(hit_i) >= hits_.size()) {
+        NoteHitOutOfRange(hit_i, hits_.size(), static_cast<int>(i), rows.size());
+      } else {
+        const Hit& hit = hits_[static_cast<size_t>(hit_i++)];
+        if (hit.row < 0 || hit.row >= static_cast<int>(rows.size())) {
+          NoteHitOutOfRange(hit_i - 1, hits_.size(), hit.row, rows.size());
+        } else {
+          const float track_top = static_cast<float>(hit.rc.top + spad);
+          const float track_bottom = track_top + static_cast<float>(s_track_h);
+          const float radius = static_cast<float>(s_track_h) * 0.5f;
+          const D2D1_ROUNDED_RECT track_rc{D2D1::RectF(left, track_top, right, track_bottom), radius, radius};
+          target->FillRoundedRectangle(track_rc, track.Get());
+          const float value = ClampUnit(row.value);
+          const float filled = left + (right - left) * value;
+          if (filled > left) {
+            const D2D1_ROUNDED_RECT fill_rc{D2D1::RectF(left, track_top, filled, track_bottom), radius, radius};
+            target->FillRoundedRectangle(fill_rc, fill.Get());
+          }
+          const float thumb_d = static_cast<float>(DipToPx(kPanelSliderThumbDip, dpi));
+          const float thumb_r = thumb_d * 0.5f;
+          const float cx = left + (right - left - thumb_d) * value + thumb_r;
+          const float cy = track_top + radius;
+          float draw_r = thumb_r;
+          if (hot_index == hit_i - 1 || drag_row_ == static_cast<int>(i)) {
+            draw_r += 2.0f;
+          }
+          target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), draw_r, draw_r), thumb.Get());
+        }
+      }
+      y += spad * 2 + s_track_h + sgap;
     }
     ++i;
   }
@@ -374,6 +445,68 @@ void StatusPanelContent::Invoke(int index) {
 
 void StatusPanelContent::StickyInvoke(int index) {
   Activate(HitRow(index));
+}
+
+bool StatusPanelContent::DragRow(int index) const {
+  const int row = HitRow(index);
+  if (row < 0 || !item_.panel || row >= static_cast<int>(item_.panel->rows.size())) {
+    return false;
+  }
+  return item_.panel->rows[static_cast<size_t>(row)].type == RowType::kSlider;
+}
+
+void StatusPanelContent::DragTo(int index, POINT client, UINT dpi) {
+  if (!item_.panel || index < 0 || index >= static_cast<int>(hits_.size())) {
+    return;
+  }
+  const int row = hits_[static_cast<size_t>(index)].row;
+  if (row < 0 || row >= static_cast<int>(item_.panel->rows.size())) {
+    return;
+  }
+  StatusRow& target = item_.panel->rows[static_cast<size_t>(row)];
+  if (target.type != RowType::kSlider) {
+    return;
+  }
+  const RECT& rc = hits_[static_cast<size_t>(index)].rc;
+  const float thumb_d = static_cast<float>(DipToPx(kPanelSliderThumbDip, dpi));
+  const float lo = static_cast<float>(rc.left) + thumb_d * 0.5f;
+  const float hi = static_cast<float>(rc.right) - thumb_d * 0.5f;
+  float v = hi > lo ? (static_cast<float>(client.x) - lo) / (hi - lo) : 0.0f;
+  v = ClampUnit(v);
+  v = std::round(v / 0.02f) * 0.02f;
+  v = ClampUnit(v);
+  if (drag_row_ == row && v == drag_value_) {
+    return;
+  }
+  target.value = v;
+  wchar_t buf[16]{};
+  swprintf_s(buf, L"%d%%", static_cast<int>(v * 100.0f + 0.5f));
+  target.value_text = buf;
+  drag_row_ = row;
+  drag_value_ = v;
+  if (!host_.dispatch) {
+    return;
+  }
+  StatusEvent ev;
+  ev.id = item_.id;
+  ev.event = "slide";
+  ev.row_id = target.row_id;
+  ev.value = v;
+  host_.dispatch(ev);
+}
+
+void StatusPanelContent::DragEnd(int index) {
+  const float v = drag_value_;
+  drag_row_ = -1;
+  if (!host_.arm_slider) {
+    return;
+  }
+  const int row = HitRow(index);
+  if (row < 0 || !item_.panel || row >= static_cast<int>(item_.panel->rows.size())) {
+    return;
+  }
+  const StatusRow& target = item_.panel->rows[static_cast<size_t>(row)];
+  host_.arm_slider(item_.id, target.row_id, item_.revision, v);
 }
 
 void StatusPanelContent::Activate(int row) {
