@@ -71,6 +71,12 @@ class MenuBar {
   void OpenOverflow();
   void RefreshOpenPanel();
   StatusPanelHost MakePanelHost();
+  std::vector<StatusItem> OrderedItems() const;
+  void BeginReorder(const std::string& id, POINT pt);
+  bool UpdateReorder(POINT pt);
+  void CancelReorder();
+  void FinishReorder();
+  bool ReorderCursor(POINT client) const;
   const BarSegment* HitSegment(POINT client) const;
   void ArmToggle(std::string id, std::string row_id, uint64_t revision, bool on);
   void ArmSlider(std::string id, std::string row_id, uint64_t revision, float value);
@@ -157,6 +163,12 @@ class MenuBar {
   bool slider_armed_ = false;
   bool tray_peeking_ = false;
   bool skip_left_up_ = false;
+  bool reorder_active_ = false;
+  bool reorder_moved_ = false;
+  std::string reorder_id_;
+  POINT reorder_start_{};
+  std::vector<std::string> bar_order_;
+  std::vector<std::string> reorder_order_;
   std::string tray_menu_id_;
   std::vector<uint64_t> tray_menu_keys_;
 };

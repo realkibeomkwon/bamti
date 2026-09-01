@@ -4,6 +4,7 @@
 #include "dwm.hpp"
 #include "fullscreen.hpp"
 #include "log.hpp"
+#include "settings.hpp"
 #include "theme.hpp"
 #include "watchdog.hpp"
 
@@ -73,6 +74,48 @@ std::vector<RowType> PanelRowTypes(const StatusPanel& panel) {
     types.push_back(row.type);
   }
   return types;
+}
+
+bool OrderContains(const std::vector<std::string>& ids, const std::string& id) {
+  for (const std::string& one : ids) {
+    if (one == id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::vector<std::string> ApplyVisiblePermutation(const std::vector<std::string>& full,
+                                                 const std::vector<std::string>& visible_rtl) {
+  std::vector<std::string> out;
+  out.reserve(full.size() + visible_rtl.size());
+  size_t vi = 0;
+  for (const std::string& id : full) {
+    bool visible = false;
+    for (const std::string& v : visible_rtl) {
+      if (v == id) {
+        visible = true;
+        break;
+      }
+    }
+    if (visible) {
+      if (vi < visible_rtl.size()) {
+        out.push_back(visible_rtl[vi++]);
+      }
+    } else {
+      out.push_back(id);
+    }
+  }
+  while (vi < visible_rtl.size()) {
+    if (!OrderContains(out, visible_rtl[vi])) {
+      out.push_back(visible_rtl[vi]);
+    }
+    ++vi;
+  }
+  if (out.size() > kBarOrderMax) {
+    out.resize(kBarOrderMax);
+  }
+  return out;
 }
 
 void InjectWinKey(DWORD vk, bool up) {
@@ -232,6 +275,7 @@ bool MenuBar::Create(HINSTANCE instance) {
   if (!status_.StartAll()) {
     return false;
   }
+  bar_order_ = widgets_.settings().bar_order;
   tray_.SetRectLookup([this](uint64_t key, RECT* out) {
     if (hwnd_ == nullptr || out == nullptr) {
       return false;
@@ -386,6 +430,10 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         POINT pt{};
         GetCursorPos(&pt);
         ScreenToClient(hwnd_, &pt);
+        if (ReorderCursor(pt)) {
+          SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
+          return TRUE;
+        }
         if (HitStart(pt) || HitSegment(pt) != nullptr) {
           SetCursor(LoadCursorW(nullptr, IDC_HAND));
           return TRUE;
@@ -395,6 +443,19 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     }
     case WM_MOUSEMOVE: {
       POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      if (reorder_active_) {
+        if (!reorder_moved_) {
+          const LONG dx = pt.x >= reorder_start_.x ? pt.x - reorder_start_.x : reorder_start_.x - pt.x;
+          if (dx < GetSystemMetrics(SM_CXDRAG)) {
+            return 0;
+          }
+          reorder_moved_ = true;
+        }
+        if (UpdateReorder(pt)) {
+          RefreshLayout();
+        }
+        return 0;
+      }
       UpdateStartChrome(pt);
       return 0;
     }
@@ -414,6 +475,14 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         InvalidateArea(hwnd_, StartRect());
         return 0;
       }
+      if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+        if (const BarSegment* seg = HitSegment(pt)) {
+          if (seg->kind == SegmentKind::kStatus) {
+            BeginReorder(seg->id, pt);
+            return 0;
+          }
+        }
+      }
       if (start_menu_.visible()) {
         start_menu_.Hide();
       }
@@ -424,9 +493,22 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         start_pressed_ = false;
         InvalidateArea(hwnd_, StartRect());
       }
+      if (reorder_active_ && reinterpret_cast<HWND>(lparam) != hwnd_) {
+        CancelReorder();
+      }
       return 0;
+    case WM_KEYDOWN:
+      if (reorder_active_ && wparam == VK_ESCAPE) {
+        CancelReorder();
+        return 0;
+      }
+      break;
     case WM_LBUTTONUP: {
       POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      if (reorder_active_) {
+        FinishReorder();
+        return 0;
+      }
       const bool start_click = start_pressed_ && HitStart(pt);
       if (start_pressed_) {
         start_pressed_ = false;
@@ -856,7 +938,7 @@ void MenuBar::RefreshLayout() {
   LARGE_INTEGER t1{};
   QueryPerformanceCounter(&t0);
   const BarLayoutResult& after =
-      layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), status_.Snapshot());
+      layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), OrderedItems());
   QueryPerformanceCounter(&t1);
   last_compute_ms_ = QpcMs(t0, t1);
 
@@ -947,7 +1029,7 @@ void MenuBar::Paint() {
       LARGE_INTEGER t0{};
       LARGE_INTEGER t1{};
       QueryPerformanceCounter(&t0);
-      layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), status_.Snapshot());
+      layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), OrderedItems());
       QueryPerformanceCounter(&t1);
       last_compute_ms_ = QpcMs(t0, t1);
     }
@@ -997,6 +1079,158 @@ RECT MenuBar::ClockRect() const {
     }
   }
   return {};
+}
+
+std::vector<StatusItem> MenuBar::OrderedItems() const {
+  std::vector<StatusItem> items = status_.Snapshot();
+  const std::vector<std::string>& order = reorder_active_ ? reorder_order_ : bar_order_;
+  if (order.empty()) {
+    return items;
+  }
+  std::vector<StatusItem> out;
+  out.reserve(items.size());
+  std::vector<char> used(items.size(), 0);
+  for (const std::string& id : order) {
+    for (size_t i = 0; i < items.size(); ++i) {
+      if (!used[i] && items[i].id == id) {
+        used[i] = 1;
+        out.push_back(std::move(items[i]));
+        break;
+      }
+    }
+  }
+  for (size_t i = 0; i < items.size(); ++i) {
+    if (!used[i]) {
+      out.push_back(std::move(items[i]));
+    }
+  }
+  return out;
+}
+
+bool MenuBar::ReorderCursor(POINT client) const {
+  if (reorder_active_) {
+    return true;
+  }
+  if ((GetKeyState(VK_CONTROL) & 0x8000) == 0) {
+    return false;
+  }
+  const BarSegment* seg = HitSegment(client);
+  return seg != nullptr && seg->kind == SegmentKind::kStatus;
+}
+
+void MenuBar::BeginReorder(const std::string& id, POINT pt) {
+  reorder_active_ = true;
+  reorder_moved_ = false;
+  reorder_id_ = id;
+  reorder_start_ = pt;
+  reorder_order_ = bar_order_;
+  const std::vector<StatusItem> snap = status_.Snapshot();
+  for (const StatusItem& item : snap) {
+    if (!OrderContains(reorder_order_, item.id)) {
+      reorder_order_.push_back(item.id);
+    }
+  }
+  if (reorder_order_.size() > kBarOrderMax) {
+    reorder_order_.resize(kBarOrderMax);
+  }
+  status_popup_.Close();
+  SetCapture(hwnd_);
+}
+
+bool MenuBar::UpdateReorder(POINT pt) {
+  std::vector<const BarSegment*> slots;
+  for (const BarSegment& seg : layout_.last().segments) {
+    if (seg.kind == SegmentKind::kStatus) {
+      slots.push_back(&seg);
+    }
+  }
+  if (slots.size() < 2) {
+    return false;
+  }
+  size_t from = slots.size();
+  for (size_t i = 0; i < slots.size(); ++i) {
+    if (slots[i]->id == reorder_id_) {
+      from = i;
+      break;
+    }
+  }
+  if (from == slots.size()) {
+    return false;
+  }
+  size_t to = slots.size();
+  for (size_t i = 0; i < slots.size(); ++i) {
+    const LONG mid = slots[i]->rect.left + (slots[i]->rect.right - slots[i]->rect.left) / 2;
+    if (pt.x < mid) {
+      to = i;
+      break;
+    }
+  }
+  if (to > from) {
+    --to;
+  }
+  if (to == from) {
+    return false;
+  }
+  std::vector<std::string> visual_ltr;
+  visual_ltr.reserve(slots.size());
+  for (const BarSegment* seg : slots) {
+    visual_ltr.push_back(seg->id);
+  }
+  const std::string id = visual_ltr[from];
+  visual_ltr.erase(visual_ltr.begin() + static_cast<std::ptrdiff_t>(from));
+  visual_ltr.insert(visual_ltr.begin() + static_cast<std::ptrdiff_t>(to), id);
+  const std::vector<std::string> visual_rtl(visual_ltr.rbegin(), visual_ltr.rend());
+  std::vector<std::string> next = ApplyVisiblePermutation(reorder_order_, visual_rtl);
+  if (next == reorder_order_) {
+    return false;
+  }
+  reorder_order_ = std::move(next);
+  return true;
+}
+
+void MenuBar::CancelReorder() {
+  if (!reorder_active_) {
+    return;
+  }
+  reorder_active_ = false;
+  reorder_moved_ = false;
+  reorder_id_.clear();
+  reorder_order_.clear();
+  if (GetCapture() == hwnd_) {
+    ReleaseCapture();
+  }
+  RefreshLayout();
+}
+
+void MenuBar::FinishReorder() {
+  if (!reorder_active_) {
+    return;
+  }
+  const bool moved = reorder_moved_;
+  std::vector<std::string> order = std::move(reorder_order_);
+  reorder_active_ = false;
+  reorder_moved_ = false;
+  reorder_id_.clear();
+  reorder_order_.clear();
+  if (GetCapture() == hwnd_) {
+    ReleaseCapture();
+  }
+  if (moved) {
+    if (order.size() > kBarOrderMax) {
+      order.resize(kBarOrderMax);
+    }
+    bar_order_ = std::move(order);
+    WidgetSettings next = widgets_.settings();
+    const WidgetSettings tray = tray_.settings();
+    next.tray_mirror = tray.tray_mirror;
+    next.tray_system_icons = tray.tray_system_icons;
+    next.tray_overflow_icons = tray.tray_overflow_icons;
+    next.tray_backend = tray.tray_backend;
+    next.tray_hidden_keys = tray.tray_hidden_keys;
+    next.bar_order = bar_order_;
+    SaveWidgetSettings(next);
+  }
+  RefreshLayout();
 }
 
 const BarSegment* MenuBar::HitSegment(POINT client) const {
@@ -1358,8 +1592,10 @@ void MenuBar::ShowTrayIconMenu(POINT screen, const std::string& id) {
 }
 
 void MenuBar::ApplySettings(const WidgetSettings& next) {
-  widgets_.SetSettings(next);
-  tray_.SetSettings(next);
+  WidgetSettings merged = next;
+  merged.bar_order = bar_order_;
+  widgets_.SetSettings(merged);
+  tray_.SetSettings(merged);
 }
 
 void MenuBar::StartTrayPeek() {

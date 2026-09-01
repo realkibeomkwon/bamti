@@ -6,6 +6,7 @@
 namespace bamti {
 
 inline constexpr size_t kTrayHiddenKeysMax = 64;
+inline constexpr size_t kBarOrderMax = 64;
 
 struct WidgetSettings {
   bool battery = false;
@@ -18,6 +19,7 @@ struct WidgetSettings {
   bool tray_overflow_icons = true;
   std::string tray_backend = "uia";
   std::vector<std::string> tray_hidden_keys;
+  std::vector<std::string> bar_order;  // 화면 오른쪽부터의 순서
   bool Any() const { return battery || cpu || network || volume || widget_board; }
 };
 
