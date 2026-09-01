@@ -33,6 +33,7 @@ class ClockRenderer {
                        const RECT& client, const RECT& start_rect);
   void DrawSpotlightButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed, float height_dip,
                            const RECT& client, const RECT& rect);
+  void DrawSearchGlyph(ID2D1SolidColorBrush* brush, const D2D1_RECT_F& box);
   void DrawControlCenterButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed, float height_dip,
                                const RECT& client, const RECT& rect);
   void DrawVectorIcon(ID2D1SolidColorBrush* brush, const StatusIcon& icon, const D2D1_RECT_F& box, bool dark);

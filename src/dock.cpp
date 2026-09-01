@@ -69,7 +69,6 @@ constexpr UINT kTrayWatchMs = 5000;
 constexpr UINT kAnimTimerMs = 8;
 constexpr UINT kIdlePollMs = 500;
 constexpr wchar_t kSpotlightDockKey[] = L"\x01spotlight";
-constexpr wchar_t kSearchFluentGlyph[] = L"\xE721";
 constexpr UINT kTasksChangedMsg = WM_APP + 20;
 constexpr UINT kMenuCommandMsg = WM_APP + 21;
 constexpr UINT kTrayChangedMsg = WM_APP + 22;
@@ -418,6 +417,10 @@ HBITMAP BitmapFromFluentSearch(int px, bool dark) {
   if (px <= 0) {
     return nullptr;
   }
+  ID2D1Factory* d2d = D2dFactory();
+  if (d2d == nullptr) {
+    return nullptr;
+  }
   BITMAPINFO bmi{};
   bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
   bmi.bmiHeader.biWidth = px;
@@ -426,57 +429,56 @@ HBITMAP BitmapFromFluentSearch(int px, bool dark) {
   bmi.bmiHeader.biBitCount = 32;
   bmi.bmiHeader.biCompression = BI_RGB;
   void* bits = nullptr;
-  HBITMAP bmp = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  const HDC mem = CreateCompatibleDC(nullptr);
+  if (mem == nullptr) {
+    return nullptr;
+  }
+  HBITMAP bmp = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
   if (bmp == nullptr || bits == nullptr) {
+    DeleteDC(mem);
     return nullptr;
   }
-  const HDC dc = CreateCompatibleDC(nullptr);
-  if (dc == nullptr) {
+  const HGDIOBJ old_bmp = SelectObject(mem, bmp);
+  Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> rt;
+  const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+      D2D1_RENDER_TARGET_TYPE_DEFAULT,
+      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+  if (FAILED(d2d->CreateDCRenderTarget(&props, rt.GetAddressOf()))) {
+    SelectObject(mem, old_bmp);
     DeleteObject(bmp);
+    DeleteDC(mem);
     return nullptr;
   }
-  const HGDIOBJ old_bmp = SelectObject(dc, bmp);
-  LOGFONTW lf{};
-  lf.lfHeight = -MulDiv(px, 3, 4);
-  lf.lfWeight = FW_NORMAL;
-  lf.lfCharSet = DEFAULT_CHARSET;
-  lf.lfQuality = ANTIALIASED_QUALITY;
-  lf.lfOutPrecision = OUT_TT_PRECIS;
-  lstrcpynW(lf.lfFaceName, L"Segoe Fluent Icons", LF_FACESIZE);
-  HFONT font = CreateFontIndirectW(&lf);
-  if (font == nullptr) {
-    lstrcpynW(lf.lfFaceName, L"Segoe MDL2 Assets", LF_FACESIZE);
-    font = CreateFontIndirectW(&lf);
-  }
-  const HGDIOBJ old_font = font != nullptr ? SelectObject(dc, font) : nullptr;
-  SetBkMode(dc, TRANSPARENT);
-  SetTextColor(dc, RGB(255, 255, 255));
   RECT box{0, 0, px, px};
-  DrawTextW(dc, kSearchFluentGlyph, 1, &box, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-  if (old_font != nullptr) {
-    SelectObject(dc, old_font);
+  if (FAILED(rt->BindDC(mem, &box))) {
+    SelectObject(mem, old_bmp);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    return nullptr;
   }
-  if (font != nullptr) {
-    DeleteObject(font);
+  D2D1_STROKE_STYLE_PROPERTIES stroke_props{};
+  stroke_props.startCap = D2D1_CAP_STYLE_ROUND;
+  stroke_props.endCap = D2D1_CAP_STYLE_ROUND;
+  stroke_props.dashCap = D2D1_CAP_STYLE_ROUND;
+  stroke_props.lineJoin = D2D1_LINE_JOIN_ROUND;
+  stroke_props.miterLimit = 1.0f;
+  stroke_props.dashStyle = D2D1_DASH_STYLE_SOLID;
+  Microsoft::WRL::ComPtr<ID2D1StrokeStyle> stroke;
+  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+  const HRESULT stroke_hr = d2d->CreateStrokeStyle(stroke_props, nullptr, 0, stroke.GetAddressOf());
+  rt->BeginDraw();
+  rt->Clear(D2D1::ColorF(0, 0, 0, 0));
+  if (SUCCEEDED(stroke_hr) && SUCCEEDED(rt->CreateSolidColorBrush(ClockTextColor(dark), brush.GetAddressOf()))) {
+    const float s = static_cast<float>(px) / 16.0f;
+    const float width = 1.50f * s;
+    const D2D1_ELLIPSE ring = D2D1::Ellipse(D2D1::Point2F(6.75f * s, 6.75f * s), 4.10f * s, 4.10f * s);
+    rt->DrawEllipse(ring, brush.Get(), width, stroke.Get());
+    rt->DrawLine(D2D1::Point2F(9.65f * s, 9.65f * s), D2D1::Point2F(13.35f * s, 13.35f * s), brush.Get(), width,
+                 stroke.Get());
   }
-  SelectObject(dc, old_bmp);
-  DeleteDC(dc);
-
-  auto* pixels = static_cast<DWORD*>(bits);
-  const int count = px * px;
-  for (int i = 0; i < count; ++i) {
-    const DWORD c = pixels[i];
-    const BYTE r = static_cast<BYTE>(c >> 16);
-    const BYTE g = static_cast<BYTE>(c >> 8);
-    const BYTE b = static_cast<BYTE>(c);
-    const BYTE a = (std::max)(r, (std::max)(g, b));
-    if (a == 0) {
-      pixels[i] = 0;
-      continue;
-    }
-    const BYTE ch = dark ? a : static_cast<BYTE>((32 * a) / 255);
-    pixels[i] = (static_cast<DWORD>(a) << 24) | (static_cast<DWORD>(ch) << 16) | (static_cast<DWORD>(ch) << 8) | ch;
-  }
+  rt->EndDraw();
+  SelectObject(mem, old_bmp);
+  DeleteDC(mem);
   return bmp;
 }
 

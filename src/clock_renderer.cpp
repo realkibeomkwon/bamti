@@ -20,9 +20,7 @@ constexpr float kStartHoverInsetYDip = 4.0f;
 constexpr float kStartHoverRadiusDip = 6.0f;
 constexpr float kLogoView = 11.5f;
 constexpr wchar_t kFluentFont[] = L"Segoe Fluent Icons";
-constexpr wchar_t kSearchFluent[] = L"\xE721";
 constexpr wchar_t kCcFluent[] = L"\xE9E9";
-constexpr wchar_t kSearchFallback[] = L"\u2315";
 constexpr wchar_t kFallbackFont[] = L"Segoe UI";
 constexpr wchar_t kVolumeMuteFluent[] = L"\xE74F";
 constexpr wchar_t kVolume0Fluent[] = L"\xE992";
@@ -417,6 +415,21 @@ void ClockRenderer::DrawStartButton(ID2D1SolidColorBrush* brush, bool dark, bool
   rt_->SetTransform(saved);
 }
 
+void ClockRenderer::DrawSearchGlyph(ID2D1SolidColorBrush* brush, const D2D1_RECT_F& box) {
+  if (rt_ == nullptr || brush == nullptr || !EnsureStroke()) {
+    return;
+  }
+  const float s = (box.right - box.left) / 16.0f;
+  if (s <= 0.0f) {
+    return;
+  }
+  const float stroke = 1.50f * s;
+  const D2D1_ELLIPSE ring = D2D1::Ellipse(D2D1::Point2F(box.left + 6.75f * s, box.top + 6.75f * s), 4.10f * s, 4.10f * s);
+  rt_->DrawEllipse(ring, brush, stroke, round_stroke_.Get());
+  rt_->DrawLine(D2D1::Point2F(box.left + 9.65f * s, box.top + 9.65f * s),
+                D2D1::Point2F(box.left + 13.35f * s, box.top + 13.35f * s), brush, stroke, round_stroke_.Get());
+}
+
 void ClockRenderer::DrawSpotlightButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed,
                                         float height_dip, const RECT& client, const RECT& rect) {
   const float px = static_cast<float>(dpi_) / 96.0f;
@@ -434,7 +447,7 @@ void ClockRenderer::DrawSpotlightButton(ID2D1SolidColorBrush* brush, bool dark, 
   const float icon = 16.0f;
   const float x = hit_left + (kStartHitWidthDip - icon) * 0.5f;
   const float y = (height_dip - icon) * 0.5f;
-  DrawFluentOrFallback(brush, D2D1::RectF(x, y, x + icon, y + icon), kSearchFluent, kSearchFallback);
+  DrawSearchGlyph(brush, D2D1::RectF(x, y, x + icon, y + icon));
 }
 
 void ClockRenderer::DrawControlCenterButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed,
