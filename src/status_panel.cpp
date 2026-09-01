@@ -1,6 +1,7 @@
 #include "status_panel.hpp"
 
 #include "log.hpp"
+#include "slider_geom.hpp"
 #include "theme.hpp"
 
 #include <d2d1helper.h>
@@ -31,34 +32,11 @@ constexpr int kButtonGapDip = 8;
 constexpr int kButtonsPerLine = 3;
 constexpr int kPanelSliderLabelDip = 18;
 constexpr int kPanelSliderTrackDip = 6;
-constexpr int kPanelSliderThumbDip = 14;
 constexpr int kPanelSliderPadDip = 8;
 constexpr int kPanelSliderGapDip = 10;
 
 int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
-}
-
-float ClampUnit(float value) {
-  if (!std::isfinite(value) || value < 0.0f) {
-    return 0.0f;
-  }
-  if (value > 1.0f) {
-    return 1.0f;
-  }
-  return value;
-}
-
-struct SliderGeometry {
-  float lo = 0.0f;
-  float hi = 0.0f;
-  float thumb_r = 0.0f;
-};
-
-SliderGeometry SliderGeom(float left, float right, UINT dpi) {
-  const float d = static_cast<float>(DipToPx(kPanelSliderThumbDip, dpi));
-  const float r = d * 0.5f;
-  return SliderGeometry{left + r, right - r, r};
 }
 
 int ButtonRunLen(const std::vector<StatusRow>& rows, size_t start) {
