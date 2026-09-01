@@ -3,6 +3,9 @@
 #include "popup_surface.hpp"
 #include "status_source.hpp"
 
+#include <dwrite.h>
+#include <wrl/client.h>
+
 #include <functional>
 #include <string>
 #include <vector>
@@ -68,8 +71,10 @@ class ControlCenterContent : public PopupContent {
 
   void QuerySlowState(bool force);
   void ApplyLive();
-  RECT TileRect(UINT dpi, int col, int row) const;
-  RECT SliderRect(UINT dpi, bool brightness) const;
+  void EnsureFormats(UINT dpi);
+  RECT ConnectRowRect(UINT dpi, int row) const;
+  RECT QuickTileRect(UINT dpi, int col, int row) const;
+  RECT SliderTrackRect(UINT dpi, bool brightness) const;
   RECT FooterRect(UINT dpi) const;
   RECT SettingsRect(UINT dpi) const;
   int HeightDip() const;
@@ -92,6 +97,14 @@ class ControlCenterContent : public PopupContent {
   bool bt_on_ = false;
   bool bt_known_ = false;
   ULONGLONG slow_due_ = 0;
+  UINT format_dpi_ = 0;
+  Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
+  Microsoft::WRL::ComPtr<IDWriteTextFormat> fluent17_;
+  Microsoft::WRL::ComPtr<IDWriteTextFormat> fluent15_;
+  Microsoft::WRL::ComPtr<IDWriteTextFormat> fluent14_;
+  Microsoft::WRL::ComPtr<IDWriteTextFormat> semibold13_;
+  Microsoft::WRL::ComPtr<IDWriteTextFormat> regular12_;
+  Microsoft::WRL::ComPtr<IDWriteTextFormat> regular11_;
 };
 
 }  // namespace bamti

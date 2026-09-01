@@ -19,17 +19,20 @@
 namespace bamti {
 namespace {
 
-constexpr int kPanelPadDip = 12;
-constexpr int kCcWidthDip = 320;
-constexpr int kTileHDip = 56;
-constexpr int kTileGapDip = 8;
-constexpr int kTileNameHDip = 18;
-constexpr int kTileRowGapDip = 12;
-constexpr int kSepPadDip = 12;
-constexpr int kSliderRowHDip = 36;
-constexpr int kSliderIconDip = 16;
-constexpr int kFooterHDip = 32;
-constexpr int kTileRadiusDip = 8;
+constexpr int kPanelPadDip = 14;
+constexpr int kCcWidthDip = 340;
+constexpr int kCardWDip = 312;
+constexpr int kRadiusDip = 12;
+constexpr int kSectionGapDip = 10;
+constexpr int kConnectHDip = 104;
+constexpr int kConnectRowHDip = 52;
+constexpr int kQuickHDip = 114;
+constexpr int kQuickTileWDip = 151;
+constexpr int kQuickTileHDip = 52;
+constexpr int kQuickGapDip = 10;
+constexpr int kSliderCardHDip = 56;
+constexpr int kFooterHDip = 28;
+constexpr int kSliderTrackHDip = 24;
 constexpr ULONGLONG kSlowPeriodMs = 2000;
 
 constexpr wchar_t kFluentFont[] = L"Segoe Fluent Icons";
@@ -163,13 +166,51 @@ void DrawGlyph(ID2D1RenderTarget* target, IDWriteFactory* dwrite, IDWriteTextFor
                                       layout.GetAddressOf()))) {
     return;
   }
-  target->DrawTextLayout(D2D1::Point2F(box.left, box.top), layout.Get(), brush,
-                         D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT | D2D1_DRAW_TEXT_OPTIONS_CLIP);
+  target->DrawTextLayout(D2D1::Point2F(box.left, box.top), layout.Get(), brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
-void DrawLabel(ID2D1RenderTarget* target, UINT dpi, const std::wstring& text, const D2D1_RECT_F& box,
-               ID2D1Brush* brush) {
-  DrawPopupText(target, dpi, text, box, brush);
+void DrawTrimmed(ID2D1RenderTarget* target, IDWriteFactory* dwrite, IDWriteTextFormat* format, ID2D1Brush* brush,
+                 const D2D1_RECT_F& box, const std::wstring& text) {
+  if (target == nullptr || dwrite == nullptr || format == nullptr || brush == nullptr || text.empty()) {
+    return;
+  }
+  const float width = (std::max)(0.0f, box.right - box.left);
+  const float height = (std::max)(0.0f, box.bottom - box.top);
+  Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+  if (FAILED(dwrite->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), format, width, height,
+                                      layout.GetAddressOf()))) {
+    return;
+  }
+  DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+  Microsoft::WRL::ComPtr<IDWriteInlineObject> ellipsis;
+  if (SUCCEEDED(dwrite->CreateEllipsisTrimmingSign(format, ellipsis.GetAddressOf()))) {
+    layout->SetTrimming(&trim, ellipsis.Get());
+  }
+  target->DrawTextLayout(D2D1::Point2F(box.left, box.top), layout.Get(), brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+}
+
+D2D1_COLOR_F ScaleAlpha(D2D1_COLOR_F color, float mul) {
+  color.a *= mul;
+  return color;
+}
+
+bool MakeFormat(IDWriteFactory* dwrite, const wchar_t* family, DWRITE_FONT_WEIGHT weight, float px,
+                DWRITE_TEXT_ALIGNMENT align, Microsoft::WRL::ComPtr<IDWriteTextFormat>& out) {
+  out.Reset();
+  if (dwrite == nullptr) {
+    return false;
+  }
+  if (FAILED(dwrite->CreateTextFormat(family, nullptr, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px,
+                                      L"ko-KR", out.ReleaseAndGetAddressOf()))) {
+    if (FAILED(dwrite->CreateTextFormat(family, nullptr, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px,
+                                        L"en-US", out.ReleaseAndGetAddressOf()))) {
+      return false;
+    }
+  }
+  out->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+  out->SetTextAlignment(align);
+  out->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+  return true;
 }
 
 }  // namespace
@@ -196,12 +237,12 @@ void ControlCenterContent::QuerySlowState(bool force) {
 
   static bool logged_bt = false;
   const BtInfo bt = QueryBluetooth();
-  bt_on_ = false;
-  bt_known_ = false;
+  bt_on_ = bt.radio;
+  bt_known_ = true;
   if (!logged_bt) {
     logged_bt = true;
-    Log(L"cc", L"bluetooth radio=%d connectable=%d", bt.radio ? 1 : 0, bt.connectable ? 1 : 0);
-    Log(L"cc", L"bluetooth on/off not distinguished this session; drawing off");
+    Log(L"cc", L"bluetooth radio=%d connectable=%d on=%d", bt.radio ? 1 : 0, bt.connectable ? 1 : 0,
+        bt_on_ ? 1 : 0);
   }
 
   SYSTEM_POWER_STATUS power{};
@@ -232,48 +273,77 @@ void ControlCenterContent::ApplyLive() {
 }
 
 int ControlCenterContent::HeightDip() const {
-  int h = kPanelPadDip * 2;
-  h += (kTileHDip + kTileNameHDip) * 2 + kTileRowGapDip;
-  h += kSepPadDip * 2 + 1;
-  h += kSliderRowHDip;
+  int h = kPanelPadDip + kConnectHDip + kSectionGapDip + kQuickHDip + kSectionGapDip;
   if (brightness_ok_) {
-    h += kSliderRowHDip;
+    h += kSliderCardHDip + kSectionGapDip;
   }
-  h += kSepPadDip * 2 + 1;
-  h += kFooterHDip;
+  h += kSliderCardHDip + kSectionGapDip + kFooterHDip + kPanelPadDip;
   return h;
 }
 
-RECT ControlCenterContent::TileRect(UINT dpi, int col, int row) const {
-  const int pad = DipToPx(kPanelPadDip, dpi);
-  const int gap = DipToPx(kTileGapDip, dpi);
-  const int inner = DipToPx(kCcWidthDip, dpi) - pad * 2;
-  const int tile_w = (inner - gap * 2) / 3;
-  const int tile_h = DipToPx(kTileHDip, dpi);
-  const int name_h = DipToPx(kTileNameHDip, dpi);
-  const int row_gap = DipToPx(kTileRowGapDip, dpi);
-  const int x = pad + col * (tile_w + gap);
-  const int y = pad + row * (tile_h + name_h + row_gap);
-  return RECT{x, y, x + tile_w, y + tile_h};
+void ControlCenterContent::EnsureFormats(UINT dpi) {
+  if (!dwrite_) {
+    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                        reinterpret_cast<IUnknown**>(dwrite_.ReleaseAndGetAddressOf()));
+  }
+  if (dwrite_ && format_dpi_ == dpi && fluent17_ && fluent15_ && fluent14_ && semibold13_ && regular12_ &&
+      regular11_) {
+    return;
+  }
+  fluent17_.Reset();
+  fluent15_.Reset();
+  fluent14_.Reset();
+  semibold13_.Reset();
+  regular12_.Reset();
+  regular11_.Reset();
+  format_dpi_ = dpi;
+  if (!dwrite_) {
+    return;
+  }
+  const float s = static_cast<float>(dpi) / 96.0f;
+  MakeFormat(dwrite_.Get(), kFluentFont, DWRITE_FONT_WEIGHT_NORMAL, 17.0f * s, DWRITE_TEXT_ALIGNMENT_CENTER, fluent17_);
+  MakeFormat(dwrite_.Get(), kFluentFont, DWRITE_FONT_WEIGHT_NORMAL, 15.0f * s, DWRITE_TEXT_ALIGNMENT_CENTER, fluent15_);
+  MakeFormat(dwrite_.Get(), kFluentFont, DWRITE_FONT_WEIGHT_NORMAL, 14.0f * s, DWRITE_TEXT_ALIGNMENT_CENTER, fluent14_);
+  MakeFormat(dwrite_.Get(), kUiFont, DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.0f * s, DWRITE_TEXT_ALIGNMENT_LEADING, semibold13_);
+  MakeFormat(dwrite_.Get(), kUiFont, DWRITE_FONT_WEIGHT_NORMAL, 12.0f * s, DWRITE_TEXT_ALIGNMENT_LEADING, regular12_);
+  MakeFormat(dwrite_.Get(), kUiFont, DWRITE_FONT_WEIGHT_NORMAL, 11.0f * s, DWRITE_TEXT_ALIGNMENT_LEADING, regular11_);
 }
 
-RECT ControlCenterContent::SliderRect(UINT dpi, bool brightness) const {
+RECT ControlCenterContent::ConnectRowRect(UINT dpi, int row) const {
   const int pad = DipToPx(kPanelPadDip, dpi);
-  const int width = DipToPx(kCcWidthDip, dpi);
-  const int tiles = DipToPx((kTileHDip + kTileNameHDip) * 2 + kTileRowGapDip, dpi);
-  const int sep = DipToPx(kSepPadDip * 2 + 1, dpi);
-  int y = pad + tiles + sep;
-  if (brightness) {
-    y += DipToPx(kSliderRowHDip, dpi);
+  const int y = pad + DipToPx(kConnectRowHDip, dpi) * row;
+  return RECT{pad, y, pad + DipToPx(kCardWDip, dpi), y + DipToPx(kConnectRowHDip, dpi)};
+}
+
+RECT ControlCenterContent::QuickTileRect(UINT dpi, int col, int row) const {
+  const int pad = DipToPx(kPanelPadDip, dpi);
+  const int gap = DipToPx(kQuickGapDip, dpi);
+  const int w = DipToPx(kQuickTileWDip, dpi);
+  const int h = DipToPx(kQuickTileHDip, dpi);
+  const int y0 = pad + DipToPx(kConnectHDip + kSectionGapDip, dpi);
+  const int x = pad + col * (w + gap);
+  const int y = y0 + row * (h + gap);
+  return RECT{x, y, x + w, y + h};
+}
+
+RECT ControlCenterContent::SliderTrackRect(UINT dpi, bool brightness) const {
+  const int pad = DipToPx(kPanelPadDip, dpi);
+  const int inset = DipToPx(12, dpi);
+  int y = pad + DipToPx(kConnectHDip + kSectionGapDip + kQuickHDip + kSectionGapDip, dpi);
+  if (!brightness && brightness_ok_) {
+    y += DipToPx(kSliderCardHDip + kSectionGapDip, dpi);
   }
-  return RECT{pad, y, width - pad, y + DipToPx(kSliderRowHDip, dpi)};
+  y += DipToPx(26, dpi);
+  const int left = pad + inset;
+  const int right = pad + DipToPx(kCardWDip, dpi) - inset;
+  return RECT{left, y, right, y + DipToPx(kSliderTrackHDip, dpi)};
 }
 
 RECT ControlCenterContent::FooterRect(UINT dpi) const {
   const int pad = DipToPx(kPanelPadDip, dpi);
   const int width = DipToPx(kCcWidthDip, dpi);
   const int h = DipToPx(kFooterHDip, dpi);
-  const int y = DipToPx(HeightDip(), dpi) - pad - h;
+  const int y = DipToPx(HeightDip() - kPanelPadDip - kFooterHDip, dpi);
   return RECT{pad, y, width - pad, y + h};
 }
 
@@ -284,6 +354,7 @@ RECT ControlCenterContent::SettingsRect(UINT dpi) const {
 }
 
 SIZE ControlCenterContent::Measure(UINT dpi) {
+  EnsureFormats(dpi);
   hits_.clear();
   auto add = [&](int id, RECT rc) {
     Hit hit;
@@ -291,15 +362,21 @@ SIZE ControlCenterContent::Measure(UINT dpi) {
     hit.rc = rc;
     hits_.push_back(hit);
   };
-  add(kWifi, TileRect(dpi, 0, 0));
-  add(kBluetooth, TileRect(dpi, 1, 0));
-  add(kAirplane, TileRect(dpi, 2, 0));
-  add(kSaver, TileRect(dpi, 0, 1));
-  add(kNight, TileRect(dpi, 1, 1));
-  add(kAccess, TileRect(dpi, 2, 1));
-  add(kVolume, SliderRect(dpi, false));
+  add(kWifi, ConnectRowRect(dpi, 0));
+  add(kBluetooth, ConnectRowRect(dpi, 1));
+  add(kAirplane, QuickTileRect(dpi, 0, 0));
+  add(kSaver, QuickTileRect(dpi, 1, 0));
+  add(kNight, QuickTileRect(dpi, 0, 1));
+  add(kAccess, QuickTileRect(dpi, 1, 1));
   if (brightness_ok_) {
-    add(kBrightness, SliderRect(dpi, true));
+    const RECT track = SliderTrackRect(dpi, true);
+    add(kBrightness, RECT{track.left - DipToPx(12, dpi), track.top - DipToPx(26, dpi), track.right + DipToPx(12, dpi),
+                          track.top - DipToPx(26, dpi) + DipToPx(kSliderCardHDip, dpi)});
+  }
+  {
+    const RECT track = SliderTrackRect(dpi, false);
+    add(kVolume, RECT{track.left - DipToPx(12, dpi), track.top - DipToPx(26, dpi), track.right + DipToPx(12, dpi),
+                      track.top - DipToPx(26, dpi) + DipToPx(kSliderCardHDip, dpi)});
   }
   add(kSettings, SettingsRect(dpi));
   return SIZE{DipToPx(kCcWidthDip, dpi), DipToPx(HeightDip(), dpi)};
@@ -309,134 +386,181 @@ void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_i
   if (target == nullptr) {
     return;
   }
+  LARGE_INTEGER t0{};
+  LARGE_INTEGER t1{};
+  QueryPerformanceCounter(&t0);
+  EnsureFormats(dpi);
   const bool dark = host_.dark;
-  Microsoft::WRL::ComPtr<IDWriteFactory> dwrite;
-  DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                      reinterpret_cast<IUnknown**>(dwrite.GetAddressOf()));
-  Microsoft::WRL::ComPtr<IDWriteTextFormat> fluent;
-  Microsoft::WRL::ComPtr<IDWriteTextFormat> small_ui;
-  if (dwrite) {
-    dwrite->CreateTextFormat(kFluentFont, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-                             DWRITE_FONT_STRETCH_NORMAL, 16.0f, L"en-us", fluent.GetAddressOf());
-    dwrite->CreateTextFormat(kUiFont, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-                             DWRITE_FONT_STRETCH_NORMAL, 11.0f, L"ko-kr", small_ui.GetAddressOf());
-    if (fluent) {
-      fluent->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-      fluent->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    }
-    if (small_ui) {
-      small_ui->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-      small_ui->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    }
-  }
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
   target->CreateSolidColorBrush(ClockTextColor(dark), brush.GetAddressOf());
   if (!brush) {
+    QueryPerformanceCounter(&t1);
+    Log(L"cc", L"render %.2fms rows=%d", QpcMs(t0, t1), static_cast<int>(hits_.size()));
     return;
   }
 
-  struct Tile {
-    int id;
-    const wchar_t* glyph;
-    std::wstring name;
-    bool on;
-  };
-  const Tile tiles[] = {
-      {kWifi, kWifiGlyph, wifi_name_, wifi_on_},
-      {kBluetooth, kBtGlyph, L"Bluetooth", bt_on_},
-      {kAirplane, kPlaneGlyph, L"비행기 모드", false},
-      {kSaver, kSaverGlyph, L"절전 모드", saver_on_},
-      {kNight, kNightGlyph, L"야간 모드", false},
-      {kAccess, kAccessGlyph, L"접근성", false},
-  };
-  const int radius = DipToPx(kTileRadiusDip, dpi);
-  const int name_h = DipToPx(kTileNameHDip, dpi);
-  for (int i = 0; i < 6; ++i) {
-    const RECT rc = TileRect(dpi, i % 3, i / 3);
-    const bool hot = hot_index >= 0 && i < static_cast<int>(hits_.size()) && hits_[static_cast<size_t>(i)].id == tiles[i].id &&
-                     hot_index == i;
-    (void)hot;
+  const int hot_id = (hot_index >= 0 && hot_index < static_cast<int>(hits_.size()))
+                         ? hits_[static_cast<size_t>(hot_index)].id
+                         : -1;
+  const float radius = static_cast<float>(DipToPx(kRadiusDip, dpi));
+  const D2D1_COLOR_F fg = ClockTextColor(dark);
+  const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
+  auto fill_round = [&](const RECT& rc, D2D1_COLOR_F color) {
+    brush->SetColor(color);
     const D2D1_ROUNDED_RECT rr{D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
                                            static_cast<float>(rc.right), static_cast<float>(rc.bottom)),
-                               static_cast<float>(radius), static_cast<float>(radius)};
-    if (tiles[i].on) {
-      brush->SetColor(DockIndicatorColor(dark));
-    } else {
-      brush->SetColor(MenuItemHoverFill(dark, false));
-    }
+                               radius, radius};
     target->FillRoundedRectangle(rr, brush.Get());
-    const D2D1_COLOR_F fg = tiles[i].on ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f) : ClockTextColor(dark);
+  };
+  auto draw_badge = [&](float cx, float cy, float diameter, bool on, IDWriteTextFormat* format, const wchar_t* glyph) {
+    const float r = diameter * 0.5f;
+    brush->SetColor(on ? AccentFillColor(dark) : BadgeOffFill(dark));
+    target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), r, r), brush.Get());
+    brush->SetColor(on ? AccentOnColor(dark) : fg);
+    if (dwrite_ && format) {
+      DrawGlyph(target, dwrite_.Get(), format, brush.Get(), D2D1::RectF(cx - r, cy - r, cx + r, cy + r), glyph);
+    }
+  };
+
+  const RECT connect0 = ConnectRowRect(dpi, 0);
+  const RECT connect1 = ConnectRowRect(dpi, 1);
+  fill_round(RECT{connect0.left, connect0.top, connect1.right, connect1.bottom}, CardFillColor(dark));
+  struct ConnectRow {
+    int id;
+    RECT rc;
+    const wchar_t* glyph;
+    const wchar_t* title;
+    std::wstring sub;
+    bool on;
+  };
+  const wchar_t* bt_sub = !bt_known_ ? L"알 수 없음" : (bt_on_ ? L"켜짐" : L"꺼짐");
+  const ConnectRow connects[] = {
+      {kWifi, connect0, kWifiGlyph, L"Wi-Fi", wifi_on_ ? wifi_name_ : std::wstring(L"연결 안 됨"), wifi_on_},
+      {kBluetooth, connect1, kBtGlyph, L"Bluetooth", std::wstring(bt_sub), bt_on_},
+  };
+  for (const ConnectRow& row : connects) {
+    if (hot_id == row.id) {
+      fill_round(row.rc, MenuItemHoverFill(dark, false));
+    }
+    const float cy = static_cast<float>(row.rc.top + row.rc.bottom) * 0.5f;
+    const float cx = static_cast<float>(row.rc.left) + static_cast<float>(DipToPx(12 + 17, dpi));
+    draw_badge(cx, cy, static_cast<float>(DipToPx(34, dpi)), row.on, fluent17_.Get(), row.glyph);
+    const float text_x = static_cast<float>(row.rc.left + DipToPx(58, dpi));
+    const float chevron_l = static_cast<float>(row.rc.right - DipToPx(24, dpi));
+    const float text_r = chevron_l - static_cast<float>(DipToPx(8, dpi));
     brush->SetColor(fg);
-    if (dwrite && fluent) {
-      DrawGlyph(target, dwrite.Get(), fluent.Get(), brush.Get(),
-                D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top), static_cast<float>(rc.right),
-                            static_cast<float>(rc.bottom - DipToPx(14, dpi))),
-                tiles[i].glyph);
-      DrawGlyph(target, dwrite.Get(), fluent.Get(), brush.Get(),
-                D2D1::RectF(static_cast<float>(rc.right - DipToPx(18, dpi)), static_cast<float>(rc.top + DipToPx(6, dpi)),
-                            static_cast<float>(rc.right - DipToPx(4, dpi)), static_cast<float>(rc.top + DipToPx(22, dpi))),
+    DrawTrimmed(target, dwrite_.Get(), semibold13_.Get(), brush.Get(),
+                D2D1::RectF(text_x, static_cast<float>(row.rc.top + DipToPx(6, dpi)), text_r, cy), row.title);
+    brush->SetColor(muted);
+    DrawTrimmed(target, dwrite_.Get(), regular11_.Get(), brush.Get(),
+                D2D1::RectF(text_x, cy, text_r, static_cast<float>(row.rc.bottom - DipToPx(6, dpi))), row.sub);
+    brush->SetColor(ScaleAlpha(fg, 0.45f));
+    if (dwrite_ && fluent14_) {
+      DrawGlyph(target, dwrite_.Get(), fluent14_.Get(), brush.Get(),
+                D2D1::RectF(chevron_l, cy - static_cast<float>(DipToPx(8, dpi)),
+                            static_cast<float>(row.rc.right - DipToPx(12, dpi)), cy + static_cast<float>(DipToPx(8, dpi))),
                 kChevronGlyph);
     }
-    brush->SetColor(ClockTextColor(dark));
-    const D2D1_RECT_F name{static_cast<float>(rc.left), static_cast<float>(rc.bottom), static_cast<float>(rc.right),
-                           static_cast<float>(rc.bottom + name_h)};
-    DrawLabel(target, dpi, tiles[i].name, name, brush.Get());
   }
 
-  auto draw_slider = [&](const RECT& rc, float value, const wchar_t* glyph) {
-    const int icon = DipToPx(kSliderIconDip, dpi);
-    const float icon_y = static_cast<float>(rc.top + (rc.bottom - rc.top - icon) / 2);
-    brush->SetColor(ClockTextColor(dark));
-    if (dwrite && fluent) {
-      DrawGlyph(target, dwrite.Get(), fluent.Get(), brush.Get(),
-                D2D1::RectF(static_cast<float>(rc.left), icon_y, static_cast<float>(rc.left + icon), icon_y + icon), glyph);
+  struct Quick {
+    int id;
+    int col;
+    int row;
+    const wchar_t* glyph;
+    const wchar_t* name;
+    bool on;
+  };
+  const Quick quick[] = {
+      {kAirplane, 0, 0, kPlaneGlyph, L"비행기 모드", false},
+      {kSaver, 1, 0, kSaverGlyph, L"절전 모드", saver_on_},
+      {kNight, 0, 1, kNightGlyph, L"야간 모드", false},
+      {kAccess, 1, 1, kAccessGlyph, L"접근성", false},
+  };
+  for (const Quick& tile : quick) {
+    const RECT rc = QuickTileRect(dpi, tile.col, tile.row);
+    fill_round(rc, CardFillColor(dark));
+    if (hot_id == tile.id) {
+      fill_round(rc, MenuItemHoverFill(dark, false));
     }
-    const float left = static_cast<float>(rc.left + icon + DipToPx(10, dpi));
-    const float right = static_cast<float>(rc.right);
     const float cy = static_cast<float>(rc.top + rc.bottom) * 0.5f;
-    const SliderGeometry geom = SliderGeom(left, right, dpi);
+    const float cx = static_cast<float>(rc.left) + static_cast<float>(DipToPx(10 + 15, dpi));
+    draw_badge(cx, cy, static_cast<float>(DipToPx(30, dpi)), tile.on, fluent15_.Get(), tile.glyph);
+    brush->SetColor(fg);
+    DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush.Get(),
+                D2D1::RectF(static_cast<float>(rc.left + DipToPx(50, dpi)), static_cast<float>(rc.top),
+                            static_cast<float>(rc.right - DipToPx(10, dpi)), static_cast<float>(rc.bottom)),
+                tile.name);
+  }
+
+  auto draw_slider_card = [&](bool brightness, const wchar_t* title, float value, const wchar_t* glyph, int id) {
+    const RECT track = SliderTrackRect(dpi, brightness);
+    const RECT card{track.left - DipToPx(12, dpi), track.top - DipToPx(26, dpi), track.right + DipToPx(12, dpi),
+                    track.top - DipToPx(26, dpi) + DipToPx(kSliderCardHDip, dpi)};
+    fill_round(card, CardFillColor(dark));
+    if (hot_id == id) {
+      fill_round(card, MenuItemHoverFill(dark, false));
+    }
+    brush->SetColor(muted);
+    DrawTrimmed(target, dwrite_.Get(), regular11_.Get(), brush.Get(),
+                D2D1::RectF(static_cast<float>(card.left + DipToPx(12, dpi)), static_cast<float>(card.top + DipToPx(8, dpi)),
+                            static_cast<float>(card.right - DipToPx(12, dpi)),
+                            static_cast<float>(card.top + DipToPx(22, dpi))),
+                title);
+    const float left = static_cast<float>(track.left);
+    const float right = static_cast<float>(track.right);
+    const float top = static_cast<float>(track.top);
+    const float bottom = static_cast<float>(track.bottom);
+    const float h = bottom - top;
+    const SliderGeometry geom = SliderGeomThick(left, right, h);
     const float v = ClampUnit(value);
     const float x = geom.lo + (geom.hi - geom.lo) * v;
-    const float track_h = static_cast<float>(DipToPx(6, dpi));
-    D2D1_COLOR_F track = ClockTextColor(dark);
-    track.a *= 0.2f;
-    brush->SetColor(track);
+    brush->SetColor(ScaleAlpha(fg, 0.12f));
+    target->FillRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(left, top, right, bottom), h * 0.5f, h * 0.5f},
+                                 brush.Get());
+    brush->SetColor(AccentFillColor(dark));
     target->FillRoundedRectangle(
-        D2D1_ROUNDED_RECT{D2D1::RectF(geom.lo, cy - track_h * 0.5f, geom.hi, cy + track_h * 0.5f), track_h, track_h},
-        brush.Get());
-    brush->SetColor(DockIndicatorColor(dark));
-    target->FillRoundedRectangle(
-        D2D1_ROUNDED_RECT{D2D1::RectF(geom.lo, cy - track_h * 0.5f, x, cy + track_h * 0.5f), track_h, track_h}, brush.Get());
-    target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, cy), geom.thumb_r, geom.thumb_r), brush.Get());
+        D2D1_ROUNDED_RECT{D2D1::RectF(left, top, x + h * 0.5f, bottom), h * 0.5f, h * 0.5f}, brush.Get());
+    const float glyph_l = left + static_cast<float>(DipToPx(8, dpi));
+    const float glyph_size = static_cast<float>(DipToPx(14, dpi));
+    const bool covered = x + h * 0.5f >= glyph_l + glyph_size + 2.0f;
+    brush->SetColor(covered ? AccentOnColor(dark) : ScaleAlpha(fg, 0.7f));
+    if (dwrite_ && fluent14_) {
+      const float gy = top + (h - glyph_size) * 0.5f;
+      DrawGlyph(target, dwrite_.Get(), fluent14_.Get(), brush.Get(),
+                D2D1::RectF(glyph_l, gy, glyph_l + glyph_size, gy + glyph_size), glyph);
+    }
   };
-  draw_slider(SliderRect(dpi, false), muted_ ? 0.0f : volume_, kVolGlyph);
   if (brightness_ok_) {
-    draw_slider(SliderRect(dpi, true), brightness_, kBrightGlyph);
+    draw_slider_card(true, L"디스플레이", brightness_, kBrightGlyph, kBrightness);
   }
+  draw_slider_card(false, L"사운드", muted_ ? 0.0f : volume_, kVolGlyph, kVolume);
 
   const RECT foot = FooterRect(dpi);
   if (battery_present_) {
     const float icon = static_cast<float>(DipToPx(16, dpi));
-    const float iy = static_cast<float>(foot.top + (foot.bottom - foot.top)) * 0.5f - icon * 0.5f;
-    DrawBatteryIcon(target, brush.Get(), D2D1::RectF(static_cast<float>(foot.left), iy, static_cast<float>(foot.left) + icon,
-                                                     iy + icon),
-                    dark, battery_, charging_);
+    const float iy = static_cast<float>(foot.top + foot.bottom) * 0.5f - icon * 0.5f;
+    DrawBatteryIcon(target, brush.Get(),
+                    D2D1::RectF(static_cast<float>(foot.left), iy, static_cast<float>(foot.left) + icon, iy + icon), dark,
+                    battery_, charging_);
     wchar_t pct[16]{};
     swprintf_s(pct, L"%d%%", static_cast<int>(battery_ * 100.0f + 0.5f));
-    brush->SetColor(ClockTextColor(dark));
-    DrawLabel(target, dpi, pct,
-              D2D1::RectF(static_cast<float>(foot.left + DipToPx(22, dpi)), static_cast<float>(foot.top),
-                          static_cast<float>(foot.left + DipToPx(80, dpi)), static_cast<float>(foot.bottom)),
-              brush.Get());
+    brush->SetColor(fg);
+    DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush.Get(),
+                D2D1::RectF(static_cast<float>(foot.left + DipToPx(22, dpi)), static_cast<float>(foot.top),
+                            static_cast<float>(foot.left + DipToPx(80, dpi)), static_cast<float>(foot.bottom)),
+                pct);
   }
   const RECT gear = SettingsRect(dpi);
-  brush->SetColor(ClockTextColor(dark));
-  if (dwrite && fluent) {
-    DrawGlyph(target, dwrite.Get(), fluent.Get(), brush.Get(),
+  brush->SetColor(hot_id == kSettings ? fg : ScaleAlpha(fg, 0.8f));
+  if (dwrite_ && fluent17_) {
+    DrawGlyph(target, dwrite_.Get(), fluent17_.Get(), brush.Get(),
               D2D1::RectF(static_cast<float>(gear.left), static_cast<float>(gear.top), static_cast<float>(gear.right),
                           static_cast<float>(gear.bottom)),
               kGearGlyph);
   }
+  QueryPerformanceCounter(&t1);
+  Log(L"cc", L"render %.2fms rows=%d", QpcMs(t0, t1), static_cast<int>(hits_.size()));
 }
 
 int ControlCenterContent::HitTest(POINT client, UINT dpi) const {
@@ -505,10 +629,11 @@ void ControlCenterContent::DragTo(int index, POINT client, UINT dpi) {
   if (hit.id != kVolume && hit.id != kBrightness) {
     return;
   }
-  const int icon = DipToPx(kSliderIconDip, dpi);
-  const float left = static_cast<float>(hit.rc.left + icon + DipToPx(10, dpi));
-  const float right = static_cast<float>(hit.rc.right);
-  const SliderGeometry geom = SliderGeom(left, right, dpi);
+  const RECT track = SliderTrackRect(dpi, hit.id == kBrightness);
+  const float left = static_cast<float>(track.left);
+  const float right = static_cast<float>(track.right);
+  const float thickness = static_cast<float>(track.bottom - track.top);
+  const SliderGeometry geom = SliderGeomThick(left, right, thickness);
   float v = geom.hi > geom.lo ? (static_cast<float>(client.x) - geom.lo) / (geom.hi - geom.lo) : 0.0f;
   v = ClampUnit(v);
   v = std::round(v / 0.02f) * 0.02f;

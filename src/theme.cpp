@@ -64,6 +64,28 @@ D2D1_COLOR_F DockIndicatorColor(bool dark) {
   return D2D1::ColorF(0.22f, 0.22f, 0.22f, 0.55f);
 }
 
+D2D1_COLOR_F AccentFillColor(bool dark) {
+  return dark ? D2D1::ColorF(0x0A84FF) : D2D1::ColorF(0x0078D4);
+}
+
+D2D1_COLOR_F AccentOnColor(bool /*dark*/) {
+  return D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
+}
+
+D2D1_COLOR_F CardFillColor(bool dark) {
+  if (dark) {
+    return D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f);
+  }
+  return D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.045f);
+}
+
+D2D1_COLOR_F BadgeOffFill(bool dark) {
+  if (dark) {
+    return D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.14f);
+  }
+  return D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.09f);
+}
+
 D2D1_COLOR_F BatteryFillColor(bool dark, float level, bool charging) {
   if (charging || level > 0.20f) {
     return dark ? D2D1::ColorF(0x5BC85B) : D2D1::ColorF(0x0F7B0F);
