@@ -628,6 +628,15 @@ void BuiltinWidgets::OnEvent(const StatusEvent& ev) {
     std::lock_guard lock(mu_);
     pending_level_ = ClampUnit(ev.value);
     wake = true;
+  } else if (ev.event == "scroll" && ev.id == kVolumeId) {
+    std::lock_guard lock(mu_);
+    const float base = pending_level_.has_value() ? *pending_level_ : last_volume_;
+    const float next = ClampUnit(base + ev.value);
+    pending_level_ = next;
+    if (ev.value > 0.0f && last_muted_) {
+      pending_mute_ = false;  // 볼륨을 올리면 음소거를 푼다.
+    }
+    wake = true;
   } else if (ev.event == "slide" && ev.id == "bamti.control_center" && ev.row_id == "brightness") {
     std::lock_guard lock(mu_);
     pending_brightness_ = ClampUnit(ev.value);
@@ -1354,6 +1363,9 @@ void BuiltinWidgets::WorkerLoop() {
     {
       std::lock_guard lock(mu_);
       acts.swap(actions_);
+      if (pending_level_) {
+        last_volume_ = *pending_level_;
+      }
       level.swap(pending_level_);
       mute.swap(pending_mute_);
       bright.swap(pending_brightness_);

@@ -184,6 +184,7 @@ class MenuBar {
   std::vector<std::string> reorder_order_;
   std::string tray_menu_id_;
   std::vector<uint64_t> tray_menu_keys_;
+  int wheel_accum_ = 0;
 };
 
 }  // namespace bamti

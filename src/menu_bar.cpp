@@ -533,12 +533,30 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         CancelReorder();
       }
       return 0;
-    case WM_KEYDOWN:
-      if (reorder_active_ && wparam == VK_ESCAPE) {
-        CancelReorder();
+    case WM_MOUSEWHEEL: {
+      POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      ScreenToClient(hwnd_, &pt);
+      wheel_accum_ += GET_WHEEL_DELTA_WPARAM(wparam);
+      const int notches = wheel_accum_ / WHEEL_DELTA;
+      wheel_accum_ -= notches * WHEEL_DELTA;
+      const auto hit = HitTest(pt);
+      Log(L"bar", L"wheel notches=%d hit=%hs", notches, hit ? hit->id.c_str() : "none");
+      if (notches == 0 || !hit) {
         return 0;
       }
-      break;
+      // 휠을 받는 항목은 볼륨뿐이다. 다른 세그먼트는 scroll을 무시하지만
+      // 이벤트를 아예 보내지 않아 로그와 디스패치를 줄인다.
+      if (hit->id != "bamti.widget/volume") {
+        return 0;
+      }
+      StatusEvent ev;
+      ev.id = hit->id;
+      ev.event = "scroll";
+      ev.row_id = "volume_level";
+      ev.value = static_cast<float>(notches) * 0.02f;
+      status_.Dispatch(ev);
+      return 0;
+    }
     case WM_LBUTTONUP: {
       POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       if (reorder_active_) {
