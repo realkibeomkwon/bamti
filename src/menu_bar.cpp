@@ -1574,7 +1574,7 @@ void MenuBar::RefreshOpenPanel() {
     }
     cc_panel_->Refresh();
     if (status_popup_.hwnd() != nullptr) {
-      InvalidateRect(status_popup_.hwnd(), nullptr, FALSE);
+      status_popup_.Present();
     }
     return;
   }
@@ -1603,7 +1603,7 @@ void MenuBar::RefreshOpenPanel() {
   slider_armed_ = false;
   status_panel_->Reset(std::move(*item), MakePanelHost());
   if (status_popup_.hwnd() != nullptr) {
-    InvalidateRect(status_popup_.hwnd(), nullptr, FALSE);
+    status_popup_.Present();
   }
 }
 

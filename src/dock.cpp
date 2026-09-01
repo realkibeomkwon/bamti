@@ -47,9 +47,6 @@ constexpr int kGroupGapDip = 12;
 constexpr int kDragSlopDip = 6;
 constexpr int kMarginBottomDip = 8;
 constexpr int kHotDip = 8;
-// macOS Dock is ~20pt at the default bar height (~64pt). DWM ROUND/ROUNDSMALL cannot
-// express that, so the pill is drawn with Direct2D.
-constexpr int kCornerRadiusDip = 20;
 constexpr int kMenuPadDip = 6;
 constexpr int kMenuRowDip = 28;
 constexpr int kMenuSepDip = 8;

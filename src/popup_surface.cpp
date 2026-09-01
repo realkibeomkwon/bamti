@@ -5,6 +5,7 @@
 #include "theme.hpp"
 #include "watchdog.hpp"
 
+#include <d2d1helper.h>
 #include <dwmapi.h>
 #include <windowsx.h>
 
@@ -126,7 +127,12 @@ bool PointInWindow(HWND hwnd, POINT screen) {
     return false;
   }
   RECT rc{};
-  return GetWindowRect(hwnd, &rc) != FALSE && PtInRect(&rc, screen);
+  if (GetWindowRect(hwnd, &rc) == FALSE || !PtInRect(&rc, screen)) {
+    return false;
+  }
+  // Layered ULW_ALPHA windows pass clicks through fully transparent pixels.
+  // Treat those pixels as outside so a click on a rounded corner still dismisses.
+  return WindowFromPoint(screen) == hwnd;
 }
 
 }  // namespace
@@ -191,11 +197,11 @@ bool PopupSurface::Create(HINSTANCE instance, HWND owner) {
 
   WNDCLASSEXW wc{};
   wc.cbSize = sizeof(wc);
-  wc.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
+  wc.style = CS_HREDRAW | CS_VREDRAW;
   wc.lpfnWndProc = WndProc;
   wc.hInstance = instance;
   wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-  wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+  wc.hbrBackground = nullptr;
   wc.lpszClassName = kPopupClass;
   if (RegisterClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
     return false;
@@ -205,18 +211,18 @@ bool PopupSurface::Create(HINSTANCE instance, HWND owner) {
     return false;
   }
 
-  hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, kPopupClass, L"", WS_POPUP, 0, 0, 0, 0,
-                          owner, nullptr, instance, this);
+  hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED, kPopupClass, L"",
+                          WS_POPUP, 0, 0, 0, 0, owner, nullptr, instance, this);
   if (hwnd_ == nullptr) {
     return false;
   }
   ApplyChrome();
   // Build the render target now, while the window is still hidden. Creating it
-  // lazily inside the first WM_PAINT stalls the first menu by the full device
-  // setup cost. A later Open() only resizes what this call already made.
+  // lazily inside the first present stalls the first menu by the full device
+  // setup cost. A later Open() only rebuilds the DIB; the DC target stays.
   const ULONGLONG started = GetTickCount64();
   SetWindowPos(hwnd_, nullptr, 0, 0, 8, 8, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-  EnsureRenderTarget();
+  EnsureLayeredTarget();
   Log(L"popup", L"render target warm=%d %ums", target_ ? 1 : 0,
       static_cast<unsigned>(GetTickCount64() - started));
   return true;
@@ -227,8 +233,7 @@ void PopupSurface::Destroy() {
   HWND w = hwnd_;
   hwnd_ = nullptr;
   owner_ = nullptr;
-  target_.Reset();
-  fill_.Reset();
+  ReleaseLayeredTarget();
   d2d_.Reset();
   if (w != nullptr && IsWindow(w)) {
     DestroyWindow(w);
@@ -268,11 +273,10 @@ bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode,
   armed_ = false;
   tick_ = 0;
   ApplyChrome();
-  // Hidden windows do not receive WM_PAINT from UpdateWindow, so show first and
-  // paint immediately afterwards. A one-frame flash beats a second of black.
-  SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-  InvalidateRect(hwnd_, nullptr, FALSE);
-  UpdateWindow(hwnd_);
+  // Layered windows paint via UpdateLayeredWindow, not WM_PAINT. Present first
+  // so the first visible frame is already filled; then show without activate.
+  Present();
+  ShowWindow(hwnd_, SW_SHOWNA);
   if (capture) {
     SetCapture(hwnd_);
     ArmGuardTimer();
@@ -297,10 +301,11 @@ void PopupSurface::SetDark(bool dark) {
   }
   dark_ = dark;
   fill_.Reset();
+  stroke_.Reset();
   if (hwnd_ != nullptr) {
     ApplyChrome();
     if (open_) {
-      InvalidateRect(hwnd_, nullptr, FALSE);
+      Present();
     }
   }
 }
@@ -382,7 +387,7 @@ void PopupSurface::ApplyChrome() {
   DwmSetWindowAttribute(hwnd_, dwm::kUseImmersiveDarkMode, &dark, sizeof(dark));
   const int backdrop = dwm::kBackdropNone;
   DwmSetWindowAttribute(hwnd_, dwm::kSystemBackdropType, &backdrop, sizeof(backdrop));
-  const int corner = dwm::kCornerRoundSmall;
+  const int corner = dwm::kCornerDoNotRound;
   DwmSetWindowAttribute(hwnd_, dwm::kWindowCornerPreference, &corner, sizeof(corner));
 }
 
@@ -421,8 +426,7 @@ void PopupSurface::TrackHotScreen(POINT screen) {
     return;
   }
   hot_ = hot;
-  InvalidateRect(hwnd_, nullptr, FALSE);
-  UpdateWindow(hwnd_);
+  Present();
 }
 
 void PopupSurface::InvokeRow(int index) {
@@ -515,8 +519,7 @@ void PopupSurface::Tick(const wchar_t* src) {
     }
     if (hot != hot_) {
       hot_ = hot;
-      InvalidateRect(hwnd_, nullptr, FALSE);
-      UpdateWindow(hwnd_);
+      Present();
     }
   }
   if (allied_ != nullptr && allied_->IsOpen()) {
@@ -534,40 +537,111 @@ void PopupSurface::Tick(const wchar_t* src) {
   }
 }
 
-void PopupSurface::EnsureRenderTarget() {
+void PopupSurface::ReleaseLayeredTarget() {
+  fill_.Reset();
+  stroke_.Reset();
+  target_.Reset();
+  if (mem_dc_ != nullptr && old_dib_ != nullptr) {
+    SelectObject(mem_dc_, old_dib_);
+    old_dib_ = nullptr;
+  }
+  if (dib_ != nullptr) {
+    DeleteObject(dib_);
+    dib_ = nullptr;
+  }
+  if (mem_dc_ != nullptr) {
+    DeleteDC(mem_dc_);
+    mem_dc_ = nullptr;
+  }
+  dib_w_ = 0;
+  dib_h_ = 0;
+}
+
+void PopupSurface::EnsureLayeredTarget() {
   WatchdogStage(L"popup.target");
   if (hwnd_ == nullptr || !d2d_) {
     return;
   }
   RECT client{};
   GetClientRect(hwnd_, &client);
-  const UINT width = static_cast<UINT>((std::max)(0L, client.right - client.left));
-  const UINT height = static_cast<UINT>((std::max)(0L, client.bottom - client.top));
+  const int width = (std::max)(0L, client.right - client.left);
+  const int height = (std::max)(0L, client.bottom - client.top);
   if (width == 0 || height == 0) {
     return;
   }
-  if (target_) {
-    const D2D1_SIZE_U pixels = target_->GetPixelSize();
-    if (pixels.width == width && pixels.height == height) {
+  const bool size_ok = dib_ != nullptr && mem_dc_ != nullptr && dib_w_ == width && dib_h_ == height;
+  if (!size_ok) {
+    if (mem_dc_ != nullptr && old_dib_ != nullptr) {
+      SelectObject(mem_dc_, old_dib_);
+      old_dib_ = nullptr;
+    }
+    if (dib_ != nullptr) {
+      DeleteObject(dib_);
+      dib_ = nullptr;
+    }
+    if (mem_dc_ != nullptr) {
+      DeleteDC(mem_dc_);
+      mem_dc_ = nullptr;
+    }
+    dib_w_ = 0;
+    dib_h_ = 0;
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    mem_dc_ = CreateCompatibleDC(nullptr);
+    if (mem_dc_ == nullptr) {
       return;
     }
-    // Resize keeps the device. Recreating it here costs hundreds of milliseconds
-    // and would run on every open, because each menu has its own size.
-    if (SUCCEEDED(target_->Resize(D2D1::SizeU(width, height)))) {
+    dib_ = CreateDIBSection(mem_dc_, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (dib_ == nullptr) {
+      DeleteDC(mem_dc_);
+      mem_dc_ = nullptr;
       return;
     }
-    target_.Reset();
-    fill_.Reset();
+    old_dib_ = SelectObject(mem_dc_, dib_);
+    dib_w_ = width;
+    dib_h_ = height;
   }
+  if (target_) {
+    return;
+  }
+  fill_.Reset();
+  stroke_.Reset();
   const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-      D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f,
-      96.0f);
-  const D2D1_HWND_RENDER_TARGET_PROPERTIES hwnd_props =
-      D2D1::HwndRenderTargetProperties(hwnd_, D2D1::SizeU(width, height), D2D1_PRESENT_OPTIONS_NONE);
+      D2D1_RENDER_TARGET_TYPE_DEFAULT,
+      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
   const ULONGLONG started = GetTickCount64();
-  d2d_->CreateHwndRenderTarget(props, hwnd_props, target_.ReleaseAndGetAddressOf());
-  Log(L"popup", L"create render target %ux%u ok=%d %ums", width, height, target_ ? 1 : 0,
-      static_cast<unsigned>(GetTickCount64() - started));
+  d2d_->CreateDCRenderTarget(&props, target_.ReleaseAndGetAddressOf());
+  Log(L"popup", L"create render target %ux%u ok=%d %ums", static_cast<unsigned>(width),
+      static_cast<unsigned>(height), target_ ? 1 : 0, static_cast<unsigned>(GetTickCount64() - started));
+}
+
+void PopupSurface::Present() {
+  if (presenting_) {
+    return;
+  }
+  presenting_ = true;
+  struct PresentGuard {
+    bool& busy;
+    explicit PresentGuard(bool& flag) : busy(flag) {}
+    ~PresentGuard() { busy = false; }
+  } guard(presenting_);
+  Render();
+  if (hwnd_ == nullptr || mem_dc_ == nullptr || dib_w_ <= 0 || dib_h_ <= 0) {
+    return;
+  }
+  BLENDFUNCTION blend{};
+  blend.BlendOp = AC_SRC_OVER;
+  blend.SourceConstantAlpha = 255;
+  blend.AlphaFormat = AC_SRC_ALPHA;
+  POINT src{0, 0};
+  SIZE size{dib_w_, dib_h_};
+  UpdateLayeredWindow(hwnd_, nullptr, nullptr, &size, mem_dc_, &src, 0, &blend, ULW_ALPHA);
 }
 
 void PopupSurface::Render() {
@@ -575,29 +649,53 @@ void PopupSurface::Render() {
   if (!open_ || hwnd_ == nullptr || content_ == nullptr) {
     return;
   }
-  EnsureRenderTarget();
-  if (!target_) {
+  EnsureLayeredTarget();
+  if (!target_ || mem_dc_ == nullptr || dib_w_ <= 0 || dib_h_ <= 0) {
     return;
   }
-  RECT client{};
-  GetClientRect(hwnd_, &client);
-  const D2D1_COLOR_F fill = DockFillColor(dark_);
-  if (!fill_) {
-    target_->CreateSolidColorBrush(D2D1::ColorF(fill.r, fill.g, fill.b, 1.0f), fill_.ReleaseAndGetAddressOf());
-  } else {
-    fill_->SetColor(D2D1::ColorF(fill.r, fill.g, fill.b, 1.0f));
+  RECT client{0, 0, dib_w_, dib_h_};
+  if (FAILED(target_->BindDC(mem_dc_, &client))) {
+    target_.Reset();
+    fill_.Reset();
+    stroke_.Reset();
+    EnsureLayeredTarget();
+    if (!target_ || FAILED(target_->BindDC(mem_dc_, &client))) {
+      return;
+    }
   }
+  const float width = static_cast<float>(dib_w_);
+  const float height = static_cast<float>(dib_h_);
+  const float max_radius = (std::min)(width, height) * 0.5f - 1.0f;
+  const float radius =
+      (std::max)(0.0f, (std::min)(static_cast<float>(MulDiv(kCornerRadiusDip, static_cast<int>(Dpi()), 96)), max_radius));
+  const D2D1_ROUNDED_RECT rounded{D2D1::RectF(0.5f, 0.5f, width - 0.5f, height - 0.5f), radius, radius};
+  const D2D1_COLOR_F fill = DockFillColor(dark_);
+  const D2D1_COLOR_F stroke = DockStrokeColor(dark_);
+  if (!fill_) {
+    target_->CreateSolidColorBrush(fill, fill_.ReleaseAndGetAddressOf());
+  } else {
+    fill_->SetColor(fill);
+  }
+  if (!stroke_) {
+    target_->CreateSolidColorBrush(stroke, stroke_.ReleaseAndGetAddressOf());
+  } else {
+    stroke_->SetColor(stroke);
+  }
+  target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
   target_->BeginDraw();
-  target_->Clear(D2D1::ColorF(fill.r, fill.g, fill.b, 1.0f));
+  target_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
   if (fill_) {
-    target_->FillRectangle(
-        D2D1::RectF(0.0f, 0.0f, static_cast<float>(client.right), static_cast<float>(client.bottom)), fill_.Get());
+    target_->FillRoundedRectangle(rounded, fill_.Get());
+  }
+  if (stroke_) {
+    target_->DrawRoundedRectangle(rounded, stroke_.Get(), 1.0f);
   }
   content_->Render(target_.Get(), Dpi(), hot_);
   const HRESULT hr = target_->EndDraw();
   if (hr == D2DERR_RECREATE_TARGET) {
     target_.Reset();
     fill_.Reset();
+    stroke_.Reset();
   }
 }
 
@@ -633,7 +731,8 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
       PAINTSTRUCT ps{};
       BeginPaint(hwnd_, &ps);
-      Render();
+      Log(L"popup", L"wm_paint");
+      Present();
       EndPaint(hwnd_, &ps);
       return 0;
     }
@@ -650,8 +749,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       if (drag_index_ >= 0) {
         content_->DragTo(drag_index_, pt, Dpi());
-        InvalidateRect(hwnd_, nullptr, FALSE);
-        UpdateWindow(hwnd_);
+        Present();
         return 0;
       }
       POINT screen = pt;
@@ -672,8 +770,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       }
       if (hot != hot_) {
         hot_ = hot;
-        InvalidateRect(hwnd_, nullptr, FALSE);
-        UpdateWindow(hwnd_);
+        Present();
       }
       if (in_allied && allied_ != nullptr) {
         allied_->TrackHotScreen(screen);
@@ -705,8 +802,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         if (index >= 0 && content_->DragRow(index)) {
           drag_index_ = index;
           content_->DragTo(index, pt, Dpi());
-          InvalidateRect(hwnd_, nullptr, FALSE);
-          UpdateWindow(hwnd_);
+          Present();
           return 0;
         }
       }
@@ -731,7 +827,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         press_inside_ = false;
         mouse_down_ = false;
         content_->DragEnd(index);
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        Present();
         if (after_tick_ != nullptr) {
           after_tick_(after_tick_ctx_);
         }
@@ -757,7 +853,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         press_inside_ = false;
         mouse_down_ = false;
         content_->StickyInvoke(index);
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        Present();
         if (after_tick_ != nullptr) {
           after_tick_(after_tick_ctx_);
         }
@@ -777,9 +873,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DISPLAYCHANGE:
       if (open_ && content_ != nullptr) {
         Place(content_->Measure(Dpi()), anchor_, mode_);
-        target_.Reset();
-        fill_.Reset();
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        Present();
       }
       return 0;
     case WM_DESTROY:
@@ -787,8 +881,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
       content_ = nullptr;
       drag_index_ = -1;
       hwnd_ = nullptr;
-      target_.Reset();
-      fill_.Reset();
+      ReleaseLayeredTarget();
       return 0;
     default:
       break;

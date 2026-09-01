@@ -64,6 +64,7 @@ class PopupSurface {
   int Hot() const { return hot_; }
 
   void SetDark(bool dark);
+  void Present();
   void SetAllied(PopupSurface* allied) { allied_ = allied; }
   void SetAfterTick(void (*fn)(void*), void* ctx) {
     after_tick_ = fn;
@@ -78,7 +79,8 @@ class PopupSurface {
   static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
   LRESULT Handle(UINT msg, WPARAM wp, LPARAM lp);
   void Dismiss(int invoke_index, DismissReason reason);
-  void EnsureRenderTarget();
+  void EnsureLayeredTarget();
+  void ReleaseLayeredTarget();
   void Render();
   void Place(SIZE size, POINT anchor_screen, Anchor mode);
   void ApplyChrome();
@@ -102,6 +104,7 @@ class PopupSurface {
   bool saw_mousemove_ = false;
   bool armed_ = false;
   bool ticking_ = false;
+  bool presenting_ = false;
   bool dark_ = true;
   bool capture_ = true;
   int hot_ = -1;
@@ -110,8 +113,14 @@ class PopupSurface {
   Anchor mode_ = Anchor::AboveAt;
   POINT anchor_{};
   Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
-  Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> target_;
+  Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> target_;
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> fill_;
+  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> stroke_;
+  HDC mem_dc_ = nullptr;
+  HBITMAP dib_ = nullptr;
+  HGDIOBJ old_dib_ = nullptr;
+  int dib_w_ = 0;
+  int dib_h_ = 0;
 };
 
 }  // namespace bamti
