@@ -23,6 +23,9 @@ add_executable(bamti WIN32
   src/pipe_server.cpp
   src/status_registry.cpp
   src/status_panel.cpp
+  src/control_center.cpp
+  src/widgets/brightness.cpp
+  src/widgets/brightness_wmi.cpp
   src/taskbar_controller.cpp
   src/fullscreen.cpp
   src/task_list.cpp
@@ -92,6 +95,10 @@ target_link_libraries(bamti PRIVATE
   uiautomationcore
   iphlpapi
   wtsapi32
+  wlanapi
+  bthprops
+  dxva2
+  wbemuuid
 )
 
 set_property(TARGET bamti PROPERTY VS_DPI_AWARE "PerMonitor")
