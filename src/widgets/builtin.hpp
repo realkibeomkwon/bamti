@@ -1,7 +1,9 @@
 #pragma once
 
+#include "control_center.hpp"
 #include "settings.hpp"
 #include "status_source.hpp"
+#include "widgets/brightness.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -32,6 +34,7 @@ class BuiltinWidgets : public StatusSource {
   WidgetSettings settings() const;
   void SetSettings(const WidgetSettings& next);
   void NotePowerEvent(bool resumed);
+  ControlCenterLive LiveForControlCenter() const;
 
  private:
   enum class PendingAction { kPowerSettings, kNetworkSettings, kTaskManager, kWidgetBoard, kSoundSettings };
@@ -48,6 +51,8 @@ class BuiltinWidgets : public StatusSource {
   void SampleCpu();
   void SampleNet();
   void SampleVolume();
+  void SampleBrightness();
+  void SampleWlan();
   void PublishBoard();
   void Publish(StatusItem item);
   void DropItem(const char* id);
@@ -71,6 +76,7 @@ class BuiltinWidgets : public StatusSource {
   std::vector<PendingAction> actions_;
   std::optional<float> pending_level_;
   std::optional<bool> pending_mute_;
+  std::optional<float> pending_brightness_;
   std::unique_ptr<VolumeControl> volume_;
   bool logged_notify_latency_ = false;
   ULONGLONG battery_due_ = 0;
@@ -78,6 +84,17 @@ class BuiltinWidgets : public StatusSource {
   ULONGLONG net_due_ = 0;
   ULONGLONG volume_due_ = 0;
   ULONGLONG volume_refresh_due_ = 0;
+  ULONGLONG brightness_due_ = 0;
+  ULONGLONG wlan_due_ = 0;
+  BrightnessBackend brightness_backend_ = BrightnessBackend::kNone;
+  bool brightness_probed_ = false;
+  bool last_volume_ok_ = false;
+  float last_volume_ = 0.0f;
+  bool last_muted_ = false;
+  bool last_brightness_ok_ = false;
+  float last_brightness_ = 0.0f;
+  bool last_wifi_on_ = false;
+  std::wstring last_wifi_name_ = L"연결 안 됨";
   bool cpu_has_baseline_ = false;
   bool net_has_baseline_ = false;
   uint64_t cpu_idle_ = 0;

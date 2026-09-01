@@ -3,6 +3,7 @@
 #include "log.hpp"
 #include "status_item.hpp"
 #include "theme.hpp"
+#include "widgets/brightness.hpp"
 #include "widgets/volume.hpp"
 
 // netioapi.h (via iphlpapi.h) needs _WS2IPDEF_. Do not include winsock2.h.
@@ -37,6 +38,7 @@ constexpr ULONGLONG kBatteryPeriodMs = 60000;
 constexpr ULONGLONG kCpuPeriodMs = 5000;
 constexpr ULONGLONG kNetPeriodMs = 2000;
 constexpr ULONGLONG kVolumePeriodMs = 1000;
+constexpr ULONGLONG kBrightnessPeriodMs = 2000;
 constexpr ULONGLONG kVolumeRefreshMs = 20000;
 constexpr ULONGLONG kFirstSampleMs = 1000;
 
@@ -501,6 +503,19 @@ WidgetSettings BuiltinWidgets::settings() const {
   return settings_;
 }
 
+ControlCenterLive BuiltinWidgets::LiveForControlCenter() const {
+  std::lock_guard lock(mu_);
+  ControlCenterLive live;
+  live.volume_ok = last_volume_ok_;
+  live.volume = last_volume_;
+  live.muted = last_muted_;
+  live.brightness_ok = last_brightness_ok_;
+  live.brightness = last_brightness_;
+  live.wifi_on = last_wifi_on_;
+  live.wifi_name = last_wifi_name_;
+  return live;
+}
+
 void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
   bool stop_worker = false;
   bool submit_save = false;
@@ -549,6 +564,11 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
       volume_due_ = now;
       volume_refresh_due_ = 0;
       logged_no_volume_ = false;
+    }
+    if (!prev.control_center && next.control_center) {
+      volume_due_ = now;
+      brightness_due_ = now;
+      wlan_due_ = now;
     }
     if (next.Any()) {
       StartWorkerLocked();
@@ -607,6 +627,10 @@ void BuiltinWidgets::OnEvent(const StatusEvent& ev) {
   if (ev.event == "slide" && ev.id == kVolumeId && ev.row_id == "volume_level") {
     std::lock_guard lock(mu_);
     pending_level_ = ClampUnit(ev.value);
+    wake = true;
+  } else if (ev.event == "slide" && ev.id == "bamti.control_center" && ev.row_id == "brightness") {
+    std::lock_guard lock(mu_);
+    pending_brightness_ = ClampUnit(ev.value);
     wake = true;
   } else if (ev.event == "toggle" && ev.id == kVolumeId && ev.row_id == "volume_mute") {
     std::lock_guard lock(mu_);
@@ -711,7 +735,7 @@ void BuiltinWidgets::ResetBaselines() {
 }
 
 bool BuiltinWidgets::HasSampleDeadlineLocked() const {
-  return settings_.battery || settings_.cpu || settings_.network || settings_.volume;
+  return settings_.battery || settings_.cpu || settings_.network || settings_.volume || settings_.control_center;
 }
 
 ULONGLONG BuiltinWidgets::NextDeadlineLocked(ULONGLONG now) const {
@@ -726,8 +750,14 @@ ULONGLONG BuiltinWidgets::NextDeadlineLocked(ULONGLONG now) const {
   if (settings_.network && net_due_ < due) {
     due = net_due_;
   }
-  if (settings_.volume && volume_due_ < due) {
+  if ((settings_.volume || settings_.control_center) && volume_due_ < due) {
     due = volume_due_;
+  }
+  if (settings_.control_center && brightness_due_ < due) {
+    due = brightness_due_;
+  }
+  if (settings_.control_center && wlan_due_ < due) {
+    due = wlan_due_;
   }
   return due;
 }
@@ -1113,7 +1143,7 @@ void BuiltinWidgets::SampleVolume() {
       refresh = true;
       volume_refresh_due_ = now + kVolumeRefreshMs;
     }
-    enabled = settings_.volume && active_ && sink_ != nullptr;
+    enabled = (settings_.volume || settings_.control_center) && active_ && sink_ != nullptr;
   }
   if (!enabled) {
     volume_->Release();
@@ -1136,11 +1166,24 @@ void BuiltinWidgets::SampleVolume() {
       Log(L"widget", L"no audio device; hiding %hs", kVolumeId);
     }
     DropItem(kVolumeId);
+    {
+      std::lock_guard lock(mu_);
+      last_volume_ok_ = false;
+    }
     return;
   }
+  bool publish = false;
   {
     std::lock_guard lock(mu_);
     logged_no_volume_ = false;
+    last_volume_ok_ = true;
+    last_volume_ = state.level;
+    last_muted_ = state.muted;
+    publish = settings_.volume;
+  }
+
+  if (!publish) {
+    return;
   }
 
   const int pct = static_cast<int>(state.level * 100.0f + 0.5f);
@@ -1178,11 +1221,84 @@ void BuiltinWidgets::SampleVolume() {
   Publish(std::move(item));
 }
 
+void BuiltinWidgets::SampleBrightness() {
+  bool enabled = false;
+  bool probe = false;
+  BrightnessBackend backend = BrightnessBackend::kNone;
+  {
+    std::lock_guard lock(mu_);
+    brightness_due_ = GetTickCount64() + kBrightnessPeriodMs;
+    enabled = settings_.control_center && active_;
+    probe = !brightness_probed_;
+    backend = brightness_backend_;
+  }
+  if (!enabled) {
+    return;
+  }
+  if (probe) {
+    const BrightnessSample ddc = ProbeDdcciBrightness();
+    Log(L"cc", L"brightness ddcci=%d value=%lu took %.2f ms", ddc.ok ? 1 : 0, ddc.value, ddc.ms);
+    const BrightnessSample wmi = ProbeWmiBrightness();
+    Log(L"cc", L"brightness wmi=%d value=%lu took %.2f ms", wmi.ok ? 1 : 0, wmi.value, wmi.ms);
+    BrightnessSample chosen;
+    if (ddc.ok) {
+      chosen = ddc;
+    } else if (wmi.ok) {
+      chosen = wmi;
+    }
+    std::lock_guard lock(mu_);
+    brightness_probed_ = true;
+    brightness_backend_ = chosen.backend;
+    last_brightness_ok_ = chosen.ok;
+    last_brightness_ = chosen.ok ? static_cast<float>(chosen.value) / 100.0f : 0.0f;
+    if (!chosen.ok) {
+      brightness_due_ = MAXULONGLONG;
+    }
+    return;
+  }
+  if (backend == BrightnessBackend::kNone) {
+    return;
+  }
+  const BrightnessSample sample =
+      backend == BrightnessBackend::kDdcci ? ProbeDdcciBrightness() : ProbeWmiBrightness();
+  std::lock_guard lock(mu_);
+  last_brightness_ok_ = sample.ok;
+  if (sample.ok) {
+    last_brightness_ = static_cast<float>(sample.value) / 100.0f;
+  }
+}
+
+void BuiltinWidgets::SampleWlan() {
+  bool enabled = false;
+  {
+    std::lock_guard lock(mu_);
+    wlan_due_ = GetTickCount64() + kBrightnessPeriodMs;
+    enabled = settings_.control_center && active_;
+  }
+  if (!enabled) {
+    return;
+  }
+  const WlanStatus wifi = QueryWlanStatus();
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    Log(L"cc", L"wlan query took %.2f ms", wifi.ms);
+    if (wifi.ms > 5.0) {
+      Log(L"cc", L"wlan query over 5ms; prefetching on widget worker");
+    }
+  }
+  std::lock_guard lock(mu_);
+  last_wifi_on_ = wifi.connected;
+  last_wifi_name_ = wifi.name;
+}
+
 void BuiltinWidgets::SampleDue(ULONGLONG now) {
   bool bat = false;
   bool cpu = false;
   bool net = false;
   bool volume = false;
+  bool brightness = false;
+  bool wlan = false;
   {
     std::lock_guard lock(mu_);
     if (!active_) {
@@ -1191,7 +1307,9 @@ void BuiltinWidgets::SampleDue(ULONGLONG now) {
     bat = settings_.battery && battery_due_ <= now;
     cpu = settings_.cpu && cpu_due_ <= now;
     net = settings_.network && net_due_ <= now;
-    volume = settings_.volume && volume_due_ <= now;
+    volume = (settings_.volume || settings_.control_center) && volume_due_ <= now;
+    brightness = settings_.control_center && brightness_due_ <= now;
+    wlan = settings_.control_center && wlan_due_ <= now;
   }
   if (bat) {
     SampleBattery();
@@ -1204,6 +1322,12 @@ void BuiltinWidgets::SampleDue(ULONGLONG now) {
   }
   if (volume) {
     SampleVolume();
+  }
+  if (brightness) {
+    SampleBrightness();
+  }
+  if (wlan) {
+    SampleWlan();
   }
 }
 
@@ -1220,6 +1344,7 @@ void BuiltinWidgets::WorkerLoop() {
     std::vector<PendingAction> acts;
     std::optional<float> level;
     std::optional<bool> mute;
+    std::optional<float> bright;
     bool do_reset = false;
     bool do_power = false;
     WidgetSettings s{};
@@ -1231,6 +1356,7 @@ void BuiltinWidgets::WorkerLoop() {
       acts.swap(actions_);
       level.swap(pending_level_);
       mute.swap(pending_mute_);
+      bright.swap(pending_brightness_);
       do_reset = reset_pending_;
       reset_pending_ = false;
       do_power = power_pending_;
@@ -1268,6 +1394,20 @@ void BuiltinWidgets::WorkerLoop() {
       volume_->SetMute(*mute);
       volume_changed = true;
     }
+    if (bright) {
+      const unsigned pct = static_cast<unsigned>(ClampUnit(*bright) * 100.0f + 0.5f);
+      BrightnessBackend backend = BrightnessBackend::kNone;
+      {
+        std::lock_guard lock(mu_);
+        backend = brightness_backend_;
+        last_brightness_ = ClampUnit(*bright);
+      }
+      if (backend == BrightnessBackend::kDdcci) {
+        SetDdcciBrightness(pct);
+      } else if (backend == BrightnessBackend::kWmi) {
+        SetWmiBrightness(pct);
+      }
+    }
     if (do_reset) {
       ResetBaselines();
     }
@@ -1276,7 +1416,7 @@ void BuiltinWidgets::WorkerLoop() {
     } else if (s.widget_board) {
       DropItem(kBoardId);
     }
-    if (!s.volume) {
+    if (!s.volume && !s.control_center) {
       volume_->Release();
     }
     if (active) {
@@ -1285,7 +1425,7 @@ void BuiltinWidgets::WorkerLoop() {
           SampleBattery();
         }
       }
-      if (volume_changed && s.volume) {
+      if (volume_changed && (s.volume || s.control_center)) {
         SampleVolume();
       }
       SampleDue(GetTickCount64());
