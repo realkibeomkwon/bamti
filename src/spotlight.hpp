@@ -48,6 +48,7 @@ class Spotlight {
     std::wstring name;
     std::wstring path;
     HICON icon = nullptr;
+    bool filesystem = false;
   };
 
   struct Match {
@@ -97,6 +98,7 @@ class Spotlight {
   void ActivateMatch(const Match& match, bool reveal = false);
   void ActivateHot();
   void LaunchPath(const std::wstring& path);
+  void LaunchApp(const AppEntry& entry);
   void RevealPath(const std::wstring& path);
   int RowHeight(const Match& match) const;
   int VisibleCount() const;

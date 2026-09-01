@@ -12,6 +12,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <shobjidl_core.h>
 #include <structuredquery.h>
 #include <uxtheme.h>
 #include <windowsx.h>
@@ -585,6 +586,98 @@ void CollectFolder(const std::wstring& root, std::vector<std::pair<std::wstring,
     out.push_back({std::move(name), full});
   } while (FindNextFileW(find, &fd) != FALSE);
   FindClose(find);
+}
+
+bool LooksLikeFilesystemPath(const std::wstring& text) {
+  if (text.size() >= 3 && text[1] == L':' && (text[2] == L'\\' || text[2] == L'/')) {
+    return true;
+  }
+  return text.size() >= 2 && text[0] == L'\\' && text[1] == L'\\';
+}
+
+double SpotlightElapsedMs(const LARGE_INTEGER& freq, const LARGE_INTEGER& t0, const LARGE_INTEGER& t1) {
+  if (freq.QuadPart == 0) {
+    return 0.0;
+  }
+  return static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+}
+
+HICON IconFromShellItem(IShellItem* item) {
+  if (item == nullptr) {
+    return nullptr;
+  }
+  Microsoft::WRL::ComPtr<IShellItemImageFactory> factory;
+  if (FAILED(item->QueryInterface(IID_PPV_ARGS(&factory))) || !factory) {
+    return nullptr;
+  }
+  HBITMAP color = nullptr;
+  const SIZE px{48, 48};
+  if (FAILED(factory->GetImage(px, SIIGBF_ICONBACKGROUND | SIIGBF_BIGGERSIZEOK, &color)) || color == nullptr) {
+    return nullptr;
+  }
+  BITMAP bm{};
+  if (GetObjectW(color, sizeof(bm), &bm) == 0 || bm.bmWidth <= 0 || bm.bmHeight == 0) {
+    DeleteObject(color);
+    return nullptr;
+  }
+  const int w = bm.bmWidth;
+  const int h = std::abs(bm.bmHeight);
+  const HBITMAP mask = CreateBitmap(w, h, 1, 1, nullptr);
+  ICONINFO info{};
+  info.fIcon = TRUE;
+  info.hbmMask = mask;
+  info.hbmColor = color;
+  const HICON icon = CreateIconIndirect(&info);
+  if (mask != nullptr) {
+    DeleteObject(mask);
+  }
+  DeleteObject(color);
+  return icon;
+}
+
+HICON ExtractAppsFolderIcon(const std::wstring& app_id) {
+  if (app_id.empty()) {
+    return nullptr;
+  }
+  const std::wstring parsing = L"shell:AppsFolder\\" + app_id;
+  Microsoft::WRL::ComPtr<IShellItem> item;
+  if (FAILED(SHCreateItemFromParsingName(parsing.c_str(), nullptr, IID_PPV_ARGS(&item))) || !item) {
+    return nullptr;
+  }
+  return IconFromShellItem(item.Get());
+}
+
+bool CollectAppsFolder(std::vector<std::pair<std::wstring, std::wstring>>& out, std::unordered_set<std::wstring>& seen) {
+  Microsoft::WRL::ComPtr<IShellItem> apps;
+  HRESULT hr = SHGetKnownFolderItem(FOLDERID_AppsFolder, KF_FLAG_DONT_VERIFY, nullptr, IID_PPV_ARGS(&apps));
+  if (FAILED(hr) || !apps) {
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IEnumShellItems> e;
+  hr = apps->BindToHandler(nullptr, BHID_EnumItems, IID_PPV_ARGS(&e));
+  if (FAILED(hr) || !e) {
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IShellItem> item;
+  ULONG fetched = 0;
+  while (e->Next(1, item.ReleaseAndGetAddressOf(), &fetched) == S_OK && fetched == 1) {
+    PWSTR name = nullptr;
+    if (FAILED(item->GetDisplayName(SIGDN_NORMALDISPLAY, &name)) || name == nullptr) {
+      continue;
+    }
+    PWSTR id = nullptr;
+    if (FAILED(item->GetDisplayName(SIGDN_PARENTRELATIVEFORADDRESSBAR, &id)) || id == nullptr) {
+      CoTaskMemFree(name);
+      continue;
+    }
+    std::wstring key = LowerCopy(name);
+    if (seen.insert(key).second && name[0] != L'\0' && id[0] != L'\0') {
+      out.push_back({name, id});
+    }
+    CoTaskMemFree(id);
+    CoTaskMemFree(name);
+  }
+  return true;
 }
 
 void WalkNamed(const std::wstring& dir, const std::wstring& needle, std::vector<Spotlight::FileHit>& out, int depth,
@@ -1624,7 +1717,10 @@ void Spotlight::RequestIcon(const std::wstring& path, bool overlay) {
   std::thread([this, gen, path, overlay, hwnd]() {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const bool com_ok = SUCCEEDED(com) || com == S_FALSE;
-    HICON icon = ExtractShellIcon(path, overlay);
+    HICON icon = LooksLikeFilesystemPath(path) ? ExtractShellIcon(path, overlay) : ExtractAppsFolderIcon(path);
+    if (icon == nullptr && !LooksLikeFilesystemPath(path)) {
+      icon = ExtractShellIcon(path, overlay);
+    }
     auto* payload = new IconPayload;
     payload->gen = gen;
     payload->path = path;
@@ -1673,8 +1769,25 @@ void Spotlight::ReloadApps() {
   apps_.clear();
   std::unordered_set<std::wstring> seen;
   std::vector<std::pair<std::wstring, std::wstring>> raw;
-  CollectFolder(KnownFolder(FOLDERID_StartMenu), raw, seen);
-  CollectFolder(KnownFolder(FOLDERID_CommonStartMenu), raw, seen);
+  LARGE_INTEGER freq{};
+  LARGE_INTEGER t0{};
+  LARGE_INTEGER t1{};
+  QueryPerformanceFrequency(&freq);
+  QueryPerformanceCounter(&t0);
+  const bool from_apps = CollectAppsFolder(raw, seen);
+  QueryPerformanceCounter(&t1);
+  if (from_apps) {
+    Log(L"spotlight", L"AppsFolder enumerate %d apps in %.1f ms", static_cast<int>(raw.size()),
+        SpotlightElapsedMs(freq, t0, t1));
+  } else {
+    static bool logged_fallback = false;
+    if (!logged_fallback) {
+      logged_fallback = true;
+      Log(L"spotlight", L"AppsFolder enumerate failed; falling back to Start Menu shortcuts");
+    }
+    CollectFolder(KnownFolder(FOLDERID_StartMenu), raw, seen);
+    CollectFolder(KnownFolder(FOLDERID_CommonStartMenu), raw, seen);
+  }
   std::sort(raw.begin(), raw.end(), [](const auto& a, const auto& b) {
     return CompareStringEx(LOCALE_NAME_USER_DEFAULT, LINGUISTIC_IGNORECASE, a.first.c_str(),
                            static_cast<int>(a.first.size()), b.first.c_str(), static_cast<int>(b.first.size()), nullptr,
@@ -1685,6 +1798,7 @@ void Spotlight::ReloadApps() {
     AppEntry entry;
     entry.name = std::move(item.first);
     entry.path = std::move(item.second);
+    entry.filesystem = LooksLikeFilesystemPath(entry.path);
     apps_.push_back(std::move(entry));
   }
   apps_loaded_at_ = GetTickCount64();
@@ -2500,10 +2614,13 @@ void Spotlight::ActivateMatch(const Match& match, bool reveal) {
       return;
     case Kind::App:
       if (match.index >= 0 && match.index < static_cast<int>(apps_.size())) {
+        const AppEntry& entry = apps_[static_cast<size_t>(match.index)];
         if (reveal) {
-          RevealPath(apps_[static_cast<size_t>(match.index)].path);
+          if (entry.filesystem) {
+            RevealPath(entry.path);
+          }
         } else {
-          LaunchPath(apps_[static_cast<size_t>(match.index)].path);
+          LaunchApp(entry);
         }
       }
       break;
@@ -2551,6 +2668,24 @@ void Spotlight::LaunchPath(const std::wstring& path) {
   info.fMask = SEE_MASK_FLAG_NO_UI;
   info.lpVerb = L"open";
   info.lpFile = path.c_str();
+  info.nShow = SW_SHOWNORMAL;
+  ShellExecuteExW(&info);
+}
+
+void Spotlight::LaunchApp(const AppEntry& entry) {
+  if (entry.path.empty()) {
+    return;
+  }
+  if (entry.filesystem) {
+    LaunchPath(entry.path);
+    return;
+  }
+  const std::wstring target = L"shell:AppsFolder\\" + entry.path;
+  SHELLEXECUTEINFOW info{};
+  info.cbSize = sizeof(info);
+  info.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+  info.lpVerb = L"open";
+  info.lpFile = target.c_str();
   info.nShow = SW_SHOWNORMAL;
   ShellExecuteExW(&info);
 }
