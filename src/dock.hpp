@@ -27,7 +27,7 @@ class Dock {
   Dock& operator=(const Dock&) = delete;
   ~Dock();
 
-  bool Create(HINSTANCE instance);
+  bool Create(HINSTANCE instance, HWND bar_hwnd);
 
  private:
   friend class DockMenuContent;
@@ -89,6 +89,7 @@ class Dock {
   float SlotIconX(size_t slot) const;
   bool NoteDragLog();
   bool Busy() const;
+  int SpotlightPrefix() const;
   int PinnedCount() const;
   int DropIndexAt(POINT client) const;
   std::vector<size_t> DisplayOrder() const;
@@ -100,6 +101,7 @@ class Dock {
   int Dip(int value) const;
 
   HWND hwnd_ = nullptr;
+  HWND bar_hwnd_ = nullptr;
   HWND hot_hwnd_ = nullptr;
   HWND tooltip_ = nullptr;
   bool shown_ = false;

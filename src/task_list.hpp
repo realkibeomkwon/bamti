@@ -7,7 +7,10 @@
 
 namespace bamti {
 
+enum class DockItemKind { kApp, kSpotlight };
+
 struct DockApp {
+  DockItemKind kind = DockItemKind::kApp;
   std::wstring key;
   std::wstring exe_path;
   std::wstring aumid;

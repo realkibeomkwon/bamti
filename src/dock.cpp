@@ -4,6 +4,7 @@
 #include "fullscreen.hpp"
 #include "icon_cache.hpp"
 #include "log.hpp"
+#include "menu_bar.hpp"
 #include "taskbar_controller.hpp"
 #include "theme.hpp"
 #include "watchdog.hpp"
@@ -67,6 +68,8 @@ constexpr UINT_PTR kAnimTimerId = 5;
 constexpr UINT kTrayWatchMs = 5000;
 constexpr UINT kAnimTimerMs = 8;
 constexpr UINT kIdlePollMs = 500;
+constexpr wchar_t kSpotlightDockKey[] = L"\x01spotlight";
+constexpr wchar_t kSearchFluentGlyph[] = L"\xE721";
 constexpr UINT kTasksChangedMsg = WM_APP + 20;
 constexpr UINT kMenuCommandMsg = WM_APP + 21;
 constexpr UINT kTrayChangedMsg = WM_APP + 22;
@@ -409,6 +412,82 @@ HBITMAP BitmapFromJumboList(const std::wstring& path) {
   }
   DestroyIcon(icon);
   return bmp;
+}
+
+HBITMAP BitmapFromFluentSearch(int px, bool dark) {
+  if (px <= 0) {
+    return nullptr;
+  }
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = px;
+  bmi.bmiHeader.biHeight = -px;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  void* bits = nullptr;
+  HBITMAP bmp = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  if (bmp == nullptr || bits == nullptr) {
+    return nullptr;
+  }
+  const HDC dc = CreateCompatibleDC(nullptr);
+  if (dc == nullptr) {
+    DeleteObject(bmp);
+    return nullptr;
+  }
+  const HGDIOBJ old_bmp = SelectObject(dc, bmp);
+  LOGFONTW lf{};
+  lf.lfHeight = -MulDiv(px, 3, 4);
+  lf.lfWeight = FW_NORMAL;
+  lf.lfCharSet = DEFAULT_CHARSET;
+  lf.lfQuality = ANTIALIASED_QUALITY;
+  lf.lfOutPrecision = OUT_TT_PRECIS;
+  lstrcpynW(lf.lfFaceName, L"Segoe Fluent Icons", LF_FACESIZE);
+  HFONT font = CreateFontIndirectW(&lf);
+  if (font == nullptr) {
+    lstrcpynW(lf.lfFaceName, L"Segoe MDL2 Assets", LF_FACESIZE);
+    font = CreateFontIndirectW(&lf);
+  }
+  const HGDIOBJ old_font = font != nullptr ? SelectObject(dc, font) : nullptr;
+  SetBkMode(dc, TRANSPARENT);
+  SetTextColor(dc, RGB(255, 255, 255));
+  RECT box{0, 0, px, px};
+  DrawTextW(dc, kSearchFluentGlyph, 1, &box, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  if (old_font != nullptr) {
+    SelectObject(dc, old_font);
+  }
+  if (font != nullptr) {
+    DeleteObject(font);
+  }
+  SelectObject(dc, old_bmp);
+  DeleteDC(dc);
+
+  auto* pixels = static_cast<DWORD*>(bits);
+  const int count = px * px;
+  for (int i = 0; i < count; ++i) {
+    const DWORD c = pixels[i];
+    const BYTE r = static_cast<BYTE>(c >> 16);
+    const BYTE g = static_cast<BYTE>(c >> 8);
+    const BYTE b = static_cast<BYTE>(c);
+    const BYTE a = (std::max)(r, (std::max)(g, b));
+    if (a == 0) {
+      pixels[i] = 0;
+      continue;
+    }
+    const BYTE ch = dark ? a : static_cast<BYTE>((32 * a) / 255);
+    pixels[i] = (static_cast<DWORD>(a) << 24) | (static_cast<DWORD>(ch) << 16) | (static_cast<DWORD>(ch) << 8) | ch;
+  }
+  return bmp;
+}
+
+DockApp MakeSpotlightDockApp() {
+  DockApp app;
+  app.kind = DockItemKind::kSpotlight;
+  app.key = kSpotlightDockKey;
+  app.display_name = L"검색";
+  app.pinned = true;
+  app.can_pin = false;
+  return app;
 }
 
 HICON QueryWindowIcon(HWND hwnd) {
@@ -1096,7 +1175,8 @@ bool Dock::RegisterClasses(HINSTANCE instance) {
   return true;
 }
 
-bool Dock::Create(HINSTANCE instance) {
+bool Dock::Create(HINSTANCE instance, HWND bar_hwnd) {
+  bar_hwnd_ = bar_hwnd;
   if (!RegisterClasses(instance)) {
     Log(L"dock", L"register classes failed");
     return false;
@@ -1365,6 +1445,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       return 0;
     case WM_DPICHANGED:
     case WM_DISPLAYCHANGE:
+      ResetIconCache();
       EnsureIcons();
       Layout();
       LayoutHot();
@@ -1376,6 +1457,8 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         ApplyBackdrop();
         popup_.SetDark(dark_);
         submenu_.SetDark(dark_);
+        ResetIconCache();
+        EnsureIcons();
         RenderLayered();
       }
       return 0;
@@ -1458,7 +1541,11 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         const DockApp app = items_[static_cast<size_t>(index)];
         Log(L"dock", L"click index=%d running=%d hwnd=%p name=%s", index, app.running ? 1 : 0, app.hwnd,
             app.display_name.c_str());
-        if (app.running && app.hwnd != nullptr) {
+        if (app.kind == DockItemKind::kSpotlight) {
+          if (bar_hwnd_ != nullptr) {
+            PostMessageW(bar_hwnd_, kToggleSpotlightMsg, 0, 0);
+          }
+        } else if (app.running && app.hwnd != nullptr) {
           ActivateHwnd(app.hwnd);
         } else {
           LaunchDockApp(app);
@@ -1564,6 +1651,7 @@ void Dock::Rebuild() {
   force_collect_ = false;
   last_window_fp_ = fp;
   std::vector<DockApp> next = CollectDockApps(pins_);
+  next.insert(next.begin(), MakeSpotlightDockApp());
   bool pin_miss = false;
   for (const auto& app : next) {
     if (app.running && !app.pinned) {
@@ -1593,7 +1681,8 @@ void Dock::Rebuild() {
   EnsureIcons();
   size_t kept = 0;
   for (size_t i = 0; i < items_.size(); ++i) {
-    if (items_[i].pinned || (i < icons_.size() && icons_[i] != nullptr)) {
+    if (items_[i].kind == DockItemKind::kSpotlight || items_[i].pinned ||
+        (i < icons_.size() && icons_[i] != nullptr)) {
       if (kept != i) {
         items_[kept] = std::move(items_[i]);
       }
@@ -1724,6 +1813,9 @@ void Dock::EnsureIcons() {
 }
 
 HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
+  if (app.kind == DockItemKind::kSpotlight) {
+    return BitmapFromFluentSearch(px, dark_);
+  }
   const bool identity = !app.aumid.empty() || PathImpliesGenericIcon(app.exe_path);
 
   if (!app.aumid.empty()) {
@@ -1945,7 +2037,7 @@ void Dock::RenderLayered() {
       rt->FillRoundedRectangle(bg, hover_fill.Get());
     }
     draw_icon(i, x, y, 1.0f);
-    if (items_[i].running && indicator) {
+    if (items_[i].kind != DockItemKind::kSpotlight && items_[i].running && indicator) {
       const float dot_w = static_cast<float>(Dip(10));
       const float dot_h = static_cast<float>(Dip(3));
       const float dx = x + (static_cast<float>(icon_px) - dot_w) * 0.5f;
@@ -2153,6 +2245,9 @@ void Dock::OpenDockMenu(POINT screen, int index) {
     menu_content_ = std::make_unique<DockMenuContent>();
   }
   const DockApp& app = items_[static_cast<size_t>(index)];
+  if (app.kind == DockItemKind::kSpotlight) {
+    return;
+  }
   Log(L"dock", L"menu open index=%d name=%s running=%d windows=%zu pinned=%d", index, app.display_name.c_str(),
       app.running ? 1 : 0, app.windows.size(), app.pinned ? 1 : 0);
   menu_content_->Reset(this, app);
@@ -2315,6 +2410,10 @@ bool Dock::Busy() const {
   return popup_.IsOpen() || dragging_ || pressed_ >= 0;
 }
 
+int Dock::SpotlightPrefix() const {
+  return (!items_.empty() && items_[0].kind == DockItemKind::kSpotlight) ? 1 : 0;
+}
+
 int Dock::PinnedCount() const {
   int n = 0;
   for (const auto& app : items_) {
@@ -2328,12 +2427,13 @@ int Dock::PinnedCount() const {
 
 int Dock::DropIndexAt(POINT client) const {
   const int pinned = PinnedCount();
-  if (pinned <= 0) {
+  const int prefix = SpotlightPrefix();
+  if (pinned <= prefix) {
     return -1;
   }
-  int best = 0;
+  int best = prefix;
   int best_dist = INT_MAX;
-  for (int i = 0; i < pinned && i < static_cast<int>(slots_.size()); ++i) {
+  for (int i = prefix; i < pinned && i < static_cast<int>(slots_.size()); ++i) {
     const RECT& slot = slots_[static_cast<size_t>(i)];
     const int cx = slot.left + (slot.right - slot.left) / 2;
     const int dist = client.x > cx ? client.x - cx : cx - client.x;
@@ -2352,7 +2452,8 @@ std::vector<size_t> Dock::DisplayOrder() const {
     return order;
   }
   const int pinned = PinnedCount();
-  if (drag_index_ >= pinned || drop_index_ >= pinned) {
+  const int prefix = SpotlightPrefix();
+  if (drag_index_ < prefix || drop_index_ < prefix || drag_index_ >= pinned || drop_index_ >= pinned) {
     return order;
   }
   const int from = drag_index_;
@@ -2537,6 +2638,8 @@ void Dock::BeginDragIfNeeded(POINT client) {
     reason = L"index-out-of-range";
   } else if (!items_[static_cast<size_t>(pressed_)].pinned) {
     reason = L"not-pinned";
+  } else if (items_[static_cast<size_t>(pressed_)].kind == DockItemKind::kSpotlight) {
+    reason = L"spotlight";
   }
   if (reason != nullptr) {
     if (NoteDragLog()) {
@@ -2595,11 +2698,14 @@ void Dock::EndDrag(bool commit) {
     ReleaseCapture();
   }
   if (was_dragging && commit && from >= 0 && to >= 0 && from != to) {
+    const int prefix = SpotlightPrefix();
+    const int from_pin = from - prefix;
+    const int to_pin = to - prefix;
     const int pinned = static_cast<int>(pins_.size());
-    if (from < pinned && to < pinned) {
-      const std::wstring moved = pins_[static_cast<size_t>(from)];
-      pins_.erase(pins_.begin() + from);
-      pins_.insert(pins_.begin() + to, moved);
+    if (from >= prefix && to >= prefix && from_pin < pinned && to_pin < pinned) {
+      const std::wstring moved = pins_[static_cast<size_t>(from_pin)];
+      pins_.erase(pins_.begin() + from_pin);
+      pins_.insert(pins_.begin() + to_pin, moved);
       RotatePinnedRange(items_, from, to);
       RotatePinnedRange(icons_, from, to);
       RotatePinnedRange(anim_x_, from, to);

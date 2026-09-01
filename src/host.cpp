@@ -247,7 +247,7 @@ int Run(HINSTANCE instance) {
       WatchdogStart(bar.hwnd());
       Log(L"host", L"menu bar ready taskbar_hidden=%d", bar.taskbar_hidden() ? 1 : 0);
       if (bar.taskbar_hidden()) {
-        if (!dock.Create(instance)) {
+        if (!dock.Create(instance, bar.hwnd())) {
           Log(L"host", L"dock create failed");
         }
       }
