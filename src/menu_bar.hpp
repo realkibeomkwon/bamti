@@ -23,6 +23,7 @@
 namespace bamti {
 
 inline constexpr wchar_t kMenuBarClass[] = L"bamti.MenuBar";
+inline constexpr UINT kToggleSpotlightMsg = WM_APP + 8;
 
 class MenuBar {
  public:
@@ -60,10 +61,12 @@ class MenuBar {
   void UnregisterSessionWatch();
   bool CreateTooltip();
   RECT StartRect() const;
+  RECT SpotlightRect() const;
   RECT ClockRect() const;
   std::optional<StatusHit> HitTest(POINT client) const;
   bool HitStart(POINT client) const;
-  void UpdateStartChrome(POINT client);
+  bool HitSpotlight(POINT client) const;
+  void UpdateChrome(POINT client);
   void ArmMouseLeave();
   void ToggleStartMenu(bool from_keyboard = false);
   void ToggleSpotlight();
@@ -98,6 +101,8 @@ class MenuBar {
   bool dark_ = true;
   bool start_hot_ = false;
   bool start_pressed_ = false;
+  bool spotlight_hot_ = false;
+  bool spotlight_pressed_ = false;
   bool repaint_armed_ = false;
   struct PerfAcc {
     unsigned n = 0;

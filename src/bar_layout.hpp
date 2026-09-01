@@ -11,7 +11,7 @@
 
 namespace bamti {
 
-enum class SegmentKind { kStart, kWarning, kStatus, kOverflow, kClock };
+enum class SegmentKind { kStart, kSpotlight, kWarning, kStatus, kOverflow, kClock };
 
 struct BarSegment {
   SegmentKind kind = SegmentKind::kStatus;

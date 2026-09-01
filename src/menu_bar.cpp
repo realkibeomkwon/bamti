@@ -25,7 +25,6 @@ namespace {
 
 constexpr UINT kAppBarCallback = WM_APP + 1;
 constexpr UINT kToggleStartMsg = WM_APP + 7;
-constexpr UINT kToggleSpotlightMsg = WM_APP + 8;
 constexpr UINT kFullscreenWatchMsg = WM_APP + 9;
 constexpr UINT_PTR kClockTimerId = 1;
 constexpr UINT_PTR kRepaintTimerId = 2;
@@ -434,7 +433,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
           return TRUE;
         }
-        if (HitStart(pt) || HitSegment(pt) != nullptr) {
+        if (HitStart(pt) || HitSpotlight(pt) || HitSegment(pt) != nullptr) {
           SetCursor(LoadCursorW(nullptr, IDC_HAND));
           return TRUE;
         }
@@ -456,7 +455,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         return 0;
       }
-      UpdateStartChrome(pt);
+      UpdateChrome(pt);
       return 0;
     }
     case WM_MOUSELEAVE:
@@ -464,6 +463,11 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         start_hot_ = false;
         start_pressed_ = false;
         InvalidateArea(hwnd_, StartRect());
+      }
+      if (spotlight_hot_ || spotlight_pressed_) {
+        spotlight_hot_ = false;
+        spotlight_pressed_ = false;
+        InvalidateArea(hwnd_, SpotlightRect());
       }
       return 0;
     case WM_LBUTTONDOWN: {
@@ -473,6 +477,13 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         start_pressed_ = true;
         SetCapture(hwnd_);
         InvalidateArea(hwnd_, StartRect());
+        return 0;
+      }
+      if (HitSpotlight(pt)) {
+        status_popup_.Close();
+        spotlight_pressed_ = true;
+        SetCapture(hwnd_);
+        InvalidateArea(hwnd_, SpotlightRect());
         return 0;
       }
       if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
@@ -493,6 +504,10 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         start_pressed_ = false;
         InvalidateArea(hwnd_, StartRect());
       }
+      if (spotlight_pressed_) {
+        spotlight_pressed_ = false;
+        InvalidateArea(hwnd_, SpotlightRect());
+      }
       if (reorder_active_ && reinterpret_cast<HWND>(lparam) != hwnd_) {
         CancelReorder();
       }
@@ -510,13 +525,23 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         return 0;
       }
       const bool start_click = start_pressed_ && HitStart(pt);
+      const bool spotlight_click = spotlight_pressed_ && HitSpotlight(pt);
       if (start_pressed_) {
         start_pressed_ = false;
         ReleaseCapture();
         InvalidateArea(hwnd_, StartRect());
       }
+      if (spotlight_pressed_) {
+        spotlight_pressed_ = false;
+        ReleaseCapture();
+        InvalidateArea(hwnd_, SpotlightRect());
+      }
       if (start_click) {
         ToggleStartMenu();
+        return 0;
+      }
+      if (spotlight_click) {
+        ToggleSpotlight();
         return 0;
       }
       if (skip_left_up_) {
@@ -1050,7 +1075,8 @@ void MenuBar::Paint() {
       DrawTimings draw{};
       QueryPerformanceCounter(&t0);
       clock_.Draw(buffer_dc, client, dirty, dark_, layout_.last(), &layout_,
-                  start_hot_ || start_menu_.visible(), start_pressed_ || start_menu_.visible(), &draw);
+                  start_hot_ || start_menu_.visible(), start_pressed_ || start_menu_.visible(),
+                  spotlight_hot_ || spotlight_.visible(), spotlight_pressed_ || spotlight_.visible(), &draw);
       QueryPerformanceCounter(&t1);
       const double draw_ms = QpcMs(t0, t1);
 
@@ -1066,6 +1092,15 @@ void MenuBar::Paint() {
 RECT MenuBar::StartRect() const {
   for (const BarSegment& seg : layout_.last().segments) {
     if (seg.kind == SegmentKind::kStart) {
+      return seg.rect;
+    }
+  }
+  return {};
+}
+
+RECT MenuBar::SpotlightRect() const {
+  for (const BarSegment& seg : layout_.last().segments) {
+    if (seg.kind == SegmentKind::kSpotlight) {
       return seg.rect;
     }
   }
@@ -1301,14 +1336,23 @@ bool MenuBar::HitStart(POINT client) const {
   return PtInRect(&start, client) != FALSE;
 }
 
-void MenuBar::UpdateStartChrome(POINT client) {
+bool MenuBar::HitSpotlight(POINT client) const {
+  const RECT rect = SpotlightRect();
+  return PtInRect(&rect, client) != FALSE;
+}
+
+void MenuBar::UpdateChrome(POINT client) {
   ArmMouseLeave();
-  const bool hot = HitStart(client);
-  if (start_hot_ == hot) {
-    return;
+  const bool start_hot = HitStart(client);
+  if (start_hot_ != start_hot) {
+    start_hot_ = start_hot;
+    InvalidateArea(hwnd_, StartRect());
   }
-  start_hot_ = hot;
-  InvalidateArea(hwnd_, StartRect());
+  const bool spotlight_hot = HitSpotlight(client);
+  if (spotlight_hot_ != spotlight_hot) {
+    spotlight_hot_ = spotlight_hot;
+    InvalidateArea(hwnd_, SpotlightRect());
+  }
 }
 
 void MenuBar::ArmMouseLeave() {

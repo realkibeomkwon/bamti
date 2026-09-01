@@ -168,7 +168,12 @@ const BarLayoutResult& BarLayout::Compute(const RECT& client, const std::wstring
   std::vector<BarSegment> left;
   left.push_back(std::move(start));
 
-  float left_limit = kStartPadLeftDip + kStartHitWidthDip + kItemGapDip;
+  BarSegment search;
+  search.kind = SegmentKind::kSpotlight;
+  search.rect = PixelRect(client, kStartPadLeftDip + kStartHitWidthDip, kStartHitWidthDip);
+  left.push_back(std::move(search));
+
+  float left_limit = kStartPadLeftDip + kStartHitWidthDip + kStartHitWidthDip + kItemGapDip;
   if (!warning_text.empty()) {
     if (CacheEntry* warn = GetOrCreate(warning_text)) {
       BarSegment seg;

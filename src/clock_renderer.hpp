@@ -24,12 +24,15 @@ class ClockRenderer {
   bool Initialize();
   void SetDpi(UINT dpi);
   bool Draw(HDC hdc, const RECT& client, const RECT& dirty, bool dark, const BarLayoutResult& layout,
-            BarLayout* text, bool start_hot, bool start_pressed, DrawTimings* timings = nullptr);
+            BarLayout* text, bool start_hot, bool start_pressed, bool spotlight_hot, bool spotlight_pressed,
+            DrawTimings* timings = nullptr);
   std::wstring CurrentTimeText() const;
 
  private:
   void DrawStartButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed, float height_dip,
                        const RECT& client, const RECT& start_rect);
+  void DrawSpotlightButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed, float height_dip,
+                           const RECT& client, const RECT& rect);
   void DrawVectorIcon(ID2D1SolidColorBrush* brush, const StatusIcon& icon, const D2D1_RECT_F& box, bool dark);
   bool EnsureLogo(float size_dip);
   bool EnsureStroke();
