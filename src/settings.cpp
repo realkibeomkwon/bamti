@@ -136,6 +136,8 @@ std::string FormatSettings(const WidgetSettings& s, std::string_view extra_topba
   out += s.network ? "true" : "false";
   out += ", \"volume\": ";
   out += s.volume ? "true" : "false";
+  out += ", \"control_center\": ";
+  out += s.control_center ? "true" : "false";
   out += ", \"widget_board_button\": ";
   out += s.widget_board ? "true" : "false";
   out += ", \"tray_mirror\": ";
@@ -232,6 +234,7 @@ WidgetSettings LoadWidgetSettings() {
   s.cpu = json::GetBool(*widgets, "cpu").value_or(false);
   s.network = json::GetBool(*widgets, "network").value_or(false);
   s.volume = json::GetBool(*widgets, "volume").value_or(false);
+  s.control_center = json::GetBool(*widgets, "control_center").value_or(false);
   if (const auto board = json::GetBool(*widgets, "widget_board_button")) {
     s.widget_board = *board;
   } else {

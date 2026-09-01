@@ -9,6 +9,7 @@
 #include "status_item.hpp"
 #include "status_panel.hpp"
 #include "status_registry.hpp"
+#include "control_center.hpp"
 #include "taskbar_controller.hpp"
 #include "tray_mirror.hpp"
 #include "widgets/builtin.hpp"
@@ -62,14 +63,17 @@ class MenuBar {
   bool CreateTooltip();
   RECT StartRect() const;
   RECT SpotlightRect() const;
+  RECT ControlCenterRect() const;
   RECT ClockRect() const;
   std::optional<StatusHit> HitTest(POINT client) const;
   bool HitStart(POINT client) const;
   bool HitSpotlight(POINT client) const;
+  bool HitControlCenter(POINT client) const;
   void UpdateChrome(POINT client);
   void ArmMouseLeave();
   void ToggleStartMenu(bool from_keyboard = false);
   void ToggleSpotlight();
+  void ToggleControlCenter();
   void OpenStatusPanel(const StatusHit& hit);
   void OpenOverflow();
   void RefreshOpenPanel();
@@ -103,6 +107,8 @@ class MenuBar {
   bool start_pressed_ = false;
   bool spotlight_hot_ = false;
   bool spotlight_pressed_ = false;
+  bool cc_hot_ = false;
+  bool cc_pressed_ = false;
   bool repaint_armed_ = false;
   struct PerfAcc {
     unsigned n = 0;
@@ -146,6 +152,8 @@ class MenuBar {
   PopupSurface status_popup_;
   std::unique_ptr<StatusPanelContent> status_panel_;
   std::unique_ptr<OverflowContent> overflow_panel_;
+  std::unique_ptr<ControlCenterContent> cc_panel_;
+  bool cc_open_ = false;
   std::wstring tooltip_text_;
   std::string open_panel_id_;
   uint64_t open_panel_revision_ = 0;

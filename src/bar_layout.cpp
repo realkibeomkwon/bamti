@@ -152,8 +152,8 @@ IDWriteTextLayout* BarLayout::LayoutFor(const std::wstring& text) {
 }
 
 const BarLayoutResult& BarLayout::Compute(const RECT& client, const std::wstring& clock_text,
-                                          const std::wstring& warning_text,
-                                          const std::vector<StatusItem>& items) {
+                                          const std::wstring& warning_text, const std::vector<StatusItem>& items,
+                                          bool show_control_center) {
   last_ = BarLayoutResult{};
   last_.dpi = dpi_;
   last_.client = client;
@@ -196,6 +196,15 @@ const BarLayoutResult& BarLayout::Compute(const RECT& client, const std::wstring
       clock.rect = PixelRect(client, x, width);
       cursor = x - kStatusClockGapDip;
     }
+  }
+
+  BarSegment control;
+  if (show_control_center) {
+    const float width = kStartHitWidthDip;
+    const float x = cursor - width;
+    control.kind = SegmentKind::kControlCenter;
+    control.rect = PixelRect(client, x, width);
+    cursor = x - kItemGapDip;
   }
 
   const std::vector<StatusItem>& ordered = items;
@@ -293,6 +302,9 @@ const BarLayoutResult& BarLayout::Compute(const RECT& client, const std::wstring
             cursor -= static_cast<float>(clock.rect.right - clock.rect.left) * 96.0f / static_cast<float>(dpi_) +
                       kStatusClockGapDip;
           }
+          if (show_control_center) {
+            cursor -= kStartHitWidthDip + kItemGapDip;
+          }
         }
       }
     }
@@ -304,6 +316,9 @@ const BarLayoutResult& BarLayout::Compute(const RECT& client, const std::wstring
   }
   for (auto it = status.rbegin(); it != status.rend(); ++it) {
     last_.segments.push_back(std::move(*it));
+  }
+  if (control.kind == SegmentKind::kControlCenter) {
+    last_.segments.push_back(std::move(control));
   }
   if (!clock.text.empty() || clock.rect.right > clock.rect.left) {
     last_.segments.push_back(std::move(clock));

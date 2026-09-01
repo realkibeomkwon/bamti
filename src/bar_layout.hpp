@@ -11,7 +11,7 @@
 
 namespace bamti {
 
-enum class SegmentKind { kStart, kSpotlight, kWarning, kStatus, kOverflow, kClock };
+enum class SegmentKind { kStart, kSpotlight, kWarning, kStatus, kOverflow, kControlCenter, kClock };
 
 struct BarSegment {
   SegmentKind kind = SegmentKind::kStatus;
@@ -38,7 +38,8 @@ class BarLayout {
   void SetDpi(UINT dpi);
 
   const BarLayoutResult& Compute(const RECT& client, const std::wstring& clock_text,
-                                 const std::wstring& warning_text, const std::vector<StatusItem>& items);
+                                 const std::wstring& warning_text, const std::vector<StatusItem>& items,
+                                 bool show_control_center);
 
   IDWriteTextLayout* LayoutFor(const std::wstring& text);
 

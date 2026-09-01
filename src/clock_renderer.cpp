@@ -21,6 +21,7 @@ constexpr float kStartHoverRadiusDip = 6.0f;
 constexpr float kLogoView = 11.5f;
 constexpr wchar_t kFluentFont[] = L"Segoe Fluent Icons";
 constexpr wchar_t kSearchFluent[] = L"\xE721";
+constexpr wchar_t kCcFluent[] = L"\xE9E9";
 constexpr wchar_t kSearchFallback[] = L"\u2315";
 constexpr wchar_t kFallbackFont[] = L"Segoe UI";
 constexpr wchar_t kVolumeMuteFluent[] = L"\xE74F";
@@ -209,6 +210,11 @@ void DrawCpuRing(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, ID2D1Stroke
 }
 
 }  // namespace
+
+void DrawBatteryIcon(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const D2D1_RECT_F& box, bool dark, float level,
+                     bool charging) {
+  DrawBattery(rt, brush, box, dark, level, charging);
+}
 
 bool ClockRenderer::Initialize() {
   if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2d_.ReleaseAndGetAddressOf()))) {
@@ -431,6 +437,26 @@ void ClockRenderer::DrawSpotlightButton(ID2D1SolidColorBrush* brush, bool dark, 
   DrawFluentOrFallback(brush, D2D1::RectF(x, y, x + icon, y + icon), kSearchFluent, kSearchFallback);
 }
 
+void ClockRenderer::DrawControlCenterButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed,
+                                            float height_dip, const RECT& client, const RECT& rect) {
+  const float px = static_cast<float>(dpi_) / 96.0f;
+  const float hit_left = static_cast<float>(rect.left - client.left) / px;
+  const float hit_right = static_cast<float>(rect.right - client.left) / px;
+  if (hot || pressed) {
+    brush->SetColor(MenuItemHoverFill(dark, pressed));
+    const D2D1_ROUNDED_RECT hover{
+        D2D1::RectF(hit_left + kStartHoverInsetXDip, kStartHoverInsetYDip, hit_right - kStartHoverInsetXDip,
+                    height_dip - kStartHoverInsetYDip),
+        kStartHoverRadiusDip, kStartHoverRadiusDip};
+    rt_->FillRoundedRectangle(hover, brush);
+  }
+  brush->SetColor(ClockTextColor(dark));
+  const float icon = 16.0f;
+  const float x = hit_left + (kStartHitWidthDip - icon) * 0.5f;
+  const float y = (height_dip - icon) * 0.5f;
+  DrawFluentOrFallback(brush, D2D1::RectF(x, y, x + icon, y + icon), kCcFluent, L"\u2630");
+}
+
 std::wstring ClockRenderer::CurrentTimeText() const {
   SYSTEMTIME local{};
   GetLocalTime(&local);
@@ -453,7 +479,7 @@ std::wstring ClockRenderer::CurrentTimeText() const {
 
 bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool dark, const BarLayoutResult& layout,
                          BarLayout* text, bool start_hot, bool start_pressed, bool spotlight_hot, bool spotlight_pressed,
-                         DrawTimings* timings) {
+                         bool cc_hot, bool cc_pressed, DrawTimings* timings) {
   if (!d2d_ || !hdc || text == nullptr) {
     return false;
   }
@@ -523,6 +549,10 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
     }
     if (seg.kind == SegmentKind::kSpotlight) {
       DrawSpotlightButton(brush.Get(), dark, spotlight_hot, spotlight_pressed, height_dip, client, seg.rect);
+      continue;
+    }
+    if (seg.kind == SegmentKind::kControlCenter) {
+      DrawControlCenterButton(brush.Get(), dark, cc_hot, cc_pressed, height_dip, client, seg.rect);
       continue;
     }
     const bool bitmap =

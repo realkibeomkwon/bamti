@@ -25,7 +25,7 @@ class ClockRenderer {
   void SetDpi(UINT dpi);
   bool Draw(HDC hdc, const RECT& client, const RECT& dirty, bool dark, const BarLayoutResult& layout,
             BarLayout* text, bool start_hot, bool start_pressed, bool spotlight_hot, bool spotlight_pressed,
-            DrawTimings* timings = nullptr);
+            bool cc_hot, bool cc_pressed, DrawTimings* timings = nullptr);
   std::wstring CurrentTimeText() const;
 
  private:
@@ -33,6 +33,8 @@ class ClockRenderer {
                        const RECT& client, const RECT& start_rect);
   void DrawSpotlightButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed, float height_dip,
                            const RECT& client, const RECT& rect);
+  void DrawControlCenterButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed, float height_dip,
+                               const RECT& client, const RECT& rect);
   void DrawVectorIcon(ID2D1SolidColorBrush* brush, const StatusIcon& icon, const D2D1_RECT_F& box, bool dark);
   bool EnsureLogo(float size_dip);
   bool EnsureStroke();
@@ -54,5 +56,8 @@ class ClockRenderer {
   float logo_geom_size_ = 0.0f;
   bool fluent_missing_logged_ = false;
 };
+
+void DrawBatteryIcon(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const D2D1_RECT_F& box, bool dark, float level,
+                     bool charging);
 
 }  // namespace bamti
