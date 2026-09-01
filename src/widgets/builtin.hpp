@@ -72,6 +72,7 @@ class BuiltinWidgets : public StatusSource {
   std::optional<float> pending_level_;
   std::optional<bool> pending_mute_;
   std::unique_ptr<VolumeControl> volume_;
+  bool logged_notify_latency_ = false;
   ULONGLONG battery_due_ = 0;
   ULONGLONG cpu_due_ = 0;
   ULONGLONG net_due_ = 0;

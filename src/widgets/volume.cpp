@@ -31,13 +31,117 @@ double ElapsedMs(const LARGE_INTEGER& freq, const LARGE_INTEGER& t0, const LARGE
   return static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
 }
 
+// 우리가 낸 변경임을 알아보기 위한 표식이다. New-Guid: 8b1318eb-4c3e-461b-a46b-44bd420555ea
+constexpr GUID kVolumeEventContext = {0x8b1318eb, 0x4c3e, 0x461b, {0xa4, 0x6b, 0x44, 0xbd, 0x42, 0x05, 0x55, 0xea}};
+
+class VolumeNotify final : public IAudioEndpointVolumeCallback {
+ public:
+  VolumeNotify(HANDLE wake_src, std::shared_ptr<std::atomic<bool>> dirty,
+               std::shared_ptr<std::atomic<LONGLONG>> notify_qpc)
+      : dirty_(std::move(dirty)), notify_qpc_(std::move(notify_qpc)) {
+    if (wake_src == nullptr) {
+      return;
+    }
+    if (!DuplicateHandle(GetCurrentProcess(), wake_src, GetCurrentProcess(), &wake_, 0, FALSE,
+                         DUPLICATE_SAME_ACCESS)) {
+      dup_err_ = GetLastError();
+      wake_ = nullptr;
+    }
+  }
+
+  VolumeNotify(const VolumeNotify&) = delete;
+  VolumeNotify& operator=(const VolumeNotify&) = delete;
+
+  bool has_wake() const { return wake_ != nullptr; }
+  DWORD dup_err() const { return dup_err_; }
+
+  ULONG STDMETHODCALLTYPE AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&ref_)); }
+
+  ULONG STDMETHODCALLTYPE Release() override {
+    const LONG n = InterlockedDecrement(&ref_);
+    if (n == 0) {
+      if (wake_ != nullptr) {
+        CloseHandle(wake_);
+        wake_ = nullptr;
+      }
+      delete this;
+    }
+    return static_cast<ULONG>(n);
+  }
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+    if (ppv == nullptr) {
+      return E_POINTER;
+    }
+    if (riid == IID_IUnknown || riid == __uuidof(IAudioEndpointVolumeCallback)) {
+      *ppv = static_cast<IAudioEndpointVolumeCallback*>(this);
+      AddRef();
+      return S_OK;
+    }
+    *ppv = nullptr;
+    return E_NOINTERFACE;
+  }
+
+  HRESULT STDMETHODCALLTYPE OnNotify(PAUDIO_VOLUME_NOTIFICATION_DATA data) override {
+    AddRef();
+    if (data != nullptr && data->guidEventContext != kVolumeEventContext) {
+      LARGE_INTEGER qpc{};
+      QueryPerformanceCounter(&qpc);
+      if (notify_qpc_) {
+        notify_qpc_->store(qpc.QuadPart, std::memory_order_relaxed);
+      }
+      if (dirty_) {
+        dirty_->store(true, std::memory_order_release);
+      }
+      if (wake_ != nullptr) {
+        SetEvent(wake_);
+      }
+    }
+    Release();
+    return S_OK;
+  }
+
+ private:
+  HANDLE wake_ = nullptr;
+  DWORD dup_err_ = 0;
+  std::shared_ptr<std::atomic<bool>> dirty_;
+  std::shared_ptr<std::atomic<LONGLONG>> notify_qpc_;
+  LONG ref_ = 1;
+};
+
 }  // namespace
+
+VolumeControl::VolumeControl()
+    : dirty_(std::make_shared<std::atomic<bool>>(false)),
+      notify_qpc_(std::make_shared<std::atomic<LONGLONG>>(0)) {}
 
 VolumeControl::~VolumeControl() {
   Release();
 }
 
+void VolumeControl::BindWake(HANDLE wake) {
+  wake_event_ = wake;
+}
+
+bool VolumeControl::TakeNotifyDirty() {
+  if (!dirty_) {
+    return false;
+  }
+  return dirty_->exchange(false, std::memory_order_acq_rel);
+}
+
+LONGLONG VolumeControl::TakeNotifyQpc() {
+  if (!notify_qpc_) {
+    return 0;
+  }
+  return notify_qpc_->exchange(0, std::memory_order_relaxed);
+}
+
 void VolumeControl::Release() {
+  if (volume_ && notify_) {
+    volume_->UnregisterControlChangeNotify(notify_.Get());
+  }
+  notify_.Reset();
   volume_.Reset();
   enumerator_.Reset();
   device_.clear();
@@ -100,6 +204,30 @@ bool VolumeControl::Ensure() {
       }
       PropVariantClear(&name);
     }
+    if (!notify_ && wake_event_ != nullptr && dirty_ && notify_qpc_) {
+      auto* cb = new VolumeNotify(wake_event_, dirty_, notify_qpc_);
+      if (!cb->has_wake()) {
+        const DWORD dup_err = cb->dup_err();
+        cb->Release();
+        if (!logged_notify_fail_) {
+          logged_notify_fail_ = true;
+          Log(L"widget", L"volume notify duplicate wake failed err=%lu", dup_err);
+        }
+      } else {
+        hr = volume_->RegisterControlChangeNotify(cb);
+        if (FAILED(hr)) {
+          cb->Release();
+          if (!logged_notify_fail_) {
+            logged_notify_fail_ = true;
+            Log(L"widget", L"volume notify register failed hr=0x%08lx", static_cast<unsigned long>(hr));
+          }
+        } else {
+          notify_ = cb;
+          cb->Release();
+          logged_notify_fail_ = false;
+        }
+      }
+    }
     QueryPerformanceCounter(&t1);
     if (!logged_cost_) {
       logged_cost_ = true;
@@ -146,7 +274,7 @@ bool VolumeControl::SetLevel(float level) {
     return false;
   }
   const float want = ClampUnit(level);
-  const HRESULT hr = volume_->SetMasterVolumeLevelScalar(want, nullptr);
+  const HRESULT hr = volume_->SetMasterVolumeLevelScalar(want, &kVolumeEventContext);
   if (FAILED(hr)) {
     Release();
     return false;
@@ -164,7 +292,7 @@ bool VolumeControl::SetMute(bool muted) {
   if (!Ensure() || !volume_) {
     return false;
   }
-  const HRESULT hr = volume_->SetMute(muted ? TRUE : FALSE, nullptr);
+  const HRESULT hr = volume_->SetMute(muted ? TRUE : FALSE, &kVolumeEventContext);
   if (FAILED(hr)) {
     Release();
     return false;

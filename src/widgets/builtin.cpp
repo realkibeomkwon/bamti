@@ -410,6 +410,7 @@ BuiltinWidgets::BuiltinWidgets() {
   stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   wake_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   save_idle_event_ = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+  volume_->BindWake(wake_event_);
 }
 
 BuiltinWidgets::~BuiltinWidgets() {
@@ -1223,6 +1224,8 @@ void BuiltinWidgets::WorkerLoop() {
     bool do_power = false;
     WidgetSettings s{};
     bool active = false;
+    bool volume_notify = false;
+    LONGLONG notify_qpc = 0;
     {
       std::lock_guard lock(mu_);
       acts.swap(actions_);
@@ -1234,6 +1237,23 @@ void BuiltinWidgets::WorkerLoop() {
       power_pending_ = false;
       s = settings_;
       active = active_;
+      if (volume_->TakeNotifyDirty()) {
+        volume_due_ = 0;
+        volume_notify = true;
+        notify_qpc = volume_->TakeNotifyQpc();
+      }
+    }
+    if (volume_notify && notify_qpc != 0 && !logged_notify_latency_) {
+      LARGE_INTEGER freq{};
+      LARGE_INTEGER now_qpc{};
+      QueryPerformanceFrequency(&freq);
+      QueryPerformanceCounter(&now_qpc);
+      double ms = 0.0;
+      if (freq.QuadPart != 0) {
+        ms = static_cast<double>(now_qpc.QuadPart - notify_qpc) * 1000.0 / static_cast<double>(freq.QuadPart);
+      }
+      logged_notify_latency_ = true;
+      Log(L"widget", L"volume notify -> sample %.2f ms", ms);
     }
 
     for (const PendingAction action : acts) {

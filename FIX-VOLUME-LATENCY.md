@@ -195,3 +195,20 @@ perf: 볼륨 변화를 폴링이 아니라 알림으로 받는다
 ```
 
 측정 기록은 커밋 본문이나 별도 문서에 남기십시오.
+
+---
+
+## 9. 측정 기록
+
+2026-09-01, Release `build/Release/bamti.exe`. 키보드 볼륨 키(`VK_VOLUME_UP`)로 시스템 볼륨을 바꿨습니다.
+
+| 항목 | 값 |
+|---|---|
+| `volume notify -> sample` | **0.04 ms** (`bamti.log` 2026-09-01 21:18:35.711) |
+| 5ms 초과 여부 | 아니오 |
+| `volume read took` | 0.73 ms (같은 세션, 21:17:46.156) |
+| `kVolumePeriodMs` | 1000 (변경 없음) |
+| `kNotifyCoalesceMs` | 50 (변경 없음) |
+| 종료 | `worker stop` 21:26:33.804, 프로세스 잔류 없음 |
+
+이벤트 컨텍스트 GUID는 `New-Guid`로 만든 `8b1318eb-4c3e-461b-a46b-44bd420555ea`입니다.
