@@ -26,6 +26,7 @@ struct TrayIconInfo {
   UINT callback_message = 0;
   UINT version = 0;
   GUID guid_item{};  // 등록에 GUID가 쓰였을 때만 채운다. UIA 백엔드는 채우지 않는다.
+  std::wstring owner_exe;  // 가로채기 백엔드만 채운다. UIA 백엔드는 비워 둔다.
 };
 
 class TrayBackend {

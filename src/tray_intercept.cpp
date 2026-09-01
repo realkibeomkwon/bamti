@@ -1051,6 +1051,9 @@ class TrayBackendIntercept final : public TrayBackend {
           }
           return;
         }
+        if (created_now || slot->info.owner != owner) {
+          slot->info.owner_exe = OwnerExeName(owner);
+        }
         slot->owner = owner;
         slot->info.owner = owner;
         slot->info.uid = data.uid;

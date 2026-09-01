@@ -57,43 +57,93 @@ Microsoft::WRL::ComPtr<ID2D1Bitmap> ScaleWicToBitmap(ID2D1RenderTarget* rt, IWIC
   return out;
 }
 
-bool IsBrightMonochrome(const BgraImage& image) {
+struct MonoStats {
   int ink = 0;
   int bright = 0;
   int colorful = 0;
+  int gray = 0;
+  double mean_lum = 0;
+  double mean_sat = 0;
+  double gray_mean_lum = 0;
+};
+
+MonoStats MeasureMono(const BgraImage& image) {
+  MonoStats s;
+  double lum_w = 0;
+  double sat_w = 0;
+  double a_sum = 0;
+  double gray_lum_w = 0;
+  double gray_a_sum = 0;
   const size_t n = image.pixels.size() / 4;
   for (size_t i = 0; i < n; ++i) {
     const int b = image.pixels[i * 4 + 0];
     const int g = image.pixels[i * 4 + 1];
     const int r = image.pixels[i * 4 + 2];
     const int a = image.pixels[i * 4 + 3];
+    if (a <= 0) {
+      continue;
+    }
+    const int mx = (std::max)(r, (std::max)(g, b));
+    const int mn = (std::min)(r, (std::min)(g, b));
+    const int sat = mx - mn;
+    lum_w += static_cast<double>(mx) * a;
+    sat_w += static_cast<double>(sat) * a;
+    a_sum += a;
     if (a < 160) {
       continue;
     }
-    ++ink;
-    const int mx = (std::max)(r, (std::max)(g, b));
-    const int mn = (std::min)(r, (std::min)(g, b));
-    if (mx - mn > 28) {
-      ++colorful;
-      continue;
-    }
-    if (mn >= 160) {
-      ++bright;
+    ++s.ink;
+    if (sat > 28) {
+      ++s.colorful;
+    } else {
+      ++s.gray;
+      gray_lum_w += static_cast<double>(mx) * a;
+      gray_a_sum += a;
+      if (mn >= 160) {
+        ++s.bright;
+      }
     }
   }
-  if (ink < 8 || colorful > 0) {
-    return false;
+  if (a_sum > 0) {
+    s.mean_lum = lum_w / a_sum;
+    s.mean_sat = sat_w / a_sum;
   }
-  return bright * 10 >= ink * 9;
+  if (gray_a_sum > 0) {
+    s.gray_mean_lum = gray_lum_w / gray_a_sum;
+  }
+  return s;
 }
 
-void RecolorKeepAlpha(BgraImage& image, D2D1_COLOR_F color) {
+bool IsBrightMonochrome(const MonoStats& s) {
+  // 불투명 회색 화소가 충분히 밝고 전체의 7할 이상이면 단색 아이콘으로 본다.
+  // 주황 배지 같은 채색 화소가 조금 있어도 포기하지 않는다.
+  if (s.gray < 8) {
+    return false;
+  }
+  if (s.gray_mean_lum < 200.0) {
+    return false;
+  }
+  if (s.gray * 100 < s.ink * 70) {
+    return false;
+  }
+  return true;
+}
+
+void RecolorGrayKeepAlpha(BgraImage& image, D2D1_COLOR_F color) {
   const std::uint8_t cr = static_cast<std::uint8_t>(color.r * 255.0f + 0.5f);
   const std::uint8_t cg = static_cast<std::uint8_t>(color.g * 255.0f + 0.5f);
   const std::uint8_t cb = static_cast<std::uint8_t>(color.b * 255.0f + 0.5f);
   const size_t n = image.pixels.size() / 4;
   for (size_t i = 0; i < n; ++i) {
     if (image.pixels[i * 4 + 3] == 0) {
+      continue;
+    }
+    const int b = image.pixels[i * 4 + 0];
+    const int g = image.pixels[i * 4 + 1];
+    const int r = image.pixels[i * 4 + 2];
+    const int mx = (std::max)(r, (std::max)(g, b));
+    const int mn = (std::min)(r, (std::min)(g, b));
+    if (mx - mn > 28) {
       continue;
     }
     image.pixels[i * 4 + 0] = cb;
@@ -554,8 +604,14 @@ Microsoft::WRL::ComPtr<ID2D1Bitmap> IconCache::Decode(const StatusIcon& icon, in
       Log(L"icon", L"png decode failed");
       return out;
     }
-    if (IsBrightMonochrome(image)) {
-      RecolorKeepAlpha(image, ClockTextColor(dark_));
+    const MonoStats mono = MeasureMono(image);
+    const bool recolor = IsBrightMonochrome(mono);
+    Log(L"icon",
+        L"mono key=%llu ink=%d bright=%d colorful=%d gray=%d mean_lum=%.0f mean_sat=%.0f gray_lum=%.0f result=%d",
+        static_cast<unsigned long long>(icon.cache_key), mono.ink, mono.bright, mono.colorful, mono.gray, mono.mean_lum,
+        mono.mean_sat, mono.gray_mean_lum, recolor ? 1 : 0);
+    if (recolor) {
+      RecolorGrayKeepAlpha(image, ClockTextColor(dark_));
     }
     Microsoft::WRL::ComPtr<IWICBitmap> mem;
     if (FAILED(wic->CreateBitmapFromMemory(w, h, GUID_WICPixelFormat32bppBGRA, w * 4,

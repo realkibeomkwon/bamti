@@ -103,6 +103,8 @@ constexpr long kFloodMaxEnums = 8;
 constexpr ULONGLONG kFloodRetryMs = 300000;
 constexpr wchar_t kClockClass[] = L"SystemTray.OmniButton";
 constexpr wchar_t kShowDesktopClass[] = L"SystemTray.ShowDesktopButton";
+constexpr wchar_t kQuickSettingsClass[] = L"SystemTray.AccentButton";
+constexpr wchar_t kQuickVolumeClass[] = L"SystemTray.OmniButtonCenter";
 constexpr wchar_t kOverflowButtonClass[] = L"SystemTray.NormalButton";
 
 std::wstring Truncate(std::wstring text, size_t max_chars) {
@@ -600,6 +602,14 @@ bool TrayMirror::Include(const TrayIconInfo& icon, int overflow_order, const Wid
     return false;
   }
   if (icon.class_name == kShowDesktopClass) {
+    return false;
+  }
+  if (icon.class_name == kQuickSettingsClass || icon.class_name == kQuickVolumeClass) {
+    return false;
+  }
+  // explorer가 콜백 없이 등록한 옛 시스템 아이콘(볼륨, 전원)은 누를 수 없다.
+  // 같은 기능을 내장 위젯과 제어 센터가 이미 담당한다.
+  if (icon.callback_message == 0 && _wcsicmp(icon.owner_exe.c_str(), L"explorer.exe") == 0) {
     return false;
   }
   if (overflow_order >= 0 && icon.order == overflow_order) {
