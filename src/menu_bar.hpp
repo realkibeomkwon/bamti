@@ -147,6 +147,7 @@ class MenuBar {
   PerfAcc perf_end_;
   PerfAcc perf_bpbegin_;
   PerfAcc perf_bpend_;
+  PerfAcc perf_other_;
   BarLayout layout_;
   ClockRenderer clock_;
   PipeServer pipe_;

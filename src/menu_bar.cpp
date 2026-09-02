@@ -1104,6 +1104,9 @@ void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, con
   perf_end_.Add(draw.end_ms);
   perf_bpbegin_.Add(bpbegin_ms);
   perf_bpend_.Add(bpend_ms);
+  const double other_ms =
+      draw_ms - (draw.bind_ms + draw.brush_ms + draw.begin_ms + draw.draw_ms + draw.end_ms + bpbegin_ms + bpend_ms);
+  perf_other_.Add(other_ms);
   ++perf_frames_;
   if (perf_frames_ % 100 != 0) {
     return;
@@ -1119,6 +1122,7 @@ void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, con
     }
   };
   auto avg = [](const PerfAcc& acc) { return acc.n == 0 ? 0.0 : acc.sum / static_cast<double>(acc.n); };
+  auto mx = [](const PerfAcc& acc) { return acc.maxv; };
   wchar_t full_s[64]{};
   wchar_t seg_s[64]{};
   wchar_t compute_s[64]{};
@@ -1128,9 +1132,12 @@ void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, con
   Log(L"perf", L"bar %s %s %s segments=%u overflow=%u%s", full_s, seg_s, compute_s,
       static_cast<unsigned>(last.segments.size()), static_cast<unsigned>(last.overflow.size()),
       perf_cold_ ? L" cold" : L"");
-  Log(L"perf", L"draw bind=%.2f brush=%.2f begin=%.2f draw=%.2f end=%.2f bpbegin=%.2f bpend=%.2f (ms, avg)",
-      avg(perf_bind_), avg(perf_brush_), avg(perf_begin_), avg(perf_draw_), avg(perf_end_), avg(perf_bpbegin_),
-      avg(perf_bpend_));
+  Log(L"perf",
+      L"draw bind=%.2f/%.1f brush=%.2f/%.1f begin=%.2f/%.1f draw=%.2f/%.1f end=%.2f/%.1f "
+      L"bpbegin=%.2f/%.1f bpend=%.2f/%.1f other=%.2f/%.1f (ms, avg/max)",
+      avg(perf_bind_), mx(perf_bind_), avg(perf_brush_), mx(perf_brush_), avg(perf_begin_), mx(perf_begin_),
+      avg(perf_draw_), mx(perf_draw_), avg(perf_end_), mx(perf_end_), avg(perf_bpbegin_), mx(perf_bpbegin_),
+      avg(perf_bpend_), mx(perf_bpend_), avg(perf_other_), mx(perf_other_));
   perf_full_.Reset();
   perf_seg_.Reset();
   perf_compute_.Reset();
@@ -1141,6 +1148,7 @@ void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, con
   perf_end_.Reset();
   perf_bpbegin_.Reset();
   perf_bpend_.Reset();
+  perf_other_.Reset();
   perf_cold_ = false;
 }
 
