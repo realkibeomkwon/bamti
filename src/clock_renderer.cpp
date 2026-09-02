@@ -15,9 +15,10 @@ namespace {
 
 constexpr float kStartHitWidthDip = 34.0f;
 constexpr float kStartLogoDip = 20.0f;
-constexpr float kStartHoverInsetXDip = 2.0f;
-constexpr float kStartHoverInsetYDip = 4.0f;
-constexpr float kStartHoverRadiusDip = 6.0f;
+constexpr float kStartHoverInsetXDip = 3.0f;
+constexpr float kStartHoverInsetYDip = 3.0f;
+constexpr float kStartHoverRadiusDip = static_cast<float>(kCornerRadiusDip);
+constexpr float kBatteryIconDip = 24.0f;
 constexpr float kLogoView = 11.5f;
 constexpr wchar_t kFluentFont[] = L"Segoe Fluent Icons";
 constexpr wchar_t kCcFluent[] = L"\xE9E9";
@@ -28,8 +29,10 @@ constexpr wchar_t kVolume1Fluent[] = L"\xE993";
 constexpr wchar_t kVolume2Fluent[] = L"\xE994";
 constexpr wchar_t kVolume3Fluent[] = L"\xE995";
 constexpr wchar_t kNetworkFluent[] = L"\xE839";
+constexpr wchar_t kWifiFluent[] = L"\xE701";
 constexpr wchar_t kVolumeFallback[] = L"\x266A";
 constexpr wchar_t kNetFallback[] = L"\x21C5";
+constexpr wchar_t kWifiFallback[] = L"Wi";
 
 float ClampUnit(float value) {
   if (!std::isfinite(value) || value < 0.0f) {
@@ -119,37 +122,89 @@ void AddRoundCornerTile(ID2D1GeometrySink* sink, float x, float y, float w, floa
   sink->EndFigure(D2D1_FIGURE_END_CLOSED);
 }
 
+void AddRoundedPolygon(ID2D1GeometrySink* sink, const D2D1_POINT_2F* pts, int n, float radius) {
+  if (sink == nullptr || pts == nullptr || n < 3) {
+    return;
+  }
+  auto len = [](D2D1_POINT_2F a, D2D1_POINT_2F b) {
+    const float dx = b.x - a.x;
+    const float dy = b.y - a.y;
+    return std::sqrt(dx * dx + dy * dy);
+  };
+  for (int i = 0; i < n; ++i) {
+    const D2D1_POINT_2F prev = pts[(i + n - 1) % n];
+    const D2D1_POINT_2F cur = pts[i];
+    const D2D1_POINT_2F next = pts[(i + 1) % n];
+    const float d0 = len(cur, prev);
+    const float d1 = len(cur, next);
+    const float r0 = (std::min)(radius, d0 * 0.42f);
+    const float r1 = (std::min)(radius, d1 * 0.42f);
+    const D2D1_POINT_2F p0 =
+        d0 > 0.001f ? D2D1::Point2F(cur.x + (prev.x - cur.x) * (r0 / d0), cur.y + (prev.y - cur.y) * (r0 / d0)) : cur;
+    const D2D1_POINT_2F p1 =
+        d1 > 0.001f ? D2D1::Point2F(cur.x + (next.x - cur.x) * (r1 / d1), cur.y + (next.y - cur.y) * (r1 / d1)) : cur;
+    if (i == 0) {
+      sink->BeginFigure(p0, D2D1_FIGURE_BEGIN_FILLED);
+    } else {
+      sink->AddLine(p0);
+    }
+    sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(cur, p1));
+  }
+  sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+}
+
 void DrawBattery(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const D2D1_RECT_F& box, bool dark,
                  float level, bool charging) {
-  const float ox = box.left;
-  const float oy = box.top;
-  const float body_l = ox + 0.5f;
-  const float body_t = oy + 4.5f;
-  const float body_r = ox + 13.5f;
-  const float body_b = oy + 11.5f;
-  const D2D1_ROUNDED_RECT body{D2D1::RectF(body_l, body_t, body_r, body_b), 1.5f, 1.5f};
-  const D2D1_ROUNDED_RECT tip{D2D1::RectF(ox + 14.0f, oy + 6.75f, ox + 15.5f, oy + 9.25f), 0.75f, 0.75f};
-  brush->SetColor(ClockTextColor(dark));
-  rt->DrawRoundedRectangle(body, brush, 1.0f);
+  const float w = box.right - box.left;
+  const float h = box.bottom - box.top;
+  if (w < 4.0f || h < 4.0f) {
+    return;
+  }
+  const D2D1_COLOR_F outline = ClockTextColor(dark);
+  const float stroke = 1.0f;
+  const float nub_w = (std::max)(1.25f, w * 0.07f);
+  const float body_h = (std::min)(h * 0.68f, w * 0.48f);
+  const float body_w = w - nub_w - stroke;
+  const float nub_h = body_h * 0.38f;
+  const float body_l = box.left + (w - body_w - nub_w) * 0.5f;
+  const float body_t = box.top + (h - body_h) * 0.5f;
+  const float body_r = body_l + body_w;
+  const float body_b = body_t + body_h;
+  const float radius = (std::min)(2.0f, body_h * 0.20f);
+  const D2D1_ROUNDED_RECT body{D2D1::RectF(body_l, body_t, body_r, body_b), radius, radius};
+  const D2D1_ROUNDED_RECT tip{
+      D2D1::RectF(body_r, body_t + (body_h - nub_h) * 0.5f, body_r + nub_w, body_t + (body_h + nub_h) * 0.5f),
+      nub_w * 0.45f, nub_w * 0.45f};
+  brush->SetColor(outline);
+  rt->DrawRoundedRectangle(body, brush, stroke);
   rt->FillRoundedRectangle(tip, brush);
 
-  const float inner_l = body_l + 1.0f;
-  const float inner_t = body_t + 1.0f;
-  const float inner_r = body_r - 1.0f;
-  const float inner_b = body_b - 1.0f;
+  const float inset = stroke + 0.85f;
+  const float inner_l = body_l + inset;
+  const float inner_t = body_t + inset;
+  const float inner_r = body_r - inset;
+  const float inner_b = body_b - inset;
   const float inner_w = inner_r - inner_l;
   const float fill_w = inner_w * ClampUnit(level);
-  if (fill_w >= 0.5f) {
-    brush->SetColor(BatteryFillColor(dark, level, charging));
-    const D2D1_ROUNDED_RECT fill{D2D1::RectF(inner_l, inner_t, inner_l + fill_w, inner_b), 0.75f, 0.75f};
+  if (fill_w >= 0.6f && inner_b > inner_t) {
+    if (charging || level <= 0.20f) {
+      brush->SetColor(BatteryFillColor(dark, level, charging));
+    } else {
+      brush->SetColor(outline);
+    }
+    const float fill_r = (std::min)(radius * 0.50f, (inner_b - inner_t) * 0.40f);
+    const D2D1_ROUNDED_RECT fill{D2D1::RectF(inner_l, inner_t, inner_l + fill_w, inner_b), fill_r, fill_r};
     rt->FillRoundedRectangle(fill, brush);
   }
 
   if (charging) {
+    const float cx = (body_l + body_r) * 0.5f;
+    const float cy = (body_t + body_b) * 0.5f;
+    const float s = body_h / 3.9f;
     const D2D1_POINT_2F pts[] = {
-        D2D1::Point2F(ox + 7.6f, oy + 5.6f), D2D1::Point2F(ox + 5.4f, oy + 8.6f),
-        D2D1::Point2F(ox + 6.9f, oy + 8.6f), D2D1::Point2F(ox + 6.4f, oy + 11.4f),
-        D2D1::Point2F(ox + 8.6f, oy + 8.2f), D2D1::Point2F(ox + 7.1f, oy + 8.2f),
+        D2D1::Point2F(cx + 0.55f * s, cy - 2.55f * s), D2D1::Point2F(cx - 1.60f * s, cy + 0.22f * s),
+        D2D1::Point2F(cx - 0.62f * s, cy + 0.22f * s), D2D1::Point2F(cx - 0.55f * s, cy + 2.55f * s),
+        D2D1::Point2F(cx + 1.60f * s, cy - 0.22f * s), D2D1::Point2F(cx + 0.62f * s, cy - 0.22f * s),
     };
     Microsoft::WRL::ComPtr<ID2D1Factory> factory;
     rt->GetFactory(factory.GetAddressOf());
@@ -157,14 +212,12 @@ void DrawBattery(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const D2D1_
     Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
     if (factory && SUCCEEDED(factory->CreatePathGeometry(bolt.GetAddressOf())) &&
         SUCCEEDED(bolt->Open(sink.GetAddressOf()))) {
-      sink->BeginFigure(pts[0], D2D1_FIGURE_BEGIN_FILLED);
-      for (int i = 1; i < 6; ++i) {
-        sink->AddLine(pts[i]);
-      }
-      sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+      AddRoundedPolygon(sink.Get(), pts, 6, s * 0.50f);
       sink->Close();
-      brush->SetColor(dark ? D2D1::ColorF(0x0B2E0B) : D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f));
+      brush->SetColor(D2D1::ColorF(0xFFD400));
       rt->FillGeometry(bolt.Get(), brush);
+      brush->SetColor(outline);
+      rt->DrawGeometry(bolt.Get(), brush, stroke);
     }
   }
 }
@@ -369,6 +422,10 @@ void ClockRenderer::DrawVectorIcon(ID2D1SolidColorBrush* brush, const StatusIcon
       brush->SetColor(ClockTextColor(dark));
       DrawFluentOrFallback(brush, box, kNetworkFluent, kNetFallback);
       break;
+    case VectorIcon::kWifi:
+      brush->SetColor(ClockTextColor(dark));
+      DrawFluentOrFallback(brush, box, kWifiFluent, kWifiFallback);
+      break;
     case VectorIcon::kVolume: {
       brush->SetColor(ClockTextColor(dark));
       const wchar_t* fluent = kVolume3Fluent;
@@ -384,6 +441,16 @@ void ClockRenderer::DrawVectorIcon(ID2D1SolidColorBrush* brush, const StatusIcon
       DrawFluentOrFallback(brush, box, fluent, kVolumeFallback);
       break;
     }
+    case VectorIcon::kSearch:
+      brush->SetColor(ClockTextColor(dark));
+      if (EnsureStroke()) {
+        DrawSearchGlyph(brush, box);
+      }
+      break;
+    case VectorIcon::kControlCenter:
+      brush->SetColor(ClockTextColor(dark));
+      DrawFluentOrFallback(brush, box, kCcFluent, L"\u2630");
+      break;
     default:
       break;
   }
@@ -430,46 +497,6 @@ void ClockRenderer::DrawSearchGlyph(ID2D1SolidColorBrush* brush, const D2D1_RECT
                 D2D1::Point2F(box.left + 13.35f * s, box.top + 13.35f * s), brush, stroke, round_stroke_.Get());
 }
 
-void ClockRenderer::DrawSpotlightButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed,
-                                        float height_dip, const RECT& client, const RECT& rect) {
-  const float px = static_cast<float>(dpi_) / 96.0f;
-  const float hit_left = static_cast<float>(rect.left - client.left) / px;
-  const float hit_right = static_cast<float>(rect.right - client.left) / px;
-  if (hot || pressed) {
-    brush->SetColor(MenuItemHoverFill(dark, pressed));
-    const D2D1_ROUNDED_RECT hover{
-        D2D1::RectF(hit_left + kStartHoverInsetXDip, kStartHoverInsetYDip, hit_right - kStartHoverInsetXDip,
-                    height_dip - kStartHoverInsetYDip),
-        kStartHoverRadiusDip, kStartHoverRadiusDip};
-    rt_->FillRoundedRectangle(hover, brush);
-  }
-  brush->SetColor(ClockTextColor(dark));
-  const float icon = 16.0f;
-  const float x = hit_left + (kStartHitWidthDip - icon) * 0.5f;
-  const float y = (height_dip - icon) * 0.5f;
-  DrawSearchGlyph(brush, D2D1::RectF(x, y, x + icon, y + icon));
-}
-
-void ClockRenderer::DrawControlCenterButton(ID2D1SolidColorBrush* brush, bool dark, bool hot, bool pressed,
-                                            float height_dip, const RECT& client, const RECT& rect) {
-  const float px = static_cast<float>(dpi_) / 96.0f;
-  const float hit_left = static_cast<float>(rect.left - client.left) / px;
-  const float hit_right = static_cast<float>(rect.right - client.left) / px;
-  if (hot || pressed) {
-    brush->SetColor(MenuItemHoverFill(dark, pressed));
-    const D2D1_ROUNDED_RECT hover{
-        D2D1::RectF(hit_left + kStartHoverInsetXDip, kStartHoverInsetYDip, hit_right - kStartHoverInsetXDip,
-                    height_dip - kStartHoverInsetYDip),
-        kStartHoverRadiusDip, kStartHoverRadiusDip};
-    rt_->FillRoundedRectangle(hover, brush);
-  }
-  brush->SetColor(ClockTextColor(dark));
-  const float icon = 16.0f;
-  const float x = hit_left + (kStartHitWidthDip - icon) * 0.5f;
-  const float y = (height_dip - icon) * 0.5f;
-  DrawFluentOrFallback(brush, D2D1::RectF(x, y, x + icon, y + icon), kCcFluent, L"\u2630");
-}
-
 std::wstring ClockRenderer::CurrentTimeText() const {
   SYSTEMTIME local{};
   GetLocalTime(&local);
@@ -491,8 +518,7 @@ std::wstring ClockRenderer::CurrentTimeText() const {
 }
 
 bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool dark, const BarLayoutResult& layout,
-                         BarLayout* text, bool start_hot, bool start_pressed, bool spotlight_hot, bool spotlight_pressed,
-                         bool cc_hot, bool cc_pressed, DrawTimings* timings) {
+                         BarLayout* text, bool start_hot, bool start_pressed, DrawTimings* timings) {
   if (!d2d_ || !hdc || text == nullptr) {
     return false;
   }
@@ -560,14 +586,6 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
       DrawStartButton(brush.Get(), dark, start_hot, start_pressed, height_dip, client, seg.rect);
       continue;
     }
-    if (seg.kind == SegmentKind::kSpotlight) {
-      DrawSpotlightButton(brush.Get(), dark, spotlight_hot, spotlight_pressed, height_dip, client, seg.rect);
-      continue;
-    }
-    if (seg.kind == SegmentKind::kControlCenter) {
-      DrawControlCenterButton(brush.Get(), dark, cc_hot, cc_pressed, height_dip, client, seg.rect);
-      continue;
-    }
     const bool bitmap =
         seg.icon_kind == IconKind::kPng || seg.icon_kind == IconKind::kFile || seg.icon_kind == IconKind::kHicon;
     const bool vector = seg.icon_kind == IconKind::kVector;
@@ -577,9 +595,11 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
     const float x0 = static_cast<float>(seg.rect.left - client.left) / px;
     float text_x = x0;
     if (vector) {
-      const float icon_top = (height_dip - 16.0f) * 0.5f;
-      DrawVectorIcon(brush.Get(), seg.icon, D2D1::RectF(x0, icon_top, x0 + 16.0f, icon_top + 16.0f), dark);
-      text_x = x0 + 16.0f + 4.0f;
+      const float icon_w = (seg.icon.vector == VectorIcon::kBattery) ? kBatteryIconDip : 16.0f;
+      const float icon_h = 16.0f;
+      const float icon_top = (height_dip - icon_h) * 0.5f;
+      DrawVectorIcon(brush.Get(), seg.icon, D2D1::RectF(x0, icon_top, x0 + icon_w, icon_top + icon_h), dark);
+      text_x = x0 + icon_w + 4.0f;
     } else if (bitmap) {
       const int icon_px = (std::max)(1, static_cast<int>(std::lround(16.0f * px)));
       if (ID2D1Bitmap* bmp = icons_.Get(seg.icon, icon_px)) {

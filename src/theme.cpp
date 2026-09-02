@@ -106,17 +106,21 @@ uint32_t BatteryFillRgb(bool dark, float level, bool charging) {
   return dark ? 0xFCE100u : 0x9D5D00u;
 }
 
-D2D1_COLOR_F CpuRingColor(bool dark, float usage) {
-  if (usage < 0.30f) {
-    return dark ? D2D1::ColorF(0x5BC85B) : D2D1::ColorF(0x0F7B0F);
+uint32_t CpuFillRgb(bool dark, float usage) {
+  if (usage < 0.40f) {
+    return dark ? 0x5BC85Bu : 0x0F7B0Fu;
   }
   if (usage < 0.60f) {
-    return dark ? D2D1::ColorF(0xFCE100) : D2D1::ColorF(0x9D5D00);
+    return dark ? 0xFCE100u : 0xC9A000u;
   }
   if (usage < 0.85f) {
-    return dark ? D2D1::ColorF(0xFF8C00) : D2D1::ColorF(0xC4520A);
+    return dark ? 0xFF8C00u : 0xC4520Au;
   }
-  return dark ? D2D1::ColorF(0xFF99A4) : D2D1::ColorF(0xC42B1C);
+  return dark ? 0xFF6B6Bu : 0xC42B1Cu;
+}
+
+D2D1_COLOR_F CpuRingColor(bool dark, float usage) {
+  return D2D1::ColorF(CpuFillRgb(dark, usage));
 }
 
 }  // namespace bamti

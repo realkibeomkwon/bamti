@@ -1,6 +1,7 @@
 #include "menu_bar.hpp"
 
 #include "autostart.hpp"
+#include "clock_flyout.hpp"
 #include "control_center.hpp"
 #include "dwm.hpp"
 #include "fullscreen.hpp"
@@ -45,12 +46,16 @@ constexpr UINT kTrayInterceptCmd = 17;
 constexpr UINT kAutostartCmd = 18;
 constexpr UINT kWidgetVolumeCmd = 19;
 constexpr UINT kWidgetControlCenterCmd = 20;
+constexpr UINT kWidgetWifiCmd = 23;
 constexpr UINT kTrayPeekCmd = 20;
 constexpr UINT kTrayHideIconCmd = 21;
 constexpr UINT kTrayMirrorOffCmd = 22;
 constexpr UINT kTrayItemCmdBase = 4000;
 constexpr UINT_PTR kPeekTimerId = 4;
 constexpr UINT kPeekMs = 10000;
+constexpr char kSpotlightItemId[] = "bamti.widget/spotlight";
+constexpr char kControlCenterItemId[] = "bamti.widget/control_center";
+constexpr char kWifiItemId[] = "bamti.widget/wifi";
 
 UINT g_taskbar_created = 0;
 
@@ -84,6 +89,30 @@ bool OrderContains(const std::vector<std::string>& ids, const std::string& id) {
     }
   }
   return false;
+}
+
+bool IsChromeItemId(const std::string& id) {
+  return id == kSpotlightItemId || id == kControlCenterItemId;
+}
+
+StatusItem MakeChromeItem(const char* id, VectorIcon vector, const wchar_t* tip) {
+  StatusItem item;
+  item.id = id;
+  item.source = "bamti";
+  item.icon.kind = IconKind::kVector;
+  item.icon.vector = vector;
+  item.icon.cache_key = HashStatusIcon(item.icon);
+  item.tooltip = tip;
+  return item;
+}
+
+std::vector<StatusItem> ChromeItems(bool show_control_center) {
+  std::vector<StatusItem> items;
+  if (show_control_center) {
+    items.push_back(MakeChromeItem(kControlCenterItemId, VectorIcon::kControlCenter, L"제어 센터"));
+  }
+  items.push_back(MakeChromeItem(kSpotlightItemId, VectorIcon::kSearch, L"검색"));
+  return items;
 }
 
 std::vector<std::string> ApplyVisiblePermutation(const std::vector<std::string>& full,
@@ -213,7 +242,9 @@ double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
 MenuBar::MenuBar()
     : status_panel_(std::make_unique<StatusPanelContent>()),
       overflow_panel_(std::make_unique<OverflowContent>()),
-      cc_panel_(std::make_unique<ControlCenterContent>()) {}
+      cc_panel_(std::make_unique<ControlCenterContent>()),
+      clock_panel_(std::make_unique<ClockFlyoutContent>()),
+      clock_menu_(std::make_unique<ClockMenuContent>()) {}
 
 MenuBar::~MenuBar() {
   RemoveWinHook();
@@ -376,13 +407,16 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     case kPopupClosedMsg:
-      cc_open_ = false;
-      if (!open_panel_id_.empty()) {
-        StatusEvent ev;
-        ev.id = std::move(open_panel_id_);
-        ev.event = "panel_close";
-        status_.Dispatch(ev);
-        open_panel_id_.clear();
+      if (!status_popup_.IsOpen()) {
+        cc_open_ = false;
+        clock_open_ = false;
+        if (!open_panel_id_.empty()) {
+          StatusEvent ev;
+          ev.id = std::move(open_panel_id_);
+          ev.event = "panel_close";
+          status_.Dispatch(ev);
+          open_panel_id_.clear();
+        }
       }
       return 0;
     case kFullscreenWatchMsg:
@@ -438,7 +472,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
           return TRUE;
         }
-        if (HitStart(pt) || HitSpotlight(pt) || HitControlCenter(pt) || HitSegment(pt) != nullptr) {
+        if (HitStart(pt) || HitClock(pt) || HitSegment(pt) != nullptr) {
           SetCursor(LoadCursorW(nullptr, IDC_HAND));
           return TRUE;
         }
@@ -469,16 +503,6 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         start_pressed_ = false;
         InvalidateArea(hwnd_, StartRect());
       }
-      if (spotlight_hot_ || spotlight_pressed_) {
-        spotlight_hot_ = false;
-        spotlight_pressed_ = false;
-        InvalidateArea(hwnd_, SpotlightRect());
-      }
-      if (cc_hot_ || cc_pressed_) {
-        cc_hot_ = false;
-        cc_pressed_ = false;
-        InvalidateArea(hwnd_, ControlCenterRect());
-      }
       return 0;
     case WM_LBUTTONDOWN: {
       POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
@@ -489,19 +513,13 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         InvalidateArea(hwnd_, StartRect());
         return 0;
       }
-      if (HitSpotlight(pt)) {
-        status_popup_.Close();
-        spotlight_pressed_ = true;
-        SetCapture(hwnd_);
-        InvalidateArea(hwnd_, SpotlightRect());
-        return 0;
-      }
-      if (HitControlCenter(pt)) {
-        status_popup_.Close();
-        cc_pressed_ = true;
-        SetCapture(hwnd_);
-        InvalidateArea(hwnd_, ControlCenterRect());
-        return 0;
+      if (HitClock(pt)) {
+        if (clock_open_ && status_popup_.IsOpen()) {
+          status_popup_.Close();
+          clock_open_ = false;
+          skip_left_up_ = true;
+          return 0;
+        }
       }
       if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
         if (const BarSegment* seg = HitSegment(pt)) {
@@ -520,14 +538,6 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (start_pressed_) {
         start_pressed_ = false;
         InvalidateArea(hwnd_, StartRect());
-      }
-      if (spotlight_pressed_) {
-        spotlight_pressed_ = false;
-        InvalidateArea(hwnd_, SpotlightRect());
-      }
-      if (cc_pressed_) {
-        cc_pressed_ = false;
-        InvalidateArea(hwnd_, ControlCenterRect());
       }
       if (reorder_active_ && reinterpret_cast<HWND>(lparam) != hwnd_) {
         CancelReorder();
@@ -564,33 +574,13 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         return 0;
       }
       const bool start_click = start_pressed_ && HitStart(pt);
-      const bool spotlight_click = spotlight_pressed_ && HitSpotlight(pt);
-      const bool cc_click = cc_pressed_ && HitControlCenter(pt);
       if (start_pressed_) {
         start_pressed_ = false;
         ReleaseCapture();
         InvalidateArea(hwnd_, StartRect());
       }
-      if (spotlight_pressed_) {
-        spotlight_pressed_ = false;
-        ReleaseCapture();
-        InvalidateArea(hwnd_, SpotlightRect());
-      }
-      if (cc_pressed_) {
-        cc_pressed_ = false;
-        ReleaseCapture();
-        InvalidateArea(hwnd_, ControlCenterRect());
-      }
       if (start_click) {
         ToggleStartMenu();
-        return 0;
-      }
-      if (spotlight_click) {
-        ToggleSpotlight();
-        return 0;
-      }
-      if (cc_click) {
-        ToggleControlCenter();
         return 0;
       }
       if (skip_left_up_) {
@@ -603,7 +593,24 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           return 0;
         }
       }
+      if (HitClock(pt)) {
+        ToggleClockFlyout();
+        return 0;
+      }
       if (const auto hit = HitTest(pt)) {
+        if (hit->id == kSpotlightItemId) {
+          status_popup_.Close();
+          ToggleSpotlight();
+          return 0;
+        }
+        if (hit->id == kControlCenterItemId) {
+          ToggleControlCenter();
+          return 0;
+        }
+        if (hit->id == kWifiItemId) {
+          ToggleWifiPanel(*hit);
+          return 0;
+        }
         status_popup_.Close();
         StatusEvent ev;
         ev.id = hit->id;
@@ -619,7 +626,14 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (HitStart(pt)) {
         return 0;
       }
+      if (HitClock(pt)) {
+        skip_left_up_ = true;
+        return 0;
+      }
       if (const auto hit = HitTest(pt)) {
+        if (IsChromeItemId(hit->id)) {
+          return 0;
+        }
         skip_left_up_ = true;
         status_popup_.Close();
         StatusEvent ev;
@@ -632,7 +646,16 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     }
     case WM_RBUTTONUP: {
       POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      if (HitClock(pt)) {
+        ShowClockMenu();
+        return 0;
+      }
       if (const auto hit = HitTest(pt)) {
+        if (IsChromeItemId(hit->id)) {
+          ClientToScreen(hwnd_, &pt);
+          ShowContextMenu(pt);
+          return 0;
+        }
         if (hit->id.rfind("bamti.tray/", 0) == 0) {
           POINT screen = pt;
           ClientToScreen(hwnd_, &screen);
@@ -669,6 +692,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         if (HitStart(pt)) {
           tooltip_text_ = L"시작";
           info->lpszText = tooltip_text_.data();
+        } else if (HitClock(pt)) {
+          tooltip_text_ = clock_.CurrentTimeText();
+          info->lpszText = tooltip_text_.data();
         } else if (const BarSegment* seg = HitSegment(pt); seg != nullptr && seg->kind == SegmentKind::kOverflow) {
           tooltip_text_ = seg->tooltip.empty() ? std::wstring(L"접힌 항목") : seg->tooltip;
           info->lpszText = tooltip_text_.data();
@@ -688,7 +714,8 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         return 0;
       }
       if (cmd == kWidgetBatteryCmd || cmd == kWidgetCpuCmd || cmd == kWidgetNetworkCmd ||
-          cmd == kWidgetVolumeCmd || cmd == kWidgetBoardCmd || cmd == kWidgetControlCenterCmd) {
+          cmd == kWidgetVolumeCmd || cmd == kWidgetWifiCmd || cmd == kWidgetBoardCmd ||
+          cmd == kWidgetControlCenterCmd) {
         WidgetSettings next = widgets_.settings();
         const WidgetSettings tray = tray_.settings();
         next.tray_mirror = tray.tray_mirror;
@@ -704,6 +731,8 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           next.network = !next.network;
         } else if (cmd == kWidgetVolumeCmd) {
           next.volume = !next.volume;
+        } else if (cmd == kWidgetWifiCmd) {
+          next.wifi = !next.wifi;
         } else if (cmd == kWidgetControlCenterCmd) {
           next.control_center = !next.control_center;
         } else if (cmd == kWidgetBoardCmd) {
@@ -1013,9 +1042,7 @@ void MenuBar::RefreshLayout() {
   LARGE_INTEGER t0{};
   LARGE_INTEGER t1{};
   QueryPerformanceCounter(&t0);
-  const BarLayoutResult& after =
-      layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), OrderedItems(),
-                      widgets_.settings().control_center);
+  const BarLayoutResult& after = layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), OrderedItems());
   QueryPerformanceCounter(&t1);
   last_compute_ms_ = QpcMs(t0, t1);
 
@@ -1106,8 +1133,7 @@ void MenuBar::Paint() {
       LARGE_INTEGER t0{};
       LARGE_INTEGER t1{};
       QueryPerformanceCounter(&t0);
-      layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), OrderedItems(),
-                      widgets_.settings().control_center);
+      layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), OrderedItems());
       QueryPerformanceCounter(&t1);
       last_compute_ms_ = QpcMs(t0, t1);
     }
@@ -1128,9 +1154,7 @@ void MenuBar::Paint() {
       DrawTimings draw{};
       QueryPerformanceCounter(&t0);
       clock_.Draw(buffer_dc, client, dirty, dark_, layout_.last(), &layout_,
-                  start_hot_ || start_menu_.visible(), start_pressed_ || start_menu_.visible(),
-                  spotlight_hot_ || spotlight_.visible(), spotlight_pressed_ || spotlight_.visible(),
-                  cc_hot_ || cc_open_, cc_pressed_ || cc_open_, &draw);
+                  start_hot_ || start_menu_.visible(), start_pressed_ || start_menu_.visible(), &draw);
       QueryPerformanceCounter(&t1);
       const double draw_ms = QpcMs(t0, t1);
 
@@ -1154,7 +1178,7 @@ RECT MenuBar::StartRect() const {
 
 RECT MenuBar::SpotlightRect() const {
   for (const BarSegment& seg : layout_.last().segments) {
-    if (seg.kind == SegmentKind::kSpotlight) {
+    if (seg.kind == SegmentKind::kStatus && seg.id == kSpotlightItemId) {
       return seg.rect;
     }
   }
@@ -1163,7 +1187,7 @@ RECT MenuBar::SpotlightRect() const {
 
 RECT MenuBar::ControlCenterRect() const {
   for (const BarSegment& seg : layout_.last().segments) {
-    if (seg.kind == SegmentKind::kControlCenter) {
+    if (seg.kind == SegmentKind::kStatus && seg.id == kControlCenterItemId) {
       return seg.rect;
     }
   }
@@ -1179,8 +1203,15 @@ RECT MenuBar::ClockRect() const {
   return {};
 }
 
+bool MenuBar::HitClock(POINT client) const {
+  const RECT rc = ClockRect();
+  return rc.right > rc.left && PtInRect(&rc, client) != FALSE;
+}
+
 std::vector<StatusItem> MenuBar::OrderedItems() const {
   std::vector<StatusItem> items = status_.Snapshot();
+  const std::vector<StatusItem> chrome = ChromeItems(widgets_.settings().control_center);
+  items.insert(items.begin(), chrome.begin(), chrome.end());
   const std::vector<std::string>& order = reorder_active_ ? reorder_order_ : bar_order_;
   if (order.empty()) {
     return items;
@@ -1197,11 +1228,20 @@ std::vector<StatusItem> MenuBar::OrderedItems() const {
       }
     }
   }
+  std::vector<StatusItem> unused_chrome;
+  std::vector<StatusItem> unused_rest;
   for (size_t i = 0; i < items.size(); ++i) {
-    if (!used[i]) {
-      out.push_back(std::move(items[i]));
+    if (used[i]) {
+      continue;
+    }
+    if (IsChromeItemId(items[i].id)) {
+      unused_chrome.push_back(std::move(items[i]));
+    } else {
+      unused_rest.push_back(std::move(items[i]));
     }
   }
+  out.insert(out.begin(), unused_chrome.begin(), unused_chrome.end());
+  out.insert(out.end(), unused_rest.begin(), unused_rest.end());
   return out;
 }
 
@@ -1222,6 +1262,14 @@ void MenuBar::BeginReorder(const std::string& id, POINT pt) {
   reorder_id_ = id;
   reorder_start_ = pt;
   reorder_order_ = bar_order_;
+  const std::vector<StatusItem> chrome = ChromeItems(widgets_.settings().control_center);
+  std::vector<std::string> missing_chrome;
+  for (const StatusItem& item : chrome) {
+    if (!OrderContains(reorder_order_, item.id)) {
+      missing_chrome.push_back(item.id);
+    }
+  }
+  reorder_order_.insert(reorder_order_.begin(), missing_chrome.begin(), missing_chrome.end());
   const std::vector<StatusItem> snap = status_.Snapshot();
   for (const StatusItem& item : snap) {
     if (!OrderContains(reorder_order_, item.id)) {
@@ -1354,6 +1402,7 @@ void MenuBar::OpenOverflow() {
     spotlight_.Hide();
   }
   cc_open_ = false;
+  clock_open_ = false;
   OverflowHost host;
   host.dark = dark_;
   host.overflow_rect = {};
@@ -1400,32 +1449,12 @@ bool MenuBar::HitStart(POINT client) const {
   return PtInRect(&start, client) != FALSE;
 }
 
-bool MenuBar::HitSpotlight(POINT client) const {
-  const RECT rect = SpotlightRect();
-  return PtInRect(&rect, client) != FALSE;
-}
-
-bool MenuBar::HitControlCenter(POINT client) const {
-  const RECT rect = ControlCenterRect();
-  return PtInRect(&rect, client) != FALSE;
-}
-
 void MenuBar::UpdateChrome(POINT client) {
   ArmMouseLeave();
   const bool start_hot = HitStart(client);
   if (start_hot_ != start_hot) {
     start_hot_ = start_hot;
     InvalidateArea(hwnd_, StartRect());
-  }
-  const bool spotlight_hot = HitSpotlight(client);
-  if (spotlight_hot_ != spotlight_hot) {
-    spotlight_hot_ = spotlight_hot;
-    InvalidateArea(hwnd_, SpotlightRect());
-  }
-  const bool cc_hot = HitControlCenter(client);
-  if (cc_hot_ != cc_hot) {
-    cc_hot_ = cc_hot;
-    InvalidateArea(hwnd_, ControlCenterRect());
   }
 }
 
@@ -1470,6 +1499,36 @@ void MenuBar::ToggleSpotlight() {
   spotlight_.Toggle(hwnd_, dark_);
 }
 
+bool MenuBar::ShowControlCenter(const RECT& item_rect, ControlCenterPage page) {
+  if (fullscreen_occluded_ || cc_panel_ == nullptr) {
+    return false;
+  }
+  if (start_menu_.visible()) {
+    start_menu_.Hide();
+    InvalidateArea(hwnd_, StartRect());
+  }
+  if (spotlight_.visible()) {
+    spotlight_.Hide();
+  }
+  ControlCenterHost host;
+  host.dark = dark_;
+  host.dispatch = [this](const StatusEvent& ev) { status_.Dispatch(ev); };
+  host.live = [this]() { return widgets_.LiveForControlCenter(); };
+  cc_panel_->Reset(std::move(host), page);
+  POINT anchor{item_rect.left, item_rect.bottom};
+  ClientToScreen(hwnd_, &anchor);
+  cc_open_ = true;
+  clock_open_ = false;
+  open_panel_id_.clear();
+  status_popup_.SetDark(dark_);
+  if (!status_popup_.Open(cc_panel_.get(), anchor, PopupSurface::Anchor::BelowAt)) {
+    cc_open_ = false;
+    Log(L"cc", L"open failed");
+    return false;
+  }
+  return true;
+}
+
 void MenuBar::ToggleControlCenter() {
   if (fullscreen_occluded_ || !widgets_.settings().control_center) {
     return;
@@ -1483,30 +1542,7 @@ void MenuBar::ToggleControlCenter() {
   LARGE_INTEGER t0{};
   LARGE_INTEGER t1{};
   QueryPerformanceCounter(&t0);
-  if (start_menu_.visible()) {
-    start_menu_.Hide();
-    InvalidateArea(hwnd_, StartRect());
-  }
-  if (spotlight_.visible()) {
-    spotlight_.Hide();
-  }
-  if (cc_panel_ == nullptr) {
-    return;
-  }
-  ControlCenterHost host;
-  host.dark = dark_;
-  host.dispatch = [this](const StatusEvent& ev) { status_.Dispatch(ev); };
-  host.live = [this]() { return widgets_.LiveForControlCenter(); };
-  cc_panel_->Reset(std::move(host));
-  RECT rc = ControlCenterRect();
-  POINT anchor{rc.left, rc.bottom};
-  ClientToScreen(hwnd_, &anchor);
-  cc_open_ = true;
-  open_panel_id_.clear();
-  status_popup_.SetDark(dark_);
-  if (!status_popup_.Open(cc_panel_.get(), anchor, PopupSurface::Anchor::BelowAt)) {
-    cc_open_ = false;
-    Log(L"cc", L"open failed");
+  if (!ShowControlCenter(ControlCenterRect(), ControlCenterPage::kHome)) {
     return;
   }
   QueryPerformanceCounter(&t1);
@@ -1514,7 +1550,85 @@ void MenuBar::ToggleControlCenter() {
   InvalidateArea(hwnd_, ControlCenterRect());
 }
 
+void MenuBar::ToggleClockFlyout() {
+  if (fullscreen_occluded_) {
+    return;
+  }
+  if (clock_open_ && status_popup_.IsOpen()) {
+    status_popup_.Close();
+    clock_open_ = false;
+    return;
+  }
+  ShowClockFlyout();
+}
+
+bool MenuBar::ShowClockFlyout() {
+  if (fullscreen_occluded_ || clock_panel_ == nullptr) {
+    return false;
+  }
+  if (start_menu_.visible()) {
+    start_menu_.Hide();
+    InvalidateArea(hwnd_, StartRect());
+  }
+  if (spotlight_.visible()) {
+    spotlight_.Hide();
+  }
+  clock_panel_->Reset(dark_);
+  const RECT item = ClockRect();
+  POINT anchor{item.right, item.bottom};
+  ClientToScreen(hwnd_, &anchor);
+  cc_open_ = false;
+  clock_open_ = true;
+  open_panel_id_.clear();
+  status_popup_.SetDark(dark_);
+  if (!status_popup_.Open(clock_panel_.get(), anchor, PopupSurface::Anchor::BelowAt)) {
+    clock_open_ = false;
+    Log(L"clock", L"flyout open failed");
+    return false;
+  }
+  return true;
+}
+
+void MenuBar::ShowClockMenu() {
+  if (fullscreen_occluded_ || clock_menu_ == nullptr) {
+    return;
+  }
+  if (start_menu_.visible()) {
+    start_menu_.Hide();
+    InvalidateArea(hwnd_, StartRect());
+  }
+  if (spotlight_.visible()) {
+    spotlight_.Hide();
+  }
+  clock_menu_->Reset(dark_);
+  const RECT item = ClockRect();
+  POINT anchor{item.left, item.bottom};
+  ClientToScreen(hwnd_, &anchor);
+  cc_open_ = false;
+  clock_open_ = false;
+  open_panel_id_.clear();
+  status_popup_.SetDark(dark_);
+  if (!status_popup_.Open(clock_menu_.get(), anchor, PopupSurface::Anchor::BelowAt)) {
+    Log(L"clock", L"menu open failed");
+  }
+}
+
+void MenuBar::ToggleWifiPanel(const StatusHit& hit) {
+  if (fullscreen_occluded_ || !widgets_.settings().wifi) {
+    return;
+  }
+  if (cc_open_ && status_popup_.IsOpen() && cc_panel_ != nullptr && cc_panel_->ShowsWifi()) {
+    status_popup_.Close();
+    cc_open_ = false;
+    return;
+  }
+  OpenStatusPanel(hit);
+}
+
 void MenuBar::OpenStatusPanel(const StatusHit& hit) {
+  if (hit.id == kWifiItemId && ShowControlCenter(hit.rect, ControlCenterPage::kWifi)) {
+    return;
+  }
   if (status_panel_ == nullptr || hwnd_ == nullptr) {
     return;
   }
@@ -1537,6 +1651,7 @@ void MenuBar::OpenStatusPanel(const StatusHit& hit) {
     spotlight_.Hide();
   }
   cc_open_ = false;
+  clock_open_ = false;
   status_panel_->Reset(*found, MakePanelHost());
   POINT anchor{hit.rect.left, hit.rect.bottom};
   ClientToScreen(hwnd_, &anchor);
@@ -1573,6 +1688,17 @@ void MenuBar::RefreshOpenPanel() {
       return;
     }
     cc_panel_->Refresh();
+    if (status_popup_.hwnd() != nullptr) {
+      status_popup_.Present();
+    }
+    return;
+  }
+  if (clock_open_) {
+    if (!status_popup_.IsOpen() || clock_panel_ == nullptr) {
+      clock_open_ = false;
+      return;
+    }
+    clock_panel_->Refresh();
     if (status_popup_.hwnd() != nullptr) {
       status_popup_.Present();
     }
@@ -1695,6 +1821,7 @@ void MenuBar::ShowContextMenu(POINT screen) {
   AppendMenuW(menu, MF_STRING | (s.cpu ? MF_CHECKED : 0), kWidgetCpuCmd, L"CPU");
   AppendMenuW(menu, MF_STRING | (s.network ? MF_CHECKED : 0), kWidgetNetworkCmd, L"네트워크");
   AppendMenuW(menu, MF_STRING | (s.volume ? MF_CHECKED : 0), kWidgetVolumeCmd, L"볼륨");
+  AppendMenuW(menu, MF_STRING | (s.wifi ? MF_CHECKED : 0), kWidgetWifiCmd, L"Wi-Fi");
   AppendMenuW(menu, MF_STRING | (s.control_center ? MF_CHECKED : 0), kWidgetControlCenterCmd, L"제어 센터");
   const bool board_ok = IsWidgetBoardAvailable();
   UINT board_flags = MF_STRING | (s.widget_board ? MF_CHECKED : 0);
@@ -1772,9 +1899,13 @@ void MenuBar::ApplySettings(const WidgetSettings& next) {
   merged.bar_order = bar_order_;
   widgets_.SetSettings(merged);
   tray_.SetSettings(merged);
-  if (!merged.control_center && cc_open_) {
-    status_popup_.Close();
-    cc_open_ = false;
+  if (cc_open_) {
+    const bool wifi_page = cc_panel_ != nullptr && cc_panel_->ShowsWifi();
+    const bool keep = merged.control_center || (wifi_page && merged.wifi);
+    if (!keep) {
+      status_popup_.Close();
+      cc_open_ = false;
+    }
   }
   RefreshLayout();
 }

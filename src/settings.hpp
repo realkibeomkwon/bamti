@@ -13,6 +13,7 @@ struct WidgetSettings {
   bool cpu = false;
   bool network = false;
   bool volume = false;
+  bool wifi = false;
   bool control_center = false;
   bool widget_board = false;
   bool tray_mirror = true;
@@ -21,7 +22,7 @@ struct WidgetSettings {
   std::string tray_backend = "uia";
   std::vector<std::string> tray_hidden_keys;
   std::vector<std::string> bar_order;  // 화면 오른쪽부터의 순서
-  bool Any() const { return battery || cpu || network || volume || control_center || widget_board; }
+  bool Any() const { return battery || cpu || network || volume || wifi || control_center || widget_board; }
 };
 
 std::wstring SettingsPath();

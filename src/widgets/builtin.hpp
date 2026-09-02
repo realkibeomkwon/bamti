@@ -37,7 +37,14 @@ class BuiltinWidgets : public StatusSource {
   ControlCenterLive LiveForControlCenter() const;
 
  private:
-  enum class PendingAction { kPowerSettings, kNetworkSettings, kTaskManager, kWidgetBoard, kSoundSettings };
+  enum class PendingAction {
+    kPowerSettings,
+    kNetworkSettings,
+    kWifiSettings,
+    kTaskManager,
+    kWidgetBoard,
+    kSoundSettings
+  };
 
   void WorkerLoop();
   void StartWorkerLocked();
@@ -109,6 +116,7 @@ class BuiltinWidgets : public StatusSource {
   std::wstring fp_cpu_;
   std::wstring fp_net_;
   std::wstring fp_volume_;
+  std::wstring fp_wifi_;
   std::wstring fp_board_;
   bool logged_no_battery_ = false;
   bool logged_no_volume_ = false;

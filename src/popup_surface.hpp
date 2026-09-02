@@ -25,11 +25,13 @@ class PopupContent {
   virtual bool DragRow(int /*index*/) const { return false; }
   virtual void DragTo(int /*index*/, POINT /*client*/, UINT /*dpi*/) {}
   virtual void DragEnd(int /*index*/) {}
+  // 참이면 PopupSurface가 배경 둥근 사각형을 그리지 않는다. 내용이 카드 여러 장을 직접 그린다.
+  virtual bool PaintsOwnChrome() const { return false; }
 };
 
 float PopupTextWidth(UINT dpi, const std::wstring& text);
 void DrawPopupText(ID2D1RenderTarget* target, UINT dpi, const std::wstring& text, const D2D1_RECT_F& rect,
-                   ID2D1Brush* brush);
+                   ID2D1Brush* brush, DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING);
 
 class PopupSurface {
  public:

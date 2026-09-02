@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bar_layout.hpp"
+#include "clock_flyout.hpp"
 #include "clock_renderer.hpp"
 #include "pipe_server.hpp"
 #include "popup_surface.hpp"
@@ -65,15 +66,19 @@ class MenuBar {
   RECT SpotlightRect() const;
   RECT ControlCenterRect() const;
   RECT ClockRect() const;
+  bool HitClock(POINT client) const;
   std::optional<StatusHit> HitTest(POINT client) const;
   bool HitStart(POINT client) const;
-  bool HitSpotlight(POINT client) const;
-  bool HitControlCenter(POINT client) const;
   void UpdateChrome(POINT client);
   void ArmMouseLeave();
   void ToggleStartMenu(bool from_keyboard = false);
   void ToggleSpotlight();
   void ToggleControlCenter();
+  void ToggleClockFlyout();
+  bool ShowClockFlyout();
+  void ShowClockMenu();
+  void ToggleWifiPanel(const StatusHit& hit);
+  bool ShowControlCenter(const RECT& item_rect, ControlCenterPage page);
   void OpenStatusPanel(const StatusHit& hit);
   void OpenOverflow();
   void RefreshOpenPanel();
@@ -105,10 +110,6 @@ class MenuBar {
   bool dark_ = true;
   bool start_hot_ = false;
   bool start_pressed_ = false;
-  bool spotlight_hot_ = false;
-  bool spotlight_pressed_ = false;
-  bool cc_hot_ = false;
-  bool cc_pressed_ = false;
   bool repaint_armed_ = false;
   struct PerfAcc {
     unsigned n = 0;
@@ -153,7 +154,10 @@ class MenuBar {
   std::unique_ptr<StatusPanelContent> status_panel_;
   std::unique_ptr<OverflowContent> overflow_panel_;
   std::unique_ptr<ControlCenterContent> cc_panel_;
+  std::unique_ptr<ClockFlyoutContent> clock_panel_;
+  std::unique_ptr<ClockMenuContent> clock_menu_;
   bool cc_open_ = false;
+  bool clock_open_ = false;
   std::wstring tooltip_text_;
   std::string open_panel_id_;
   uint64_t open_panel_revision_ = 0;

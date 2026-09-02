@@ -17,6 +17,7 @@ add_executable(bamti WIN32
   src/watchdog.cpp
   src/menu_bar.cpp
   src/clock_renderer.cpp
+  src/clock_flyout.cpp
   src/bar_layout.cpp
   src/icon_cache.cpp
   src/theme.cpp

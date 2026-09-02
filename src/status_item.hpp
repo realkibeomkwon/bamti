@@ -30,6 +30,9 @@ enum class VectorIcon : uint8_t {
   kCpu,
   kNetwork,
   kVolume,
+  kWifi,
+  kSearch,
+  kControlCenter,
 };
 
 inline constexpr uint32_t kVectorFlagCharging = 1u << 0;

@@ -159,7 +159,7 @@ float PopupTextWidth(UINT dpi, const std::wstring& text) {
 }
 
 void DrawPopupText(ID2D1RenderTarget* target, UINT dpi, const std::wstring& text, const D2D1_RECT_F& rect,
-                   ID2D1Brush* brush) {
+                   ID2D1Brush* brush, DWRITE_TEXT_ALIGNMENT align) {
   if (target == nullptr || brush == nullptr || text.empty()) {
     return;
   }
@@ -175,6 +175,7 @@ void DrawPopupText(ID2D1RenderTarget* target, UINT dpi, const std::wstring& text
                                        layout.GetAddressOf()))) {
     return;
   }
+  layout->SetTextAlignment(align);
   DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
   Microsoft::WRL::ComPtr<IDWriteInlineObject> ellipsis;
   if (SUCCEEDED(factory->CreateEllipsisTrimmingSign(format, ellipsis.GetAddressOf()))) {
@@ -665,6 +666,7 @@ void PopupSurface::Render() {
   }
   const float width = static_cast<float>(dib_w_);
   const float height = static_cast<float>(dib_h_);
+  const bool own_chrome = content_->PaintsOwnChrome();
   const float max_radius = (std::min)(width, height) * 0.5f - 1.0f;
   const float radius =
       (std::max)(0.0f, (std::min)(static_cast<float>(MulDiv(kCornerRadiusDip, static_cast<int>(Dpi()), 96)), max_radius));
@@ -684,11 +686,13 @@ void PopupSurface::Render() {
   target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
   target_->BeginDraw();
   target_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-  if (fill_) {
-    target_->FillRoundedRectangle(rounded, fill_.Get());
-  }
-  if (stroke_) {
-    target_->DrawRoundedRectangle(rounded, stroke_.Get(), 1.0f);
+  if (!own_chrome) {
+    if (fill_) {
+      target_->FillRoundedRectangle(rounded, fill_.Get());
+    }
+    if (stroke_) {
+      target_->DrawRoundedRectangle(rounded, stroke_.Get(), 1.0f);
+    }
   }
   content_->Render(target_.Get(), Dpi(), hot_);
   const HRESULT hr = target_->EndDraw();
@@ -853,7 +857,10 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         press_inside_ = false;
         mouse_down_ = false;
         content_->StickyInvoke(index);
-        Present();
+        if (open_ && content_ != nullptr) {
+          Place(content_->Measure(Dpi()), anchor_, mode_);
+          Present();
+        }
         if (after_tick_ != nullptr) {
           after_tick_(after_tick_ctx_);
         }

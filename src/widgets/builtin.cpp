@@ -26,10 +26,12 @@ constexpr char kBatteryId[] = "bamti.widget/battery";
 constexpr char kCpuId[] = "bamti.widget/cpu";
 constexpr char kNetId[] = "bamti.widget/net";
 constexpr char kVolumeId[] = "bamti.widget/volume";
+constexpr char kWifiId[] = "bamti.widget/wifi";
 constexpr char kBoardId[] = "bamti.widget/board";
 
 constexpr int kBatteryPriority = 40;
 constexpr int kVolumePriority = 35;
+constexpr int kWifiPriority = 36;
 constexpr int kCpuPriority = 30;
 constexpr int kNetPriority = 20;
 constexpr int kBoardPriority = 10;
@@ -520,7 +522,7 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
   bool stop_worker = false;
   bool submit_save = false;
   StatusSink* sink = nullptr;
-  const char* drop[5]{};
+  const char* drop[6]{};
   size_t drop_n = 0;
   {
     std::lock_guard lock(mu_);
@@ -546,6 +548,7 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
     note_drop(prev.cpu, next.cpu, kCpuId, &fp_cpu_);
     note_drop(prev.network, next.network, kNetId, &fp_net_);
     note_drop(prev.volume, next.volume, kVolumeId, &fp_volume_);
+    note_drop(prev.wifi, next.wifi, kWifiId, &fp_wifi_);
     note_drop(prev.widget_board, next.widget_board, kBoardId, &fp_board_);
     const ULONGLONG now = GetTickCount64();
     if (!prev.battery && next.battery) {
@@ -564,6 +567,9 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
       volume_due_ = now;
       volume_refresh_due_ = 0;
       logged_no_volume_ = false;
+    }
+    if (!prev.wifi && next.wifi) {
+      wlan_due_ = now;
     }
     if (!prev.control_center && next.control_center) {
       volume_due_ = now;
@@ -655,6 +661,9 @@ void BuiltinWidgets::OnEvent(const StatusEvent& ev) {
     } else if (ev.row_id == "network_settings") {
       action = PendingAction::kNetworkSettings;
       have = true;
+    } else if (ev.row_id == "wifi_settings") {
+      action = PendingAction::kWifiSettings;
+      have = true;
     } else if (ev.row_id == "task_manager") {
       action = PendingAction::kTaskManager;
       have = true;
@@ -737,6 +746,7 @@ void BuiltinWidgets::ResetBaselines() {
   net_due_ = now + kFirstSampleMs;
   battery_due_ = now;
   volume_due_ = now;
+  wlan_due_ = now;
   if (net.enum_ms > 1.0 && !logged_slow_if_) {
     logged_slow_if_ = true;
     Log(L"widget", L"GetIfTable2 took %.2f ms", net.enum_ms);
@@ -744,7 +754,8 @@ void BuiltinWidgets::ResetBaselines() {
 }
 
 bool BuiltinWidgets::HasSampleDeadlineLocked() const {
-  return settings_.battery || settings_.cpu || settings_.network || settings_.volume || settings_.control_center;
+  return settings_.battery || settings_.cpu || settings_.network || settings_.volume || settings_.wifi ||
+         settings_.control_center;
 }
 
 ULONGLONG BuiltinWidgets::NextDeadlineLocked(ULONGLONG now) const {
@@ -765,7 +776,7 @@ ULONGLONG BuiltinWidgets::NextDeadlineLocked(ULONGLONG now) const {
   if (settings_.control_center && brightness_due_ < due) {
     due = brightness_due_;
   }
-  if (settings_.control_center && wlan_due_ < due) {
+  if ((settings_.wifi || settings_.control_center) && wlan_due_ < due) {
     due = wlan_due_;
   }
   return due;
@@ -786,6 +797,8 @@ void BuiltinWidgets::Publish(StatusItem item) {
       slot = &fp_net_;
     } else if (item.id == kVolumeId) {
       slot = &fp_volume_;
+    } else if (item.id == kWifiId) {
+      slot = &fp_wifi_;
     } else if (item.id == kBoardId) {
       slot = &fp_board_;
     }
@@ -820,6 +833,8 @@ void BuiltinWidgets::DropItem(const char* id) {
       fp_net_.clear();
     } else if (std::strcmp(id, kVolumeId) == 0) {
       fp_volume_.clear();
+    } else if (std::strcmp(id, kWifiId) == 0) {
+      fp_wifi_.clear();
     } else if (std::strcmp(id, kBoardId) == 0) {
       fp_board_.clear();
     }
@@ -838,6 +853,9 @@ void BuiltinWidgets::Execute(PendingAction action) {
       break;
     case PendingAction::kNetworkSettings:
       rc = ShellOpen(L"ms-settings:network");
+      break;
+    case PendingAction::kWifiSettings:
+      rc = ShellOpen(L"ms-settings:network-wifi");
       break;
     case PendingAction::kTaskManager:
       rc = ShellOpen(L"taskmgr.exe");
@@ -899,19 +917,21 @@ void BuiltinWidgets::SampleBattery() {
   }
 
   const int pct = static_cast<int>(status.BatteryLifePercent);
-  const bool charging = (status.BatteryFlag & BATTERY_FLAG_CHARGING) != 0 ||
-                        (status.ACLineStatus == 1 && pct < 100);
+  const bool ac = status.ACLineStatus == 1;
+  const bool charging = (status.BatteryFlag & BATTERY_FLAG_CHARGING) != 0;
   const float level = static_cast<float>(pct) / 100.0f;
 
   StatusItem item;
   item.id = kBatteryId;
   item.priority = kBatteryPriority;
-  SetVectorIcon(&item, VectorIcon::kBattery, level, charging ? kVectorFlagCharging : 0);
-  item.text = Truncate(PercentText(pct, charging), kStatusTextMaxChars);
+  SetVectorIcon(&item, VectorIcon::kBattery, level, ac ? kVectorFlagCharging : 0);
+  item.text = Truncate(PercentText(pct, false), kStatusTextMaxChars);
   std::wstring tip = L"배터리 ";
   tip += PercentText(pct, false);
   if (charging) {
     tip += L" · 충전 중";
+  } else if (ac) {
+    tip += L" · 연결됨";
   } else {
     const std::wstring remain = RemainText(status.BatteryLifeTime);
     if (!remain.empty()) {
@@ -920,9 +940,9 @@ void BuiltinWidgets::SampleBattery() {
     }
   }
   item.tooltip = Truncate(std::move(tip), kStatusPanelTextMaxChars);
-  if (!charging && pct <= 10) {
+  if (!ac && pct <= 10) {
     item.state = StatusState::kError;
-  } else if (!charging && pct <= 20) {
+  } else if (!ac && pct <= 20) {
     item.state = StatusState::kWarn;
   } else {
     item.state = StatusState::kNormal;
@@ -930,16 +950,16 @@ void BuiltinWidgets::SampleBattery() {
 
   StatusPanel panel;
   panel.title = L"배터리";
-  std::wstring ac = L"알 수 없음";
+  std::wstring power = L"알 수 없음";
   if (status.ACLineStatus == 0) {
-    ac = L"배터리 사용 중";
+    power = L"배터리 사용 중";
   } else if (status.ACLineStatus == 1) {
-    ac = L"연결됨";
+    power = L"연결됨";
   }
   panel.rows.push_back(GaugeRow(L"잔량", level, PercentText(pct, false),
-                                charging ? std::wstring{} : RemainText(status.BatteryLifeTime)));
-  panel.rows.back().fill_rgb = BatteryFillRgb(ShellUsesDarkMode(), level, charging);
-  panel.rows.push_back(KvRow(L"전원", std::move(ac)));
+                                ac ? std::wstring{} : RemainText(status.BatteryLifeTime)));
+  panel.rows.back().fill_rgb = BatteryFillRgb(ShellUsesDarkMode(), level, ac);
+  panel.rows.push_back(KvRow(L"전원", std::move(power)));
   panel.rows.push_back(KvRow(L"절전 모드", (status.SystemStatusFlag & 1) != 0 ? L"켜짐" : L"꺼짐"));
   panel.rows.push_back(SepRow());
   panel.rows.push_back(ButtonRow("power_settings", L"전원 설정 열기"));
@@ -1010,10 +1030,12 @@ void BuiltinWidgets::SampleCpu() {
   wchar_t nproc[16]{};
   swprintf_s(nproc, L"%u", info.dwNumberOfProcessors);
 
+  const float level = static_cast<float>(pct) / 100.0f;
+
   StatusItem item;
   item.id = kCpuId;
   item.priority = kCpuPriority;
-  SetVectorIcon(&item, VectorIcon::kCpu, static_cast<float>(pct) / 100.0f, 0);
+  SetVectorIcon(&item, VectorIcon::kCpu, level, 0);
   item.text = Truncate(PercentText(pct, false), kStatusTextMaxChars);
   wchar_t tip[128]{};
   swprintf_s(tip, L"CPU %d%% · 사용자 %d%% · 커널 %d%%", pct, user_pct, kernel_pct);
@@ -1022,7 +1044,8 @@ void BuiltinWidgets::SampleCpu() {
 
   StatusPanel panel;
   panel.title = L"CPU";
-  panel.rows.push_back(GaugeRow(L"전체 사용률", static_cast<float>(pct) / 100.0f, PercentText(pct, false)));
+  panel.rows.push_back(GaugeRow(L"전체 사용률", level, PercentText(pct, false)));
+  panel.rows.back().fill_rgb = CpuFillRgb(ShellUsesDarkMode(), level);
   panel.rows.push_back(KvRow(L"사용자", PercentText(user_pct, false)));
   panel.rows.push_back(KvRow(L"커널", PercentText(kernel_pct, false)));
   panel.rows.push_back(KvRow(L"논리 프로세서", nproc));
@@ -1220,9 +1243,9 @@ void BuiltinWidgets::SampleVolume() {
   item.tooltip = Truncate(std::move(tip), kStatusPanelTextMaxChars);
 
   StatusPanel panel;
-  panel.title = L"볼륨";
+  panel.title = L"장치";
   panel.subtitle = Truncate(state.device, kStatusPanelTextMaxChars);
-  panel.rows.push_back(SliderRow("volume_level", L"볼륨", state.level, PercentText(pct, false)));
+  panel.rows.push_back(SliderRow("volume_level", L"크기", state.level, PercentText(pct, false)));
   panel.rows.push_back(ToggleRow("volume_mute", L"음소거", state.muted));
   panel.rows.push_back(SepRow());
   panel.rows.push_back(ButtonRow("sound_settings", L"소리 설정 열기"));
@@ -1282,7 +1305,7 @@ void BuiltinWidgets::SampleWlan() {
   {
     std::lock_guard lock(mu_);
     wlan_due_ = GetTickCount64() + kBrightnessPeriodMs;
-    enabled = settings_.control_center && active_;
+    enabled = (settings_.wifi || settings_.control_center) && active_;
   }
   if (!enabled) {
     return;
@@ -1296,9 +1319,40 @@ void BuiltinWidgets::SampleWlan() {
       Log(L"cc", L"wlan query over 5ms; prefetching on widget worker");
     }
   }
-  std::lock_guard lock(mu_);
-  last_wifi_on_ = wifi.connected;
-  last_wifi_name_ = wifi.name;
+  bool publish = false;
+  {
+    std::lock_guard lock(mu_);
+    last_wifi_on_ = wifi.radio || wifi.connected;
+    last_wifi_name_ = wifi.connected ? wifi.name : std::wstring(L"연결 안 됨");
+    publish = settings_.wifi && sink_ != nullptr;
+  }
+  if (!publish) {
+    return;
+  }
+  static bool logged_pub = false;
+  if (!logged_pub) {
+    logged_pub = true;
+    Log(L"widget", L"wifi item %s", wifi.connected ? wifi.name.c_str() : L"disconnected");
+  }
+
+  StatusItem item;
+  item.id = kWifiId;
+  item.priority = kWifiPriority;
+  SetVectorIcon(&item, VectorIcon::kWifi, wifi.connected ? 1.0f : 0.0f, 0);
+  item.state = wifi.connected ? StatusState::kOn : StatusState::kOff;
+  std::wstring tip = L"Wi-Fi";
+  tip += L" · ";
+  tip += wifi.connected ? wifi.name : std::wstring(L"연결 안 됨");
+  item.tooltip = Truncate(std::move(tip), kStatusPanelTextMaxChars);
+
+  StatusPanel panel;
+  panel.title = L"Wi-Fi";
+  panel.rows.push_back(KvRow(L"상태", wifi.connected ? L"연결됨" : L"연결 안 됨"));
+  panel.rows.push_back(KvRow(L"네트워크", wifi.connected ? wifi.name : std::wstring(L"연결 안 됨")));
+  panel.rows.push_back(SepRow());
+  panel.rows.push_back(ButtonRow("wifi_settings", L"Wi-Fi 설정 열기"));
+  item.panel = std::move(panel);
+  Publish(std::move(item));
 }
 
 void BuiltinWidgets::SampleDue(ULONGLONG now) {
@@ -1318,7 +1372,7 @@ void BuiltinWidgets::SampleDue(ULONGLONG now) {
     net = settings_.network && net_due_ <= now;
     volume = (settings_.volume || settings_.control_center) && volume_due_ <= now;
     brightness = settings_.control_center && brightness_due_ <= now;
-    wlan = settings_.control_center && wlan_due_ <= now;
+    wlan = (settings_.wifi || settings_.control_center) && wlan_due_ <= now;
   }
   if (bat) {
     SampleBattery();

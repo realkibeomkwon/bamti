@@ -38,8 +38,7 @@ class BarLayout {
   void SetDpi(UINT dpi);
 
   const BarLayoutResult& Compute(const RECT& client, const std::wstring& clock_text,
-                                 const std::wstring& warning_text, const std::vector<StatusItem>& items,
-                                 bool show_control_center);
+                                 const std::wstring& warning_text, const std::vector<StatusItem>& items);
 
   IDWriteTextLayout* LayoutFor(const std::wstring& text);
 

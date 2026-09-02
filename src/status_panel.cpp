@@ -21,7 +21,7 @@ constexpr int kPanelSubDip = 18;
 constexpr int kPanelGaugeLabelDip = 18;
 constexpr int kPanelGaugeBarDip = 6;
 constexpr int kPanelGaugeNoteDip = 16;
-constexpr int kPanelGaugeGapDip = 10;
+constexpr int kPanelBarPadDip = 10;
 constexpr int kPanelSepDip = 9;
 constexpr int kPanelActionDip = 28;
 constexpr int kPanelKvDip = 18;
@@ -32,11 +32,39 @@ constexpr int kButtonGapDip = 8;
 constexpr int kButtonsPerLine = 3;
 constexpr int kPanelSliderLabelDip = 18;
 constexpr int kPanelSliderTrackDip = 6;
-constexpr int kPanelSliderPadDip = 8;
-constexpr int kPanelSliderGapDip = 10;
+// 키-값 행 높이(18dip)와 같아서, 기존 행 피치가 두 배가 된다.
+constexpr int kPanelRowGapDip = 18;
 
 int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
+}
+
+float BarCornerRadius(int bar_h_px, UINT dpi) {
+  const float dock = static_cast<float>(DipToPx(kCornerRadiusDip, dpi));
+  const float half = static_cast<float>(bar_h_px) * 0.5f;
+  return (std::min)(dock, half);
+}
+
+void FillBar(ID2D1RenderTarget* target, float left, float top, float right, float bottom, float radius,
+             ID2D1Brush* brush) {
+  if (target == nullptr || brush == nullptr || right <= left || bottom <= top) {
+    return;
+  }
+  const D2D1_ROUNDED_RECT rc{D2D1::RectF(left, top, right, bottom), radius, radius};
+  target->FillRoundedRectangle(rc, brush);
+}
+
+void DrawLabelValue(ID2D1RenderTarget* target, UINT dpi, const D2D1_RECT_F& row, const std::wstring& label,
+                    const std::wstring& value, ID2D1Brush* label_brush, ID2D1Brush* value_brush) {
+  if (value.empty()) {
+    DrawPopupText(target, dpi, label, row, label_brush);
+    return;
+  }
+  const float gap = static_cast<float>(DipToPx(8, dpi));
+  const float value_w = PopupTextWidth(dpi, value);
+  const float label_right = (std::max)(row.left, row.right - value_w - gap);
+  DrawPopupText(target, dpi, label, D2D1::RectF(row.left, row.top, label_right, row.bottom), label_brush);
+  DrawPopupText(target, dpi, value, row, value_brush, DWRITE_TEXT_ALIGNMENT_TRAILING);
 }
 
 int ButtonRunLen(const std::vector<StatusRow>& rows, size_t start) {
@@ -124,13 +152,24 @@ SIZE StatusPanelContent::Measure(UINT dpi) {
   width = (std::min)(width, DipToPx(kPanelMaxWidthDip, dpi));
 
   int y = pad;
+  const int row_gap = DipToPx(kPanelRowGapDip, dpi);
+  int blocks = 0;
+  auto begin_block = [&]() {
+    if (blocks > 0) {
+      y += row_gap;
+    }
+    ++blocks;
+  };
   if (!panel->title.empty()) {
+    begin_block();
     y += DipToPx(kPanelTitleDip, dpi);
   }
   if (!panel->subtitle.empty()) {
+    begin_block();
     y += DipToPx(kPanelSubDip, dpi);
   }
   if (!panel->updated_text.empty()) {
+    begin_block();
     y += DipToPx(kPanelSubDip, dpi);
   }
 
@@ -138,6 +177,7 @@ SIZE StatusPanelContent::Measure(UINT dpi) {
   for (size_t i = 0; i < rows.size();) {
     const StatusRow& row = rows[i];
     if (row.type == RowType::kButton) {
+      begin_block();
       const int run = ButtonRunLen(rows, i);
       const int h = DipToPx(kPanelActionDip, dpi);
       const int gap = DipToPx(kButtonGapDip, dpi);
@@ -160,16 +200,18 @@ SIZE StatusPanelContent::Measure(UINT dpi) {
       i += static_cast<size_t>(run);
       continue;
     }
+    begin_block();
     if (row.type == RowType::kGauge) {
       y += DipToPx(kPanelGaugeLabelDip, dpi);
+      y += DipToPx(kPanelBarPadDip, dpi);
       y += DipToPx(kPanelGaugeBarDip, dpi);
+      y += DipToPx(kPanelBarPadDip, dpi);
       if (!row.value_text.empty() && !row.detail.empty()) {
         y += DipToPx(kPanelGaugeNoteDip, dpi);
       }
       if (!row.note.empty()) {
         y += DipToPx(kPanelGaugeNoteDip, dpi);
       }
-      y += DipToPx(kPanelGaugeGapDip, dpi);
     } else if (row.type == RowType::kKeyValue) {
       y += DipToPx(kPanelKvDip, dpi);
     } else if (row.type == RowType::kText) {
@@ -186,12 +228,12 @@ SIZE StatusPanelContent::Measure(UINT dpi) {
     } else if (row.type == RowType::kSlider) {
       y += DipToPx(kPanelSliderLabelDip, dpi);
       const int track = DipToPx(kPanelSliderTrackDip, dpi);
-      const int spad = DipToPx(kPanelSliderPadDip, dpi);
+      const int spad = DipToPx(kPanelBarPadDip, dpi);
       Hit hit;
       hit.row = static_cast<int>(i);
       hit.rc = RECT{pad, y, width - pad, y + spad * 2 + track};
       hits_.push_back(hit);
-      y += spad * 2 + track + DipToPx(kPanelSliderGapDip, dpi);
+      y += spad * 2 + track;
     }
     ++i;
   }
@@ -233,10 +275,19 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
   }
 
   int y = pad;
+  const int row_gap = DipToPx(kPanelRowGapDip, dpi);
+  int blocks = 0;
+  auto begin_block = [&]() {
+    if (blocks > 0) {
+      y += row_gap;
+    }
+    ++blocks;
+  };
   auto draw_line = [&](const std::wstring& s, int height, ID2D1Brush* brush) {
     if (s.empty()) {
       return;
     }
+    begin_block();
     DrawPopupText(target, dpi, s,
                   D2D1::RectF(static_cast<float>(pad), static_cast<float>(y), static_cast<float>(width - pad),
                               static_cast<float>(y + height)),
@@ -250,7 +301,8 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
   const int label_h = DipToPx(kPanelGaugeLabelDip, dpi);
   const int bar_h = DipToPx(kPanelGaugeBarDip, dpi);
   const int note_h = DipToPx(kPanelGaugeNoteDip, dpi);
-  const int gap = DipToPx(kPanelGaugeGapDip, dpi);
+  const int bar_pad = DipToPx(kPanelBarPadDip, dpi);
+  const float bar_radius = BarCornerRadius(bar_h, dpi);
   const auto& rows = panel.rows;
   int hit_i = 0;
   for (size_t i = 0; i < rows.size();) {
@@ -258,6 +310,7 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
     const float left = static_cast<float>(pad);
     const float right = static_cast<float>(width - pad);
     if (row.type == RowType::kButton) {
+      begin_block();
       const int run = ButtonRunLen(rows, i);
       const int h = DipToPx(kPanelActionDip, dpi);
       int drawn = 0;
@@ -290,29 +343,25 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
       i += static_cast<size_t>(run);
       continue;
     }
+    begin_block();
     if (row.type == RowType::kGauge) {
       const bool value_right = !row.value_text.empty();
-      DrawPopupText(target, dpi, row.label,
-                    D2D1::RectF(left, static_cast<float>(y), right * 0.55f, static_cast<float>(y + label_h)),
-                    text.Get());
-      DrawPopupText(target, dpi, value_right ? row.value_text : row.detail,
-                    D2D1::RectF(right * 0.55f, static_cast<float>(y), right, static_cast<float>(y + label_h)),
-                    muted.Get());
-      y += label_h;
+      DrawLabelValue(target, dpi,
+                     D2D1::RectF(left, static_cast<float>(y), right, static_cast<float>(y + label_h)), row.label,
+                     value_right ? row.value_text : row.detail, text.Get(), muted.Get());
+      y += label_h + bar_pad;
       const float bar_top = static_cast<float>(y);
       const float bar_bottom = bar_top + static_cast<float>(bar_h);
-      target->FillRectangle(D2D1::RectF(left, bar_top, right, bar_bottom), track.Get());
+      FillBar(target, left, bar_top, right, bar_bottom, bar_radius, track.Get());
       if (row.fill_rgb != 0) {
         fill->SetColor(D2D1::ColorF(row.fill_rgb));
       }
       const float filled = left + (right - left) * row.value;
-      if (filled > left) {
-        target->FillRectangle(D2D1::RectF(left, bar_top, filled, bar_bottom), fill.Get());
-      }
+      FillBar(target, left, bar_top, filled, bar_bottom, bar_radius, fill.Get());
       if (row.fill_rgb != 0) {
         fill->SetColor(fill_c);
       }
-      y += bar_h;
+      y += bar_h + bar_pad;
       if (value_right && !row.detail.empty()) {
         DrawPopupText(target, dpi, row.detail,
                       D2D1::RectF(left, static_cast<float>(y), right, static_cast<float>(y + note_h)), muted.Get());
@@ -323,13 +372,10 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
                       D2D1::RectF(left, static_cast<float>(y), right, static_cast<float>(y + note_h)), fill.Get());
         y += note_h;
       }
-      y += gap;
     } else if (row.type == RowType::kKeyValue) {
       const int h = DipToPx(kPanelKvDip, dpi);
-      DrawPopupText(target, dpi, row.label,
-                    D2D1::RectF(left, static_cast<float>(y), right * 0.55f, static_cast<float>(y + h)), text.Get());
-      DrawPopupText(target, dpi, row.value_text,
-                    D2D1::RectF(right * 0.55f, static_cast<float>(y), right, static_cast<float>(y + h)), muted.Get());
+      DrawLabelValue(target, dpi, D2D1::RectF(left, static_cast<float>(y), right, static_cast<float>(y + h)),
+                     row.label, row.value_text, text.Get(), muted.Get());
       y += h;
     } else if (row.type == RowType::kText) {
       const int h = DipToPx(kPanelTextDip, dpi);
@@ -361,7 +407,13 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
           const float radius = static_cast<float>(track_h) * 0.5f;
           const D2D1_ROUNDED_RECT track_rc{D2D1::RectF(track_l, track_t, right, track_t + static_cast<float>(track_h)),
                                            radius, radius};
+          if (row.on) {
+            fill->SetColor(AccentFillColor(dark));
+          }
           target->FillRoundedRectangle(track_rc, row.on ? fill.Get() : track.Get());
+          if (row.on) {
+            fill->SetColor(fill_c);
+          }
           const float thumb_r = radius - 2.0f;
           const float thumb_cx = row.on ? right - radius : track_l + radius;
           const float thumb_cy = track_t + radius;
@@ -373,14 +425,10 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
     } else if (row.type == RowType::kSlider) {
       const int s_label_h = DipToPx(kPanelSliderLabelDip, dpi);
       const int s_track_h = DipToPx(kPanelSliderTrackDip, dpi);
-      const int spad = DipToPx(kPanelSliderPadDip, dpi);
-      const int sgap = DipToPx(kPanelSliderGapDip, dpi);
-      DrawPopupText(target, dpi, row.label,
-                    D2D1::RectF(left, static_cast<float>(y), right * 0.55f, static_cast<float>(y + s_label_h)),
-                    text.Get());
-      DrawPopupText(target, dpi, row.value_text,
-                    D2D1::RectF(right * 0.55f, static_cast<float>(y), right, static_cast<float>(y + s_label_h)),
-                    muted.Get());
+      const int spad = DipToPx(kPanelBarPadDip, dpi);
+      DrawLabelValue(target, dpi,
+                     D2D1::RectF(left, static_cast<float>(y), right, static_cast<float>(y + s_label_h)), row.label,
+                     row.value_text, text.Get(), muted.Get());
       y += s_label_h;
       if (static_cast<size_t>(hit_i) >= hits_.size()) {
         NoteHitOutOfRange(hit_i, hits_.size(), static_cast<int>(i), rows.size());
@@ -391,17 +439,19 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
         } else {
           const float track_top = static_cast<float>(hit.rc.top + spad);
           const float track_bottom = track_top + static_cast<float>(s_track_h);
-          const float radius = static_cast<float>(s_track_h) * 0.5f;
-          const D2D1_ROUNDED_RECT track_rc{D2D1::RectF(left, track_top, right, track_bottom), radius, radius};
-          target->FillRoundedRectangle(track_rc, track.Get());
+          const float radius = BarCornerRadius(s_track_h, dpi);
+          FillBar(target, left, track_top, right, track_bottom, radius, track.Get());
           const float value = ClampUnit(row.value);
           const SliderGeometry geom = SliderGeom(left, right, dpi);
           const float cx = geom.hi > geom.lo ? geom.lo + (geom.hi - geom.lo) * value : geom.lo;
-          const float cy = track_top + radius;
-          if (cx > left) {
-            const D2D1_ROUNDED_RECT fill_rc{D2D1::RectF(left, track_top, cx, track_bottom), radius, radius};
-            target->FillRoundedRectangle(fill_rc, fill.Get());
+          const float cy = track_top + static_cast<float>(s_track_h) * 0.5f;
+          if (row.fill_rgb != 0) {
+            fill->SetColor(D2D1::ColorF(row.fill_rgb));
+          } else {
+            fill->SetColor(AccentFillColor(dark));
           }
+          FillBar(target, left, track_top, cx, track_bottom, radius, fill.Get());
+          fill->SetColor(fill_c);
           float draw_r = geom.thumb_r;
           if (hot_index == hit_i - 1 || drag_row_ == static_cast<int>(i)) {
             draw_r += 2.0f;
@@ -409,7 +459,7 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
           target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), draw_r, draw_r), thumb.Get());
         }
       }
-      y += spad * 2 + s_track_h + sgap;
+      y += spad * 2 + s_track_h;
     }
     ++i;
   }

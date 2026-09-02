@@ -152,6 +152,61 @@ void RecolorGrayKeepAlpha(BgraImage& image, D2D1_COLOR_F color) {
   }
 }
 
+struct InkBounds {
+  int min_x = 0;
+  int min_y = 0;
+  int max_x = -1;
+  int max_y = -1;
+  int ink = 0;
+
+  bool ok() const { return max_x >= min_x; }
+  int width() const { return ok() ? max_x - min_x + 1 : 0; }
+  int height() const { return ok() ? max_y - min_y + 1 : 0; }
+};
+
+InkBounds FindInkBounds(const BgraImage& image, int alpha_min) {
+  InkBounds b;
+  b.min_x = image.width;
+  b.min_y = image.height;
+  for (int y = 0; y < image.height; ++y) {
+    for (int x = 0; x < image.width; ++x) {
+      if (image.pixels[(static_cast<size_t>(y) * image.width + x) * 4 + 3] > alpha_min) {
+        b.min_x = (std::min)(b.min_x, x);
+        b.min_y = (std::min)(b.min_y, y);
+        b.max_x = (std::max)(b.max_x, x);
+        b.max_y = (std::max)(b.max_y, y);
+        ++b.ink;
+      }
+    }
+  }
+  return b;
+}
+
+bool FillsMostOfCanvas(const InkBounds& b, int width, int height) {
+  return b.width() >= width * 7 / 10 && b.height() >= height * 7 / 10;
+}
+
+void CropImageToBounds(BgraImage& image, InkBounds b) {
+  b.min_x = (std::max)(0, b.min_x - 1);
+  b.min_y = (std::max)(0, b.min_y - 1);
+  b.max_x = (std::min)(image.width - 1, b.max_x + 1);
+  b.max_y = (std::min)(image.height - 1, b.max_y + 1);
+  const int new_w = b.max_x - b.min_x + 1;
+  const int new_h = b.max_y - b.min_y + 1;
+  if (new_w == image.width && new_h == image.height && b.min_x == 0 && b.min_y == 0) {
+    return;
+  }
+  std::vector<std::uint8_t> cropped(static_cast<size_t>(new_w) * static_cast<size_t>(new_h) * 4);
+  for (int y = 0; y < new_h; ++y) {
+    const std::uint8_t* src = image.pixels.data() + (static_cast<size_t>(b.min_y + y) * image.width + b.min_x) * 4;
+    std::uint8_t* dst = cropped.data() + static_cast<size_t>(y) * new_w * 4;
+    memcpy(dst, src, static_cast<size_t>(new_w) * 4);
+  }
+  image.width = new_w;
+  image.height = new_h;
+  image.pixels.swap(cropped);
+}
+
 }  // namespace
 
 IWICImagingFactory* WicFactory() {
@@ -189,46 +244,28 @@ void CropPaddedJumbo(BgraImage& image) {
   if (image.width < 8 || image.height < 8) {
     return;
   }
-  auto alpha_at = [&](int x, int y) {
-    return image.pixels[(static_cast<size_t>(y) * image.width + x) * 4 + 3];
-  };
-  int min_x = image.width;
-  int min_y = image.height;
-  int max_x = -1;
-  int max_y = -1;
-  for (int y = 0; y < image.height; ++y) {
-    for (int x = 0; x < image.width; ++x) {
-      if (alpha_at(x, y) > 12) {
-        min_x = (std::min)(min_x, x);
-        min_y = (std::min)(min_y, y);
-        max_x = (std::max)(max_x, x);
-        max_y = (std::max)(max_y, y);
-      }
-    }
-  }
-  if (max_x < min_x) {
+  const InkBounds loose = FindInkBounds(image, 12);
+  if (!loose.ok()) {
     return;
   }
-  const int content_w = max_x - min_x + 1;
-  const int content_h = max_y - min_y + 1;
-  if (content_w >= image.width * 7 / 10 && content_h >= image.height * 7 / 10) {
+  // IShellItemImageFactory 점보 비트맵은 32/48px 아이콘을 256 캔버스 중앙에 두고
+  // 가장자리에 희미한 테두리를 남기는 경우가 있다. alpha>12 경계만 보면 캔버스
+  // 전체가 내용으로 보여 크롭이 실패하므로, 불투명 잉크(alpha>128)도 본다.
+  const InkBounds tight = FindInkBounds(image, 128);
+  const bool loose_fills = FillsMostOfCanvas(loose, image.width, image.height);
+  const int loose_area = loose.width() * loose.height();
+  const int loose_fill_pct = loose_area > 0 ? loose.ink * 100 / loose_area : 0;
+  const bool framed_jumbo = image.width >= 64 && image.height >= 64 && loose_fills && loose_fill_pct < 35 &&
+                            tight.ok() && tight.width() >= 8 && tight.height() >= 8 &&
+                            !FillsMostOfCanvas(tight, image.width, image.height);
+  if (framed_jumbo) {
+    CropImageToBounds(image, tight);
     return;
   }
-  min_x = (std::max)(0, min_x - 1);
-  min_y = (std::max)(0, min_y - 1);
-  max_x = (std::min)(image.width - 1, max_x + 1);
-  max_y = (std::min)(image.height - 1, max_y + 1);
-  const int new_w = max_x - min_x + 1;
-  const int new_h = max_y - min_y + 1;
-  std::vector<std::uint8_t> cropped(static_cast<size_t>(new_w) * static_cast<size_t>(new_h) * 4);
-  for (int y = 0; y < new_h; ++y) {
-    const std::uint8_t* src = image.pixels.data() + (static_cast<size_t>(min_y + y) * image.width + min_x) * 4;
-    std::uint8_t* dst = cropped.data() + static_cast<size_t>(y) * new_w * 4;
-    memcpy(dst, src, static_cast<size_t>(new_w) * 4);
+  if (loose_fills) {
+    return;
   }
-  image.width = new_w;
-  image.height = new_h;
-  image.pixels.swap(cropped);
+  CropImageToBounds(image, loose);
 }
 
 void ZeroTransparentRgb(BgraImage& image) {
