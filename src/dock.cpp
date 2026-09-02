@@ -238,6 +238,18 @@ ID2D1Factory* D2dFactory() {
   return factory.Get();
 }
 
+// 셸 아이콘 캐시는 48/96/256 단계로 관리된다. 그리는 데 필요한 크기 이상인 가장 작은
+// 단계를 요청하면, 원본 자산이 작은 앱에서 셸이 크게 확대한 비트맵을 돌려주는 일을 막는다.
+int ShellIconRequestPx(int px) {
+  if (px <= 48) {
+    return 48;
+  }
+  if (px <= 96) {
+    return 96;
+  }
+  return 256;
+}
+
 HBITMAP BitmapFromShellItem(const std::wstring& path, int request_px) {
   Microsoft::WRL::ComPtr<IShellItem> item;
   if (FAILED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item))) || !item) {
@@ -350,7 +362,8 @@ HBITMAP BitmapFromIconResource(const std::wstring& resource, int px) {
   auto extract = [&]() -> HBITMAP {
     HICON icon = nullptr;
     const UINT got =
-        PrivateExtractIconsW(path.c_str(), has_index ? index : 0, 256, 256, &icon, nullptr, 1, LR_DEFAULTCOLOR);
+        PrivateExtractIconsW(path.c_str(), has_index ? index : 0, ShellIconRequestPx(px), ShellIconRequestPx(px), &icon,
+                             nullptr, 1, LR_DEFAULTCOLOR);
     if (got == 0 || icon == nullptr) {
       return nullptr;
     }
@@ -366,7 +379,7 @@ HBITMAP BitmapFromIconResource(const std::wstring& resource, int px) {
       return ready;
     }
   }
-  if (HBITMAP shell = BitmapFromShellItem(path, 256)) {
+  if (HBITMAP shell = BitmapFromShellItem(path, ShellIconRequestPx(px))) {
     if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
       return ready;
     }
@@ -1833,59 +1846,69 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
   const wchar_t* exe_name = PathFindFileNameW(app.exe_path.c_str());
   const bool explorer = exe_name != nullptr && _wcsicmp(exe_name, L"explorer.exe") == 0;
   if (explorer && !app.exe_path.empty()) {
-    if (HBITMAP shell = BitmapFromShellItem(app.exe_path, 256)) {
+    if (HBITMAP shell = BitmapFromShellItem(app.exe_path, ShellIconRequestPx(px))) {
       if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
+        Log(L"dock", L"icon source=%s name=%s px=%d", L"exe_shell", app.display_name.c_str(), px);
         return ready;
       }
     }
   }
   if (!app.aumid.empty()) {
-    if (HBITMAP shell = BitmapFromAumid(app.aumid, 256)) {
+    if (HBITMAP shell = BitmapFromAumid(app.aumid, ShellIconRequestPx(px))) {
       if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
+        Log(L"dock", L"icon source=%s name=%s px=%d", L"aumid", app.display_name.c_str(), px);
         return ready;
       }
     }
   }
   if (!app.icon_resource.empty()) {
     if (HBITMAP ready = BitmapFromIconResource(app.icon_resource, px)) {
+      Log(L"dock", L"icon source=%s name=%s px=%d", L"icon_resource", app.display_name.c_str(), px);
       return ready;
     }
   }
   if (identity && app.hwnd != nullptr) {
     if (HBITMAP ready = BitmapFromIcon(QueryWindowIcon(app.hwnd), px)) {
+      Log(L"dock", L"icon source=%s name=%s px=%d", L"window_icon", app.display_name.c_str(), px);
       return ready;
     }
   }
   if (!app.exe_path.empty() && !PathImpliesGenericIcon(app.exe_path)) {
     HICON extracted = nullptr;
     const UINT got =
-        PrivateExtractIconsW(app.exe_path.c_str(), 0, 256, 256, &extracted, nullptr, 1, LR_DEFAULTCOLOR);
+        PrivateExtractIconsW(app.exe_path.c_str(), 0, ShellIconRequestPx(px), ShellIconRequestPx(px), &extracted,
+                             nullptr, 1, LR_DEFAULTCOLOR);
     if (got != 0 && extracted != nullptr) {
       HBITMAP ready = BitmapFromIcon(extracted, px);
       DestroyIcon(extracted);
       if (ready != nullptr) {
+        Log(L"dock", L"icon source=%s name=%s px=%d", L"exe_extract", app.display_name.c_str(), px);
         return ready;
       }
     }
-    if (HBITMAP shell = BitmapFromShellItem(app.exe_path, 256)) {
+    if (HBITMAP shell = BitmapFromShellItem(app.exe_path, ShellIconRequestPx(px))) {
       if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
+        Log(L"dock", L"icon source=%s name=%s px=%d", L"exe_shell", app.display_name.c_str(), px);
         return ready;
       }
     }
     if (HBITMAP jumbo = BitmapFromJumboList(app.exe_path)) {
       if (HBITMAP ready = FinalizeIconBitmap(jumbo, px, true)) {
+        Log(L"dock", L"icon source=%s name=%s px=%d", L"jumbo", app.display_name.c_str(), px);
         return ready;
       }
     }
   }
   if (app.hwnd != nullptr) {
     if (HBITMAP ready = BitmapFromIcon(QueryWindowIcon(app.hwnd), px)) {
+      Log(L"dock", L"icon source=%s name=%s px=%d", L"window_icon", app.display_name.c_str(), px);
       return ready;
     }
   }
   if (!app.exe_path.empty()) {
-    if (HBITMAP shell = BitmapFromShellItem(app.exe_path, 256)) {
+    if (HBITMAP shell = BitmapFromShellItem(app.exe_path, ShellIconRequestPx(px))) {
       if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
+        Log(L"dock", L"icon source=%s name=%s px=%d", L"exe_shell", app.display_name.c_str(), px);
         return ready;
       }
     }
@@ -1898,6 +1921,7 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
     HBITMAP ready = BitmapFromIcon(stock.hIcon, px);
     DestroyIcon(stock.hIcon);
     if (ready != nullptr) {
+      Log(L"dock", L"icon source=%s name=%s px=%d", L"stock", app.display_name.c_str(), px);
       return ready;
     }
   }
