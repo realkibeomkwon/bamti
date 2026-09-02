@@ -8,6 +8,7 @@
 #include "log.hpp"
 #include "settings.hpp"
 #include "theme.hpp"
+#include "tray_popup_guard.hpp"
 #include "watchdog.hpp"
 
 #include <commctrl.h>
@@ -311,14 +312,9 @@ bool MenuBar::Create(HINSTANCE instance) {
   }
   bar_order_ = widgets_.settings().bar_order;
   tray_.SetRectLookup([this](uint64_t key, RECT* out) {
-    if (hwnd_ == nullptr || out == nullptr) {
-      return false;
-    }
     for (const BarSegment& seg : layout_.last().segments) {
       if (seg.kind == SegmentKind::kStatus && TrayMirror::ParseId(seg.id) == key) {
-        *out = seg.rect;
-        MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(out), 2);
-        return true;
+        return SegmentScreenRect(seg.id, out);
       }
     }
     return false;
@@ -629,6 +625,12 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           return 0;
         }
         status_popup_.Close();
+        if (hit->id.rfind("bamti.tray/", 0) == 0) {
+          RECT anchor{};
+          if (SegmentScreenRect(hit->id, &anchor)) {
+            TrayPopupGuardArm(anchor, tray_.OwnerPid(TrayMirror::ParseId(hit->id)));
+          }
+        }
         StatusEvent ev;
         ev.id = hit->id;
         ev.event = "click";
@@ -678,6 +680,10 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           ClientToScreen(hwnd_, &screen);
           if (tray_.ForwardsContextMenu()) {
             status_popup_.Close();
+            RECT anchor{};
+            if (SegmentScreenRect(hit->id, &anchor)) {
+              TrayPopupGuardArm(anchor, tray_.OwnerPid(TrayMirror::ParseId(hit->id)));
+            }
             StatusEvent ev;
             ev.id = hit->id;
             ev.event = "click";
@@ -933,6 +939,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     case WM_DESTROY:
+      TrayPopupGuardShutdown();
       RemoveWinHook();
       KillTimer(hwnd_, kClockTimerId);
       KillTimer(hwnd_, kRepaintTimerId);
@@ -1406,6 +1413,20 @@ const BarSegment* MenuBar::HitSegment(POINT client) const {
     }
   }
   return nullptr;
+}
+
+bool MenuBar::SegmentScreenRect(const std::string& id, RECT* out) const {
+  if (hwnd_ == nullptr || out == nullptr) {
+    return false;
+  }
+  for (const BarSegment& seg : layout_.last().segments) {
+    if (seg.kind == SegmentKind::kStatus && seg.id == id) {
+      *out = seg.rect;
+      MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(out), 2);
+      return true;
+    }
+  }
+  return false;
 }
 
 void MenuBar::OpenOverflow() {

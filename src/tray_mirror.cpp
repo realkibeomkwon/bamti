@@ -322,6 +322,15 @@ bool TrayMirror::ForwardsContextMenu() const {
   return intercept_ != nullptr;
 }
 
+DWORD TrayMirror::OwnerPid(uint64_t key) const {
+  std::lock_guard lock(mu_);
+  const auto it = items_.find(key);
+  if (it == items_.end()) {
+    return 0;
+  }
+  return it->second.owner_pid;
+}
+
 void TrayMirror::SetSettings(const WidgetSettings& next) {
   bool start_worker = false;
   bool stop_worker = false;
@@ -669,6 +678,9 @@ void TrayMirror::Publish(const TrayIconInfo& icon, int order) {
     st.visible = item.visible;
     st.icon_hash = item.icon.cache_key;
     st.id = item.id;
+    if (icon.owner != nullptr) {
+      GetWindowThreadProcessId(icon.owner, &st.owner_pid);
+    }
     items_[icon.key] = std::move(st);
   }
   if (sink != nullptr) {
@@ -752,6 +764,9 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
     st.visible = copy.from_overflow ? true : (copy.offscreen == FALSE);
     st.icon_hash = copy.png.empty() ? 0 : Fnv1a64(copy.png.data(), copy.png.size());
     st.id = MakeId(copy.key);
+    if (copy.owner != nullptr) {
+      GetWindowThreadProcessId(copy.owner, &st.owner_pid);
+    }
     next.push_back(st);
     keep.push_back(std::move(copy));
   }

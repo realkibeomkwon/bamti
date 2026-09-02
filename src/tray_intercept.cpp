@@ -401,6 +401,8 @@ class TrayBackendIntercept final : public TrayBackend {
     } else {
       GetCursorPos(&pt);
     }
+    Log(L"tray", L"intercept invoke pt key=0x%llX have_rect=%d pt=%ld,%ld rc=%ld,%ld,%ld,%ld",
+        static_cast<unsigned long long>(key), have_rect ? 1 : 0, pt.x, pt.y, rc.left, rc.top, rc.right, rc.bottom);
     if (version >= NOTIFYICON_VERSION_4) {
       // NOTIFYICON_VERSION_4 규약에는 더블클릭 이벤트가 없다. 더블클릭도 NIN_SELECT 한 번이다.
       if (pt.x > 32767 || pt.y > 32767 || pt.x < -32768 || pt.y < -32768) {
@@ -901,6 +903,13 @@ class TrayBackendIntercept final : public TrayBackend {
     LONG v = id.message == 2 ? cursor.y : cursor.x;
     if (found) {
       v = id.message == 2 ? (rc.top + rc.bottom) / 2 : (rc.left + rc.right) / 2;
+    }
+    static ULONGLONG last_log = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (last_log == 0 || now - last_log >= 1000) {
+      last_log = now;
+      Log(L"tray", L"intercept getrect key=0x%llX found=%d axis=%s v=%ld",
+          static_cast<unsigned long long>(key), found ? 1 : 0, id.message == 2 ? L"y" : L"x", v);
     }
     return pack(v);
   }

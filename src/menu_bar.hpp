@@ -95,6 +95,7 @@ class MenuBar {
   void FinishReorder();
   bool ReorderCursor(POINT client) const;
   const BarSegment* HitSegment(POINT client) const;
+  bool SegmentScreenRect(const std::string& id, RECT* out) const;
   void ArmToggle(std::string id, std::string row_id, uint64_t revision, bool on);
   void ArmSlider(std::string id, std::string row_id, uint64_t revision, float value);
   void OnToggleTimeout();

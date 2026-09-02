@@ -39,6 +39,7 @@ class TrayMirror : public StatusSource {
   void OnExplorerRestart();
   void SetRectLookup(std::function<bool(uint64_t key, RECT* screen)> lookup);
   bool ForwardsContextMenu() const;
+  DWORD OwnerPid(uint64_t key) const;  // 모르면 0
   std::vector<MenuItem> MenuItems() const;
   static uint64_t ParseId(const std::string& id);
   static std::string KeyText(uint64_t key);
@@ -57,6 +58,7 @@ class TrayMirror : public StatusSource {
     bool visible = true;
     uint64_t icon_hash = 0;
     std::string id;
+    DWORD owner_pid = 0;
   };
 
   void WorkerLoop();

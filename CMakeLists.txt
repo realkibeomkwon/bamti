@@ -41,6 +41,7 @@ add_executable(bamti WIN32
   src/tray_backend_uia.cpp
   src/tray_intercept.cpp
   src/tray_mirror.cpp
+  src/tray_popup_guard.cpp
 )
 
 target_include_directories(bamti PRIVATE src)
