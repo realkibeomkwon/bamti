@@ -46,6 +46,14 @@ constexpr int kRebroadcastMax = 3;
 
 std::unique_ptr<TrayBackend> g_prestarted;
 ULONGLONG g_prestart_tick = 0;
+std::atomic<int> g_spy_show_blocked{0};
+
+void NoteShowAttempt() {
+  const int n = g_spy_show_blocked.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (n <= 3) {
+    Log(L"tray", L"intercept spy show blocked count=%d", n);
+  }
+}
 
 struct PendingMsg {
   UINT msg = 0;
@@ -544,9 +552,11 @@ class TrayBackendIntercept final : public TrayBackend {
       }
     }
 
-    HWND spy = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kSpyClass, kSpyClass, WS_OVERLAPPEDWINDOW,
-                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, nullptr, nullptr,
-                                wc.hInstance, this);
+    // 선점 때문에 FindWindowW(L"Shell_TrayWnd", ...)가 이 창을 돌려주므로, 작업 표시줄을
+    // 찾아 ShowWindow를 부르는 바깥 코드가 이 창을 화면에 띄울 수 있다. 제목 표시줄도
+    // 테두리도 없는 0 크기 팝업으로 만들어 두면 표시되더라도 아무것도 그려지지 않는다.
+    HWND spy = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+                               kSpyClass, kSpyClass, WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, wc.hInstance, this);
     if (spy == nullptr) {
       Log(L"tray", L"intercept CreateWindow err=%lu", GetLastError());
       if (ready_ != nullptr) {
@@ -662,6 +672,14 @@ class TrayBackendIntercept final : public TrayBackend {
     if (msg >= WM_USER) {
       ForwardOrQueue(hwnd, msg, wp, lp);
       return 0;
+    }
+    if (msg == WM_WINDOWPOSCHANGING) {
+      auto* pos = reinterpret_cast<WINDOWPOS*>(lp);
+      if (pos != nullptr && (pos->flags & SWP_SHOWWINDOW) != 0) {
+        pos->flags &= ~SWP_SHOWWINDOW;
+        NoteShowAttempt();
+      }
+      return DefWindowProcW(hwnd, msg, wp, lp);
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
   }
