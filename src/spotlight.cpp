@@ -45,9 +45,11 @@ constexpr int kGlyphDip = 18;
 constexpr UINT_PTR kFileSearchTimer = 1;
 constexpr UINT kFileSearchDoneMsg = WM_APP + 40;
 constexpr UINT kIconReadyMsg = WM_APP + 41;
+constexpr UINT kAppsReadyMsg = WM_APP + 42;
 constexpr UINT kFileSearchDelayMs = 40;
 constexpr ULONGLONG kWalkBudgetMs = 45;
-constexpr ULONGLONG kAppReloadMs = 60000;
+// 앱 설치와 제거는 드문 사건이다. 1분마다 다시 읽으면 열 때마다 재열거하는 것과 같다.
+constexpr ULONGLONG kAppReloadMs = 600000;
 UINT g_file_search_count = 0;
 ULONGLONG g_file_search_window = 0;
 UINT g_icon_ready_count = 0;
@@ -964,6 +966,11 @@ struct FileSearchPayload {
   std::vector<Spotlight::FileHit> hits;
 };
 
+struct AppsPayload {
+  uint64_t gen = 0;
+  std::vector<std::pair<std::wstring, std::wstring>> raw;
+};
+
 struct IconPayload {
   uint64_t gen = 0;
   std::wstring path;
@@ -1348,6 +1355,9 @@ LRESULT Spotlight::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case kIconReadyMsg:
       NotePostedStorm(L"icon-ready", g_icon_ready_count, g_icon_ready_window);
       AcceptIcon(reinterpret_cast<void*>(lparam));
+      return 0;
+    case kAppsReadyMsg:
+      AcceptApps(reinterpret_cast<void*>(lparam));
       return 0;
     case WM_MOUSEMOVE: {
       const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
@@ -1764,37 +1774,69 @@ void Spotlight::AcceptIcon(void* payload) {
   }
 }
 
-void Spotlight::ReloadApps() {
+void Spotlight::StartAppsReload() {
+  if (hwnd_ == nullptr) {
+    return;
+  }
+  if (apps_inflight_.load(std::memory_order_acquire) != 0) {
+    return;
+  }
+  const uint64_t gen = apps_gen_.load(std::memory_order_acquire);
+  const HWND hwnd = hwnd_;
+  apps_inflight_.fetch_add(1, std::memory_order_acq_rel);
+  std::thread([this, gen, hwnd]() {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool com_ok = SUCCEEDED(com) || com == S_FALSE;
+
+    std::unordered_set<std::wstring> seen;
+    std::vector<std::pair<std::wstring, std::wstring>> raw;
+    LARGE_INTEGER freq{};
+    LARGE_INTEGER t0{};
+    LARGE_INTEGER t1{};
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+    const bool from_apps = CollectAppsFolder(raw, seen);
+    QueryPerformanceCounter(&t1);
+    if (from_apps) {
+      Log(L"spotlight", L"AppsFolder enumerate %d apps in %.1f ms", static_cast<int>(raw.size()),
+          SpotlightElapsedMs(freq, t0, t1));
+    } else {
+      static bool logged_fallback = false;
+      if (!logged_fallback) {
+        logged_fallback = true;
+        Log(L"spotlight", L"AppsFolder enumerate failed; falling back to Start Menu shortcuts");
+      }
+      CollectFolder(KnownFolder(FOLDERID_StartMenu), raw, seen);
+      CollectFolder(KnownFolder(FOLDERID_CommonStartMenu), raw, seen);
+    }
+    std::sort(raw.begin(), raw.end(), [](const auto& a, const auto& b) {
+      return CompareStringEx(LOCALE_NAME_USER_DEFAULT, LINGUISTIC_IGNORECASE, a.first.c_str(),
+                             static_cast<int>(a.first.size()), b.first.c_str(), static_cast<int>(b.first.size()),
+                             nullptr, nullptr, 0) == CSTR_LESS_THAN;
+    });
+
+    auto* payload = new AppsPayload;
+    payload->gen = gen;
+    payload->raw = std::move(raw);
+    if (!PostMessageW(hwnd, kAppsReadyMsg, 0, reinterpret_cast<LPARAM>(payload))) {
+      delete payload;
+    }
+    if (com_ok) {
+      CoUninitialize();
+    }
+    apps_inflight_.fetch_sub(1, std::memory_order_acq_rel);
+  }).detach();
+}
+
+void Spotlight::AcceptApps(void* payload) {
+  std::unique_ptr<AppsPayload> owned(static_cast<AppsPayload*>(payload));
+  if (!owned || owned->gen != apps_gen_.load(std::memory_order_acquire)) {
+    return;
+  }
   DestroyAppIcons();
   apps_.clear();
-  std::unordered_set<std::wstring> seen;
-  std::vector<std::pair<std::wstring, std::wstring>> raw;
-  LARGE_INTEGER freq{};
-  LARGE_INTEGER t0{};
-  LARGE_INTEGER t1{};
-  QueryPerformanceFrequency(&freq);
-  QueryPerformanceCounter(&t0);
-  const bool from_apps = CollectAppsFolder(raw, seen);
-  QueryPerformanceCounter(&t1);
-  if (from_apps) {
-    Log(L"spotlight", L"AppsFolder enumerate %d apps in %.1f ms", static_cast<int>(raw.size()),
-        SpotlightElapsedMs(freq, t0, t1));
-  } else {
-    static bool logged_fallback = false;
-    if (!logged_fallback) {
-      logged_fallback = true;
-      Log(L"spotlight", L"AppsFolder enumerate failed; falling back to Start Menu shortcuts");
-    }
-    CollectFolder(KnownFolder(FOLDERID_StartMenu), raw, seen);
-    CollectFolder(KnownFolder(FOLDERID_CommonStartMenu), raw, seen);
-  }
-  std::sort(raw.begin(), raw.end(), [](const auto& a, const auto& b) {
-    return CompareStringEx(LOCALE_NAME_USER_DEFAULT, LINGUISTIC_IGNORECASE, a.first.c_str(),
-                           static_cast<int>(a.first.size()), b.first.c_str(), static_cast<int>(b.first.size()), nullptr,
-                           nullptr, 0) == CSTR_LESS_THAN;
-  });
-  apps_.reserve(raw.size());
-  for (auto& item : raw) {
+  apps_.reserve(owned->raw.size());
+  for (auto& item : owned->raw) {
     AppEntry entry;
     entry.name = std::move(item.first);
     entry.path = std::move(item.second);
@@ -1802,11 +1844,16 @@ void Spotlight::ReloadApps() {
     apps_.push_back(std::move(entry));
   }
   apps_loaded_at_ = GetTickCount64();
+  Log(L"spotlight", L"apps ready %d", static_cast<int>(apps_.size()));
+  if (visible_) {
+    RebuildMatches();
+    Present();
+  }
 }
 
 void Spotlight::EnsureApps() {
   if (apps_.empty() || GetTickCount64() - apps_loaded_at_ > kAppReloadMs) {
-    ReloadApps();
+    StartAppsReload();
   }
 }
 
@@ -1881,10 +1928,14 @@ void Spotlight::AcceptFileHits(void* payload) {
 
 void Spotlight::WaitForFileSearches() {
   search_gen_.fetch_add(1, std::memory_order_acq_rel);
+  apps_gen_.fetch_add(1, std::memory_order_acq_rel);
   while (search_inflight_.load(std::memory_order_acquire) != 0) {
     Sleep(10);
   }
   while (icon_inflight_.load(std::memory_order_acquire) != 0) {
+    Sleep(10);
+  }
+  while (apps_inflight_.load(std::memory_order_acquire) != 0) {
     Sleep(10);
   }
   if (hwnd_ != nullptr) {
@@ -1904,6 +1955,10 @@ void Spotlight::WaitForFileSearches() {
         }
         delete payload;
       }
+    }
+    while (PeekMessageW(&msg, hwnd_, kAppsReadyMsg, kAppsReadyMsg, PM_REMOVE) != FALSE) {
+      auto* payload = reinterpret_cast<AppsPayload*>(msg.lParam);
+      delete payload;
     }
   }
   icon_pending_.clear();

@@ -74,7 +74,8 @@ class Spotlight {
   bool EnsureRenderer();
   bool EnsureLayer(int width, int height);
   void ReleaseLayer();
-  void ReloadApps();
+  void StartAppsReload();
+  void AcceptApps(void* payload);
   void EnsureApps();
   void DestroyAppIcons();
   void DestroyFileIcons();
@@ -122,6 +123,8 @@ class Spotlight {
   int layer_h_ = 0;
   RECT search_rect_{};
   ULONGLONG apps_loaded_at_ = 0;
+  std::atomic<uint64_t> apps_gen_{0};
+  std::atomic<int> apps_inflight_{0};
   UINT font_dpi_ = 0;
   UINT edit_font_dpi_ = 0;
   bool visible_ = false;
