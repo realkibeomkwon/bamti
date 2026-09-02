@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bar_layout.hpp"
+#include "bar_menu.hpp"
 #include "clock_flyout.hpp"
 #include "clock_renderer.hpp"
 #include "pipe_server.hpp"
@@ -54,6 +55,10 @@ class MenuBar {
                 double bpbegin_ms, double bpend_ms);
   void ShowContextMenu(POINT screen);
   void ShowTrayIconMenu(POINT screen, const std::string& id);
+  void SyncTraySubmenu();
+  void OpenTraySubmenu();
+  void CloseTraySubmenu(const wchar_t* reason);
+  static void AfterBarPopupTick(void* ctx);
   void ApplySettings(const WidgetSettings& next);
   void StartTrayPeek();
   void EndTrayPeek();
@@ -151,6 +156,9 @@ class MenuBar {
   StartMenu start_menu_;
   Spotlight spotlight_;
   PopupSurface status_popup_;
+  std::unique_ptr<BarMenuContent> bar_menu_;
+  std::unique_ptr<BarMenuContent> bar_submenu_;
+  PopupSurface bar_submenu_popup_;
   std::unique_ptr<StatusPanelContent> status_panel_;
   std::unique_ptr<OverflowContent> overflow_panel_;
   std::unique_ptr<ControlCenterContent> cc_panel_;

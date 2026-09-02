@@ -252,6 +252,7 @@ MenuBar::~MenuBar() {
   start_menu_.Hide();
   spotlight_.Hide();
   status_popup_.Destroy();
+  bar_submenu_popup_.Destroy();
   if (hwnd_) {
     DestroyWindow(hwnd_);
     hwnd_ = nullptr;
@@ -281,6 +282,11 @@ bool MenuBar::Create(HINSTANCE instance) {
   }
 
   dark_ = ShellUsesDarkMode();
+  if (status_popup_.IsOpen() && bar_menu_ != nullptr) {
+    bar_menu_->SetDark(dark_);
+    status_popup_.SetDark(dark_);
+    status_popup_.Present();
+  }
 
   hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, kMenuBarClass, L"bamti", WS_POPUP, 0, 0,
                           0, 0, nullptr, nullptr, instance, this);
@@ -327,7 +333,12 @@ bool MenuBar::Create(HINSTANCE instance) {
   if (!status_popup_.Create(instance, hwnd_)) {
     return false;
   }
+  if (!bar_submenu_popup_.Create(instance, hwnd_)) {
+    Log(L"bar", L"submenu create failed err=%lu", GetLastError());
+    return false;
+  }
   status_popup_.SetDark(dark_);
+  bar_submenu_popup_.SetDark(dark_);
   Layout();
   taskbar_.Restore();
   ShowWindow(hwnd_, SW_SHOWNA);
@@ -408,6 +419,8 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       return 0;
     case kPopupClosedMsg:
       if (!status_popup_.IsOpen()) {
+        CloseTraySubmenu(L"parent");
+        status_popup_.SetAfterTick(nullptr, nullptr);
         cc_open_ = false;
         clock_open_ = false;
         if (!open_panel_id_.empty()) {
@@ -442,6 +455,15 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           dark_ = ShellUsesDarkMode();
           ApplyBackdrop();
           status_popup_.SetDark(dark_);
+          bar_submenu_popup_.SetDark(dark_);
+          if (status_popup_.IsOpen() && bar_menu_ != nullptr) {
+            bar_menu_->SetDark(dark_);
+            status_popup_.Present();
+          }
+          if (bar_submenu_popup_.IsOpen() && bar_submenu_ != nullptr) {
+            bar_submenu_->SetDark(dark_);
+            bar_submenu_popup_.Present();
+          }
         }
       }
       layout_.SetDpi(Dpi());
@@ -925,6 +947,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       UnregisterSessionWatch();
       status_.StopAll();
       status_popup_.Destroy();
+      bar_submenu_popup_.Destroy();
       taskbar_.Restore();
       UnregisterAppBar();
       hwnd_ = nullptr;
@@ -1428,6 +1451,8 @@ void MenuBar::OpenOverflow() {
   }
   POINT anchor{chevron.left, chevron.bottom};
   ClientToScreen(hwnd_, &anchor);
+  CloseTraySubmenu(L"other-popup");
+  status_popup_.SetAfterTick(nullptr, nullptr);
   status_popup_.Open(overflow_panel_.get(), anchor, PopupSurface::Anchor::BelowAt);
 }
 
@@ -1520,6 +1545,8 @@ bool MenuBar::ShowControlCenter(const RECT& item_rect, ControlCenterPage page) {
   cc_open_ = true;
   clock_open_ = false;
   open_panel_id_.clear();
+  CloseTraySubmenu(L"other-popup");
+  status_popup_.SetAfterTick(nullptr, nullptr);
   status_popup_.SetDark(dark_);
   if (!status_popup_.Open(cc_panel_.get(), anchor, PopupSurface::Anchor::BelowAt)) {
     cc_open_ = false;
@@ -1580,6 +1607,8 @@ bool MenuBar::ShowClockFlyout() {
   cc_open_ = false;
   clock_open_ = true;
   open_panel_id_.clear();
+  CloseTraySubmenu(L"other-popup");
+  status_popup_.SetAfterTick(nullptr, nullptr);
   status_popup_.SetDark(dark_);
   if (!status_popup_.Open(clock_panel_.get(), anchor, PopupSurface::Anchor::BelowAt)) {
     clock_open_ = false;
@@ -1607,6 +1636,8 @@ void MenuBar::ShowClockMenu() {
   cc_open_ = false;
   clock_open_ = false;
   open_panel_id_.clear();
+  CloseTraySubmenu(L"other-popup");
+  status_popup_.SetAfterTick(nullptr, nullptr);
   status_popup_.SetDark(dark_);
   if (!status_popup_.Open(clock_menu_.get(), anchor, PopupSurface::Anchor::BelowAt)) {
     Log(L"clock", L"menu open failed");
@@ -1662,6 +1693,8 @@ void MenuBar::OpenStatusPanel(const StatusHit& hit) {
   ev.id = found->id;
   ev.event = "panel_open";
   status_.Dispatch(ev);
+  CloseTraySubmenu(L"other-popup");
+  status_popup_.SetAfterTick(nullptr, nullptr);
   status_popup_.Open(status_panel_.get(), anchor, PopupSurface::Anchor::BelowAt);
 }
 
@@ -1810,88 +1843,151 @@ void MenuBar::RemoveWinHook() {
   g_swallow_space = false;
 }
 
-void MenuBar::ShowContextMenu(POINT screen) {
-  const HMENU menu = CreatePopupMenu();
-  if (menu == nullptr) {
+void MenuBar::AfterBarPopupTick(void* ctx) {
+  if (ctx != nullptr) {
+    static_cast<MenuBar*>(ctx)->SyncTraySubmenu();
+  }
+}
+
+void MenuBar::SyncTraySubmenu() {
+  if (!status_popup_.IsOpen() || bar_menu_ == nullptr) {
+    CloseTraySubmenu(L"parent");
     return;
   }
-  // 7단계에서 항목 표시 설정 전체를 PopupSurface로 옮길 임시 메뉴다.
-  const WidgetSettings s = widgets_.settings();
-  AppendMenuW(menu, MF_STRING | (s.battery ? MF_CHECKED : 0), kWidgetBatteryCmd, L"배터리");
-  AppendMenuW(menu, MF_STRING | (s.cpu ? MF_CHECKED : 0), kWidgetCpuCmd, L"CPU");
-  AppendMenuW(menu, MF_STRING | (s.network ? MF_CHECKED : 0), kWidgetNetworkCmd, L"네트워크");
-  AppendMenuW(menu, MF_STRING | (s.volume ? MF_CHECKED : 0), kWidgetVolumeCmd, L"볼륨");
-  AppendMenuW(menu, MF_STRING | (s.wifi ? MF_CHECKED : 0), kWidgetWifiCmd, L"Wi-Fi");
-  AppendMenuW(menu, MF_STRING | (s.control_center ? MF_CHECKED : 0), kWidgetControlCenterCmd, L"제어 센터");
-  const bool board_ok = IsWidgetBoardAvailable();
-  UINT board_flags = MF_STRING | (s.widget_board ? MF_CHECKED : 0);
-  if (!board_ok) {
-    board_flags |= MF_GRAYED;
+  POINT cursor{};
+  const bool got_cursor = GetCursorPos(&cursor) != FALSE;
+  RECT sub{};
+  const bool over_sub = got_cursor && bar_submenu_popup_.IsOpen() && bar_submenu_popup_.hwnd() != nullptr &&
+                        GetWindowRect(bar_submenu_popup_.hwnd(), &sub) != FALSE && PtInRect(&sub, cursor);
+  const int opt = bar_menu_->SubmenuIndex();
+  const int hot = status_popup_.Hot();
+  if (opt >= 0 && (hot == opt || over_sub)) {
+    OpenTraySubmenu();
+  } else {
+    CloseTraySubmenu(L"hover-leave");
   }
-  AppendMenuW(menu, board_flags, kWidgetBoardCmd,
-              board_ok ? L"위젯 보드 단추" : L"위젯 보드 단추 (이 PC에서 사용할 수 없습니다)");
-  const WidgetSettings tray = tray_.settings();
-  AppendMenuW(menu, MF_STRING | (tray.tray_mirror ? MF_CHECKED : 0), kTrayMirrorToggleCmd, L"트레이 미러");
-  AppendMenuW(menu, MF_STRING | (tray.tray_system_icons ? MF_CHECKED : 0), kTraySystemIconsCmd, L"시스템 아이콘도 표시");
-  AppendMenuW(menu, MF_STRING | (tray.tray_overflow_icons ? MF_CHECKED : 0), kTrayOverflowIconsCmd, L"숨긴 아이콘도 표시");
-  AppendMenuW(menu, MF_STRING | (tray.tray_backend == "intercept" ? MF_CHECKED : 0), kTrayInterceptCmd,
-              L"트레이 아이콘 가로채기(실험)");
-  const HMENU tray_items = CreatePopupMenu();
+}
+
+void MenuBar::OpenTraySubmenu() {
+  if (!status_popup_.IsOpen() || bar_menu_ == nullptr || bar_submenu_popup_.IsOpen()) {
+    return;
+  }
+  if (bar_menu_->SubmenuIndex() < 0) {
+    return;
+  }
+  if (!bar_submenu_) {
+    bar_submenu_ = std::make_unique<BarMenuContent>();
+  }
+  bar_submenu_->Reset(hwnd_, dark_);
+  bar_submenu_->SetPopup(&bar_submenu_popup_);
   tray_menu_keys_.clear();
-  if (tray_items != nullptr) {
-    const std::vector<TrayMirror::MenuItem> entries = tray_.MenuItems();
-    if (entries.empty()) {
-      AppendMenuW(tray_items, MF_STRING | MF_GRAYED, 0, L"미러 중인 아이콘이 없습니다");
-    } else {
-      const size_t n = (std::min)(entries.size(), kTrayHiddenKeysMax);
-      tray_menu_keys_.reserve(n);
-      for (size_t i = 0; i < n; ++i) {
-        const UINT flags = MF_STRING | (entries[i].shown ? MF_CHECKED : 0);
-        AppendMenuW(tray_items, flags, kTrayItemCmdBase + static_cast<UINT>(i), entries[i].label.c_str());
-        tray_menu_keys_.push_back(entries[i].key);
-      }
-      if (entries.size() > kTrayHiddenKeysMax) {
-        AppendMenuW(tray_items, MF_STRING | MF_GRAYED, 0, L"이하 생략");
-      }
+  const std::vector<TrayMirror::MenuItem> entries = tray_.MenuItems();
+  if (entries.empty()) {
+    bar_submenu_->Add(0, L"미러 중인 아이콘이 없습니다", false, false);
+  } else {
+    const size_t n = (std::min)(entries.size(), kTrayHiddenKeysMax);
+    tray_menu_keys_.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+      bar_submenu_->Add(kTrayItemCmdBase + static_cast<UINT>(i), entries[i].label, entries[i].shown);
+      tray_menu_keys_.push_back(entries[i].key);
     }
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(tray_items), L"트레이 아이콘");
+    if (entries.size() > kTrayHiddenKeysMax) {
+      bar_submenu_->Add(0, L"이하 생략", false, false);
+    }
   }
-  AppendMenuW(menu, MF_STRING, kTrayPeekCmd, L"알림 영역 잠시 표시");
-  AppendMenuW(menu, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), kAutostartCmd,
-              L"로그인 시 bamti 시작");
-  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING, kExitCommand, L"종료");
-  const HWND prev = GetForegroundWindow();
-  SetForegroundWindow(hwnd_);
-  TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, screen.x, screen.y, hwnd_, nullptr);
-  PostMessageW(hwnd_, WM_NULL, 0, 0);
-  if (GetForegroundWindow() == hwnd_ && prev != nullptr && prev != hwnd_) {
-    SetForegroundWindow(prev);
+  RECT row{};
+  if (!bar_menu_->RowScreenRect(bar_menu_->SubmenuIndex(), &row)) {
+    return;
   }
-  DestroyMenu(menu);
+  const POINT anchor{row.right, row.top};
+  status_popup_.SetAllied(&bar_submenu_popup_);
+  bar_submenu_popup_.SetDark(dark_);
+  if (!bar_submenu_popup_.Open(bar_submenu_.get(), anchor, PopupSurface::Anchor::RightOf, false)) {
+    status_popup_.SetAllied(nullptr);
+    Log(L"bar", L"tray submenu open failed err=%lu", GetLastError());
+  }
+}
+
+void MenuBar::CloseTraySubmenu(const wchar_t* reason) {
+  if (!bar_submenu_popup_.IsOpen()) {
+    status_popup_.SetAllied(nullptr);
+    return;
+  }
+  Log(L"bar", L"submenu close reason=%s", reason != nullptr ? reason : L"explicit");
+  status_popup_.SetAllied(nullptr);
+  bar_submenu_popup_.Close();
+}
+
+void MenuBar::ShowContextMenu(POINT screen) {
+  if (fullscreen_occluded_) {
+    return;
+  }
+  if (!bar_menu_) {
+    bar_menu_ = std::make_unique<BarMenuContent>();
+  }
+  CloseTraySubmenu(L"reopen");
+  bar_menu_->Reset(hwnd_, dark_);
+  bar_menu_->SetPopup(&status_popup_);
+
+  const WidgetSettings s = widgets_.settings();
+  bar_menu_->Add(kWidgetBatteryCmd, L"배터리", s.battery);
+  bar_menu_->Add(kWidgetCpuCmd, L"CPU", s.cpu);
+  bar_menu_->Add(kWidgetNetworkCmd, L"네트워크", s.network);
+  bar_menu_->Add(kWidgetVolumeCmd, L"볼륨", s.volume);
+  bar_menu_->Add(kWidgetWifiCmd, L"Wi-Fi", s.wifi);
+  bar_menu_->Add(kWidgetControlCenterCmd, L"제어 센터", s.control_center);
+  const bool board_ok = IsWidgetBoardAvailable();
+  bar_menu_->Add(kWidgetBoardCmd,
+                 board_ok ? L"위젯 보드 단추" : L"위젯 보드 단추 (이 PC에서 사용할 수 없습니다)",
+                 s.widget_board, board_ok);
+  const WidgetSettings tray = tray_.settings();
+  bar_menu_->Add(kTrayMirrorToggleCmd, L"트레이 미러", tray.tray_mirror);
+  bar_menu_->Add(kTraySystemIconsCmd, L"시스템 아이콘도 표시", tray.tray_system_icons);
+  bar_menu_->Add(kTrayOverflowIconsCmd, L"숨긴 아이콘도 표시", tray.tray_overflow_icons);
+  bar_menu_->Add(kTrayInterceptCmd, L"트레이 아이콘 가로채기(실험)", tray.tray_backend == "intercept");
+  bar_menu_->Add(0, L"트레이 아이콘", false, true, true);
+  bar_menu_->Add(kTrayPeekCmd, L"알림 영역 잠시 표시");
+  bar_menu_->Add(kAutostartCmd, L"로그인 시 bamti 시작", AutostartEnabled());
+  bar_menu_->AddSeparator();
+  bar_menu_->Add(kExitCommand, L"종료");
+
+  cc_open_ = false;
+  clock_open_ = false;
+  open_panel_id_.clear();
+  status_popup_.SetDark(dark_);
+  status_popup_.SetAfterTick(&MenuBar::AfterBarPopupTick, this);
+  if (!status_popup_.Open(bar_menu_.get(), screen, PopupSurface::Anchor::BelowAt)) {
+    Log(L"bar", L"context menu open failed err=%lu", GetLastError());
+  }
 }
 
 void MenuBar::ShowTrayIconMenu(POINT screen, const std::string& id) {
-  const HMENU menu = CreatePopupMenu();
-  if (menu == nullptr) {
+  if (fullscreen_occluded_) {
     return;
   }
-  tray_menu_id_ = id;
-  AppendMenuW(menu, MF_STRING, kTrayPeekCmd, L"알림 영역 잠시 표시");
-  AppendMenuW(menu, MF_STRING, kTrayHideIconCmd, L"이 아이콘 숨기기");
-  AppendMenuW(menu, MF_STRING, kTrayMirrorOffCmd, L"트레이 미러 끄기");
-  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"앱 메뉴는 알림 영역 잠시 표시로 엽니다");
-  AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"숨긴 아이콘도 미러합니다. 클릭 반응이 없으면 알림 영역 잠시 표시로 여세요");
-  AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"지금은 글리프만 표시합니다");
-  const HWND prev = GetForegroundWindow();
-  SetForegroundWindow(hwnd_);
-  TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, screen.x, screen.y, hwnd_, nullptr);
-  PostMessageW(hwnd_, WM_NULL, 0, 0);
-  if (GetForegroundWindow() == hwnd_ && prev != nullptr && prev != hwnd_) {
-    SetForegroundWindow(prev);
+  if (!bar_menu_) {
+    bar_menu_ = std::make_unique<BarMenuContent>();
   }
-  DestroyMenu(menu);
+  CloseTraySubmenu(L"reopen");
+  tray_menu_id_ = id;
+  bar_menu_->Reset(hwnd_, dark_);
+  bar_menu_->SetPopup(&status_popup_);
+  bar_menu_->Add(kTrayPeekCmd, L"알림 영역 잠시 표시");
+  bar_menu_->Add(kTrayHideIconCmd, L"이 아이콘 숨기기");
+  bar_menu_->Add(kTrayMirrorOffCmd, L"트레이 미러 끄기");
+  bar_menu_->AddSeparator();
+  bar_menu_->Add(0, L"앱 메뉴는 알림 영역 잠시 표시로 엽니다", false, false);
+  bar_menu_->Add(0, L"숨긴 아이콘도 미러합니다. 클릭 반응이 없으면 알림 영역 잠시 표시로 여세요", false, false);
+  bar_menu_->Add(0, L"지금은 글리프만 표시합니다", false, false);
+
+  cc_open_ = false;
+  clock_open_ = false;
+  open_panel_id_.clear();
+  status_popup_.SetDark(dark_);
+  status_popup_.SetAfterTick(nullptr, nullptr);
+  if (!status_popup_.Open(bar_menu_.get(), screen, PopupSurface::Anchor::BelowAt)) {
+    Log(L"bar", L"tray icon menu open failed err=%lu", GetLastError());
+  }
 }
 
 void MenuBar::ApplySettings(const WidgetSettings& next) {
