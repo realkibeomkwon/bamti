@@ -13,3 +13,5 @@ x64/
 Debug/
 Release/
 ipch/
+*.obj
+/log/
