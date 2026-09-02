@@ -113,6 +113,7 @@ class Dock {
   bool hot_leave_armed_ = false;
   bool dragging_ = false;
   bool pending_rebuild_ = false;
+  bool warming_up_ = false;
   bool force_collect_ = false;
   int pressed_ = -1;
   int hover_ = -1;

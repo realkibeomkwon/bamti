@@ -63,6 +63,8 @@ constexpr UINT_PTR kPollTimerId = 2;
 constexpr UINT_PTR kRebuildTimerId = 3;
 constexpr UINT_PTR kTrayWatchTimerId = 4;
 constexpr UINT_PTR kAnimTimerId = 5;
+constexpr UINT_PTR kWarmupTimerId = 7;
+constexpr UINT kWarmupDelayMs = 3000;
 constexpr UINT kTrayWatchMs = 5000;
 constexpr UINT kAnimTimerMs = 8;
 constexpr UINT kIdlePollMs = 500;
@@ -1242,6 +1244,7 @@ bool Dock::Create(HINSTANCE instance, HWND bar_hwnd) {
   }
   TaskbarController::WatchTray(TrayWinEventProc);
   SetTimer(hwnd_, kTrayWatchTimerId, kTrayWatchMs, nullptr);
+  SetTimer(hwnd_, kWarmupTimerId, kWarmupDelayMs, nullptr);
   StartFullscreenWatch(hwnd_, kFullscreenMsg);
 
   menu_content_ = std::make_unique<DockMenuContent>();
@@ -1428,6 +1431,17 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       } else if (wparam == kAnimTimerId) {
         if (!anim_pumped) {
           TickDragAnim();
+        }
+      } else if (wparam == kWarmupTimerId) {
+        KillTimer(hwnd_, kWarmupTimerId);
+        if (pending_rebuild_) {
+          warming_up_ = true;
+          const ULONGLONG started = GetTickCount64();
+          Rebuild();
+          warming_up_ = false;
+          pending_rebuild_ = true;
+          Log(L"dock", L"warmup items=%zu %ums", items_.size(),
+              static_cast<unsigned>(GetTickCount64() - started));
         }
       }
       return 0;
@@ -1634,6 +1648,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kRebuildTimerId);
       KillTimer(hwnd_, kTrayWatchTimerId);
       KillTimer(hwnd_, kAnimTimerId);
+      KillTimer(hwnd_, kWarmupTimerId);
       ReleaseAnimTimerPeriod();
       TaskbarController::UnwatchTray();
       StopFullscreenWatch(hwnd_);
@@ -1652,7 +1667,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
 void Dock::Rebuild() {
   WatchdogStage(L"dock.rebuild");
   ResetPinCmpLog();
-  if (!shown_) {
+  if (!shown_ && !warming_up_) {
     pending_rebuild_ = true;
     return;
   }
