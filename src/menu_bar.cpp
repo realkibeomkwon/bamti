@@ -282,11 +282,6 @@ bool MenuBar::Create(HINSTANCE instance) {
   }
 
   dark_ = ShellUsesDarkMode();
-  if (status_popup_.IsOpen() && bar_menu_ != nullptr) {
-    bar_menu_->SetDark(dark_);
-    status_popup_.SetDark(dark_);
-    status_popup_.Present();
-  }
 
   hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, kMenuBarClass, L"bamti", WS_POPUP, 0, 0,
                           0, 0, nullptr, nullptr, instance, this);
