@@ -8,7 +8,8 @@ namespace bamti {
 namespace {
 constexpr ULONGLONG kArmMs = 2000;
 constexpr UINT kTimerMs = 250;
-constexpr int kMaxSkipLogs = 5;
+enum class SkipReason { kNotToplevel, kHidden, kPid, kTooBig, kNotBottom, kCount };
+constexpr int kMaxSkipLogsPerReason = 2;
 
 ULONGLONG armed_until = 0;
 RECT anchor{};
@@ -17,7 +18,7 @@ HWINEVENTHOOK hook_show = nullptr;
 HWINEVENTHOOK hook_menu = nullptr;
 UINT_PTR timer_id = 0;
 int moved = 0;
-int skip_logs = 0;
+int skip_logs[static_cast<size_t>(SkipReason::kCount)] = {};
 
 void ClassName(HWND hwnd, wchar_t (&out)[256]) {
   if (hwnd == nullptr || GetClassNameW(hwnd, out, 256) <= 0) {
@@ -46,15 +47,34 @@ bool Armed() {
   return GetTickCount64() < armed_until && moved == 0;
 }
 
-void LogSkip(HWND hwnd, DWORD pid, const wchar_t* reason, const RECT& rc) {
-  if (skip_logs >= kMaxSkipLogs) {
+const wchar_t* SkipReasonText(SkipReason reason) {
+  switch (reason) {
+    case SkipReason::kNotToplevel:
+      return L"not-toplevel";
+    case SkipReason::kHidden:
+      return L"hidden";
+    case SkipReason::kPid:
+      return L"pid";
+    case SkipReason::kTooBig:
+      return L"too-big";
+    case SkipReason::kNotBottom:
+      return L"not-bottom";
+    case SkipReason::kCount:
+      break;
+  }
+  return L"?";
+}
+
+void LogSkip(HWND hwnd, DWORD pid, SkipReason reason, const RECT& rc) {
+  const size_t i = static_cast<size_t>(reason);
+  if (i >= static_cast<size_t>(SkipReason::kCount) || skip_logs[i] >= kMaxSkipLogsPerReason) {
     return;
   }
-  ++skip_logs;
+  ++skip_logs[i];
   wchar_t cls[256];
   ClassName(hwnd, cls);
-  Log(L"tray", L"popup skip cls=%s pid=%lu reason=%s rc=%ld,%ld,%ld,%ld", cls, static_cast<unsigned long>(pid), reason,
-      rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+  Log(L"tray", L"popup skip cls=%s pid=%lu reason=%s rc=%ld,%ld,%ld,%ld", cls, static_cast<unsigned long>(pid),
+      SkipReasonText(reason), rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
 }
 
 void MovePopup(HWND hwnd, const RECT& rc, DWORD pid) {
@@ -91,11 +111,17 @@ void CALLBACK GuardProc(HWINEVENTHOOK, DWORD, HWND hwnd, LONG idObject, LONG idC
   GetWindowThreadProcessId(hwnd, &pid);
 
   if (GetAncestor(hwnd, GA_ROOT) != hwnd) {
-    LogSkip(hwnd, pid, L"not-toplevel", rc);
+    if (GetWindowRect(hwnd, &rc) == FALSE) {
+      rc = RECT{};
+    }
+    LogSkip(hwnd, pid, SkipReason::kNotToplevel, rc);
     return;
   }
   if (IsWindowVisible(hwnd) == FALSE) {
-    LogSkip(hwnd, pid, L"hidden", rc);
+    if (GetWindowRect(hwnd, &rc) == FALSE) {
+      rc = RECT{};
+    }
+    LogSkip(hwnd, pid, SkipReason::kHidden, rc);
     return;
   }
   if (GetWindowRect(hwnd, &rc) == FALSE) {
@@ -107,7 +133,7 @@ void CALLBACK GuardProc(HWINEVENTHOOK, DWORD, HWND hwnd, LONG idObject, LONG idC
     return;
   }
   if (owner_pid != 0 && pid != owner_pid) {
-    LogSkip(hwnd, pid, L"pid", rc);
+    LogSkip(hwnd, pid, SkipReason::kPid, rc);
     return;
   }
 
@@ -117,7 +143,7 @@ void CALLBACK GuardProc(HWINEVENTHOOK, DWORD, HWND hwnd, LONG idObject, LONG idC
     const LONG work_w = mi.rcWork.right - mi.rcWork.left;
     const LONG work_h = mi.rcWork.bottom - mi.rcWork.top;
     if ((work_w > 0 && w > MulDiv(work_w, 90, 100)) || (work_h > 0 && h > MulDiv(work_h, 90, 100))) {
-      LogSkip(hwnd, pid, L"too-big", rc);
+      LogSkip(hwnd, pid, SkipReason::kTooBig, rc);
       return;
     }
   }
@@ -130,7 +156,7 @@ void CALLBACK GuardProc(HWINEVENTHOOK, DWORD, HWND hwnd, LONG idObject, LONG idC
   const LONG work_mid_y = (ami.rcWork.top + ami.rcWork.bottom) / 2;
   const LONG win_mid_y = (rc.top + rc.bottom) / 2;
   if (win_mid_y <= work_mid_y) {
-    LogSkip(hwnd, pid, L"not-bottom", rc);
+    LogSkip(hwnd, pid, SkipReason::kNotBottom, rc);
     return;
   }
 
@@ -153,7 +179,9 @@ void TrayPopupGuardArm(const RECT& next_anchor, DWORD next_pid) {
   owner_pid = next_pid;
   armed_until = GetTickCount64() + kArmMs;
   moved = 0;
-  skip_logs = 0;
+  for (int& n : skip_logs) {
+    n = 0;
+  }
   if (hook_show == nullptr) {
     hook_show = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, nullptr, &GuardProc, 0, 0,
                                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
