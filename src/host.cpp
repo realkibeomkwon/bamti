@@ -190,6 +190,22 @@ int RunProbe(int (*fn)()) {
   return code;
 }
 
+// 셸이 준비되었는지 가린다. Shell_TrayWnd만 보면 explorer가 초기화 도중에 만드는
+// 임시 창에 속는다. 2026-09-03 재부팅에서 그 창을 잡고 통과한 뒤 16초 만에 트레이
+// 우선순위를 다시 잡아야 했다.
+bool ShellReady() {
+  const HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
+  if (tray == nullptr) {
+    return false;
+  }
+  // 데스크톱(Progman)이 떠야 explorer가 셸 역할을 시작한 것이다.
+  if (GetShellWindow() == nullptr) {
+    return false;
+  }
+  // 알림 영역까지 만들어졌는지 본다. 트레이 가로채기가 상대할 대상이 이것이다.
+  return FindWindowExW(tray, nullptr, L"TrayNotifyWnd", nullptr) != nullptr;
+}
+
 // 작업 스케줄러로 로그온 직후에 뜨면 explorer의 셸 창이 아직 없을 수 있다.
 // 최대 30초 동안 200ms 간격으로 기다린다. 시간이 다 되어도 그냥 진행한다.
 // 뒤늦게 셸이 뜨는 경우는 TaskbarCreated 처리가 회복시킨다.
@@ -197,7 +213,7 @@ void WaitForShell(DWORD timeout_ms) {
   const ULONGLONG start = GetTickCount64();
   int found = 0;
   for (;;) {
-    if (FindWindowW(L"Shell_TrayWnd", nullptr) != nullptr) {
+    if (ShellReady()) {
       found = 1;
       break;
     }
@@ -206,7 +222,13 @@ void WaitForShell(DWORD timeout_ms) {
     }
     Sleep(200);
   }
-  Log(L"host", L"shell wait ms=%llu found=%d", GetTickCount64() - start, found);
+  const HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
+  const int tray_ok = tray != nullptr ? 1 : 0;
+  const int progman_ok = GetShellWindow() != nullptr ? 1 : 0;
+  const int notify_ok =
+      (tray != nullptr && FindWindowExW(tray, nullptr, L"TrayNotifyWnd", nullptr) != nullptr) ? 1 : 0;
+  Log(L"host", L"shell wait ms=%llu found=%d tray=%d progman=%d notify=%d", GetTickCount64() - start, found,
+      tray_ok, progman_ok, notify_ok);
 }
 
 }  // namespace
