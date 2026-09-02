@@ -1,5 +1,6 @@
 #include "host.hpp"
 
+#include "autostart.hpp"
 #include "dock.hpp"
 #include "log.hpp"
 #include "menu_bar.hpp"
@@ -189,6 +190,25 @@ int RunProbe(int (*fn)()) {
   return code;
 }
 
+// 작업 스케줄러로 로그온 직후에 뜨면 explorer의 셸 창이 아직 없을 수 있다.
+// 최대 30초 동안 200ms 간격으로 기다린다. 시간이 다 되어도 그냥 진행한다.
+// 뒤늦게 셸이 뜨는 경우는 TaskbarCreated 처리가 회복시킨다.
+void WaitForShell(DWORD timeout_ms) {
+  const ULONGLONG start = GetTickCount64();
+  int found = 0;
+  for (;;) {
+    if (FindWindowW(L"Shell_TrayWnd", nullptr) != nullptr) {
+      found = 1;
+      break;
+    }
+    if (GetTickCount64() - start >= timeout_ms) {
+      break;
+    }
+    Sleep(200);
+  }
+  Log(L"host", L"shell wait ms=%llu found=%d", GetTickCount64() - start, found);
+}
+
 }  // namespace
 
 int Run(HINSTANCE instance) {
@@ -240,6 +260,8 @@ int Run(HINSTANCE instance) {
     return 1;
   }
   BufferedPaintInit();
+  AutostartMigrate();
+  WaitForShell(30000);
 
   int exit_code = 1;
   {

@@ -103,6 +103,8 @@ target_link_libraries(bamti PRIVATE
   bthprops
   dxva2
   wbemuuid
+  taskschd
+  secur32
 )
 
 set_property(TARGET bamti PROPERTY VS_DPI_AWARE "PerMonitor")
