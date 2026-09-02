@@ -279,34 +279,51 @@ void AppendSearchKey(std::vector<std::wstring>& keys, std::wstring value) {
   keys.push_back(std::move(value));
 }
 
-void CollectSearchKeys(const std::wstring& id, const std::wstring& target, std::vector<std::wstring>& keys) {
-  // 패키지 앱: Publisher.Name_해시!진입점 → "publisher.name"과 "name"을 쓴다.
-  // 해시와 진입점은 검색어와 겹칠 일이 없고, "!App"은 거의 모든 앱에 붙어 있어
-  // 그대로 두면 "app" 질의가 전부 걸린다.
-  if (id.find(L'\\') == std::wstring::npos && id.find(L'!') != std::wstring::npos) {
-    std::wstring family = id.substr(0, id.find(L'!'));
-    const size_t underscore = family.rfind(L'_');
-    if (underscore != std::wstring::npos) {
-      family.resize(underscore);
-    }
-    AppendSearchKey(keys, family);
-    const size_t dot = family.rfind(L'.');
-    if (dot != std::wstring::npos) {
-      AppendSearchKey(keys, family.substr(dot + 1));
-    }
+// 식별자에서 별칭을 뽑는다. 패키지 앱의 AUMID(Publisher.Name_해시!진입점)와
+// 그 변형(진입점이나 해시가 없는 형태)을 함께 다룬다.
+void AppendFamilyKeys(std::vector<std::wstring>& keys, const std::wstring& id) {
+  std::wstring family = id;
+  const size_t bang = family.find(L'!');
+  if (bang != std::wstring::npos) {
+    family.resize(bang);
+  }
+  const size_t underscore = family.rfind(L'_');
+  if (underscore != std::wstring::npos) {
+    family.resize(underscore);
+  }
+  AppendSearchKey(keys, family);
+  // 마지막 마디가 앱 이름이다. "Microsoft.Windows.RemoteDesktop"의 "RemoteDesktop",
+  // "Microsoft.WindowsCalculator"의 "WindowsCalculator"가 여기서 나온다.
+  const size_t dot = family.rfind(L'.');
+  if (dot != std::wstring::npos) {
+    AppendSearchKey(keys, family.substr(dot + 1));
+  }
+}
+
+// 파일 경로에서 별칭을 뽑는다. 실행 파일 이름을 확장자와 함께, 그리고 확장자 없이 넣는다.
+void AppendLeafKeys(std::vector<std::wstring>& keys, const std::wstring& path) {
+  const std::wstring leaf = FileLeaf(path);
+  if (leaf.empty()) {
     return;
   }
-  // 데스크톱 앱: 실행 파일 이름을 확장자와 함께, 그리고 확장자 없이 넣는다.
-  for (const std::wstring* source : {&id, &target}) {
-    const std::wstring leaf = FileLeaf(*source);
-    if (leaf.empty()) {
-      continue;
-    }
-    AppendSearchKey(keys, leaf);
-    const size_t dot = leaf.rfind(L'.');
-    if (dot != std::wstring::npos && dot > 0) {
-      AppendSearchKey(keys, leaf.substr(0, dot));
-    }
+  AppendSearchKey(keys, leaf);
+  const size_t dot = leaf.rfind(L'.');
+  if (dot != std::wstring::npos && dot > 0) {
+    AppendSearchKey(keys, leaf.substr(0, dot));
+  }
+}
+
+void CollectSearchKeys(const std::wstring& id, const std::wstring& target, std::vector<std::wstring>& keys) {
+  // 식별자가 경로가 아니면 패키지 계열이다. 진입점이 붙지 않은 형태도 여기에 들어온다.
+  if (id.find_first_of(L"\\/:") == std::wstring::npos) {
+    AppendFamilyKeys(keys, id);
+  } else {
+    AppendLeafKeys(keys, id);
+  }
+  // 대상 실행 파일은 종류를 가리지 않고 언제나 태운다. 표시 이름이 번역된 시스템
+  // 도구는 이 경로로만 영어 이름을 얻는다(예: 원격 데스크톱 연결 → mstsc).
+  if (!target.empty()) {
+    AppendLeafKeys(keys, target);
   }
 }
 
