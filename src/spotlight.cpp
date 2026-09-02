@@ -1310,6 +1310,12 @@ LRESULT CALLBACK Spotlight::EditProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
       return 0;
     }
   }
+  // WM_KEYDOWN에서 처리한 키라도 TranslateMessage가 만든 WM_CHAR는 따로 도착한다.
+  // 편집 컨트롤은 ESC(0x1B)와 Enter(0x0D)를 입력할 수 없는 문자로 보고 MessageBeep을
+  // 울리므로 여기서 삼킨다.
+  if (msg == WM_CHAR && (wparam == 0x1B || wparam == 0x0D)) {
+    return 0;
+  }
   switch (msg) {
     case WM_IME_SETCONTEXT:
     case WM_IME_STARTCOMPOSITION:
