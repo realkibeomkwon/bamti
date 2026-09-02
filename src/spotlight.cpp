@@ -9,6 +9,7 @@
 #include <dwmapi.h>
 #include <imm.h>
 #include <knownfolders.h>
+#include <propkey.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -197,6 +198,24 @@ int MatchQuery(const std::wstring& hay, const std::wstring& needle) {
   return any ? 6 + worst : -1;
 }
 
+// 별칭으로 걸린 앱은 이름으로 걸린 앱보다 항상 뒤에 놓는다. 점수는 작을수록 앞이다.
+constexpr int kAliasPenalty = 20;
+
+int MatchApp(const Spotlight::AppEntry& app, const std::wstring& needle) {
+  const int direct = MatchQuery(app.name, needle);
+  if (direct >= 0) {
+    return direct;
+  }
+  int best = -1;
+  for (const std::wstring& key : app.keys) {
+    const int one = MatchQuery(key, needle);
+    if (one >= 0 && (best < 0 || one < best)) {
+      best = one;
+    }
+  }
+  return best < 0 ? -1 : best + kAliasPenalty;
+}
+
 bool LooksLikeHangul(const std::wstring& text) {
   for (const wchar_t ch : text) {
     if ((ch >= 0xAC00 && ch <= 0xD7A3) || (ch >= 0x1100 && ch <= 0x11FF) || (ch >= 0x3130 && ch <= 0x318F)) {
@@ -244,6 +263,51 @@ std::wstring IndexedSearchQuery(const std::wstring& needle) {
 std::wstring FileLeaf(const std::wstring& path) {
   const size_t slash = path.find_last_of(L"\\/");
   return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+// 검색 보조 키를 뽑는다. 중복과 빈 값은 넣지 않고, 모두 소문자로 저장한다.
+void AppendSearchKey(std::vector<std::wstring>& keys, std::wstring value) {
+  value = LowerCopy(TrimCopy(std::move(value)));
+  if (value.size() < 2) {
+    return;
+  }
+  for (const std::wstring& one : keys) {
+    if (one == value) {
+      return;
+    }
+  }
+  keys.push_back(std::move(value));
+}
+
+void CollectSearchKeys(const std::wstring& id, const std::wstring& target, std::vector<std::wstring>& keys) {
+  // 패키지 앱: Publisher.Name_해시!진입점 → "publisher.name"과 "name"을 쓴다.
+  // 해시와 진입점은 검색어와 겹칠 일이 없고, "!App"은 거의 모든 앱에 붙어 있어
+  // 그대로 두면 "app" 질의가 전부 걸린다.
+  if (id.find(L'\\') == std::wstring::npos && id.find(L'!') != std::wstring::npos) {
+    std::wstring family = id.substr(0, id.find(L'!'));
+    const size_t underscore = family.rfind(L'_');
+    if (underscore != std::wstring::npos) {
+      family.resize(underscore);
+    }
+    AppendSearchKey(keys, family);
+    const size_t dot = family.rfind(L'.');
+    if (dot != std::wstring::npos) {
+      AppendSearchKey(keys, family.substr(dot + 1));
+    }
+    return;
+  }
+  // 데스크톱 앱: 실행 파일 이름을 확장자와 함께, 그리고 확장자 없이 넣는다.
+  for (const std::wstring* source : {&id, &target}) {
+    const std::wstring leaf = FileLeaf(*source);
+    if (leaf.empty()) {
+      continue;
+    }
+    AppendSearchKey(keys, leaf);
+    const size_t dot = leaf.rfind(L'.');
+    if (dot != std::wstring::npos && dot > 0) {
+      AppendSearchKey(keys, leaf.substr(0, dot));
+    }
+  }
 }
 
 bool FilenameContains(const Spotlight::FileHit& hit, const std::wstring& needle) {
@@ -550,8 +614,13 @@ std::wstring CompositionString(HIMC himc, DWORD index) {
   return text;
 }
 
-void CollectFolder(const std::wstring& root, std::vector<std::pair<std::wstring, std::wstring>>& out,
-                   std::unordered_set<std::wstring>& seen) {
+struct RawApp {
+  std::wstring name;
+  std::wstring id;
+  std::wstring target;
+};
+
+void CollectFolder(const std::wstring& root, std::vector<RawApp>& out, std::unordered_set<std::wstring>& seen) {
   if (root.empty()) {
     return;
   }
@@ -583,7 +652,11 @@ void CollectFolder(const std::wstring& root, std::vector<std::pair<std::wstring,
     if (!seen.insert(key).second) {
       continue;
     }
-    out.push_back({std::move(name), full});
+    RawApp app;
+    app.name = std::move(name);
+    app.id = full;
+    app.target = full;
+    out.push_back(std::move(app));
   } while (FindNextFileW(find, &fd) != FALSE);
   FindClose(find);
 }
@@ -647,7 +720,7 @@ HICON ExtractAppsFolderIcon(const std::wstring& app_id) {
   return IconFromShellItem(item.Get());
 }
 
-bool CollectAppsFolder(std::vector<std::pair<std::wstring, std::wstring>>& out, std::unordered_set<std::wstring>& seen) {
+bool CollectAppsFolder(std::vector<RawApp>& out, std::unordered_set<std::wstring>& seen) {
   Microsoft::WRL::ComPtr<IShellItem> apps;
   HRESULT hr = SHGetKnownFolderItem(FOLDERID_AppsFolder, KF_FLAG_DONT_VERIFY, nullptr, IID_PPV_ARGS(&apps));
   if (FAILED(hr) || !apps) {
@@ -672,7 +745,29 @@ bool CollectAppsFolder(std::vector<std::pair<std::wstring, std::wstring>>& out, 
     }
     std::wstring key = LowerCopy(name);
     if (seen.insert(key).second && name[0] != L'\0' && id[0] != L'\0') {
-      out.push_back({name, id});
+      // 데스크톱 앱은 표시 이름이 번역되어 있어 영어 질의와 겹치지 않는다. 실행 파일
+      // 이름을 별칭으로 쓰기 위해 바로 가기가 가리키는 대상을 풀어 둔다.
+      std::wstring target;
+      Microsoft::WRL::ComPtr<IShellItem2> item2;
+      if (SUCCEEDED(item.As(&item2)) && item2) {
+        PWSTR value = nullptr;
+        if (SUCCEEDED(item2->GetString(PKEY_Link_TargetParsingPath, &value)) && value != nullptr) {
+          target = value;
+          CoTaskMemFree(value);
+        }
+      }
+      if (target.empty()) {
+        PWSTR parsing = nullptr;
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING, &parsing)) && parsing != nullptr) {
+          target = parsing;
+          CoTaskMemFree(parsing);
+        }
+      }
+      RawApp app;
+      app.name = name;
+      app.id = id;
+      app.target = std::move(target);
+      out.push_back(std::move(app));
     }
     CoTaskMemFree(id);
     CoTaskMemFree(name);
@@ -966,7 +1061,7 @@ struct FileSearchPayload {
 
 struct AppsPayload {
   uint64_t gen = 0;
-  std::vector<std::pair<std::wstring, std::wstring>> raw;
+  std::vector<RawApp> raw;
 };
 
 struct IconPayload {
@@ -1794,7 +1889,7 @@ void Spotlight::StartAppsReload() {
     const bool com_ok = SUCCEEDED(com) || com == S_FALSE;
 
     std::unordered_set<std::wstring> seen;
-    std::vector<std::pair<std::wstring, std::wstring>> raw;
+    std::vector<RawApp> raw;
     LARGE_INTEGER freq{};
     LARGE_INTEGER t0{};
     LARGE_INTEGER t1{};
@@ -1815,8 +1910,8 @@ void Spotlight::StartAppsReload() {
       CollectFolder(KnownFolder(FOLDERID_CommonStartMenu), raw, seen);
     }
     std::sort(raw.begin(), raw.end(), [](const auto& a, const auto& b) {
-      return CompareStringEx(LOCALE_NAME_USER_DEFAULT, LINGUISTIC_IGNORECASE, a.first.c_str(),
-                             static_cast<int>(a.first.size()), b.first.c_str(), static_cast<int>(b.first.size()),
+      return CompareStringEx(LOCALE_NAME_USER_DEFAULT, LINGUISTIC_IGNORECASE, a.name.c_str(),
+                             static_cast<int>(a.name.size()), b.name.c_str(), static_cast<int>(b.name.size()),
                              nullptr, nullptr, 0) == CSTR_LESS_THAN;
     });
 
@@ -1843,13 +1938,23 @@ void Spotlight::AcceptApps(void* payload) {
   apps_.reserve(owned->raw.size());
   for (auto& item : owned->raw) {
     AppEntry entry;
-    entry.name = std::move(item.first);
-    entry.path = std::move(item.second);
+    entry.name = std::move(item.name);
+    entry.path = std::move(item.id);
+    entry.target = std::move(item.target);
     entry.filesystem = LooksLikeFilesystemPath(entry.path);
+    CollectSearchKeys(entry.path, entry.target, entry.keys);
     apps_.push_back(std::move(entry));
   }
   apps_loaded_at_ = GetTickCount64();
   Log(L"spotlight", L"apps ready %d", static_cast<int>(apps_.size()));
+  static bool dumped = false;
+  if (!dumped) {
+    dumped = true;
+    for (const AppEntry& app : apps_) {
+      Log(L"spotlight", L"app name=\"%s\" id=\"%s\" target=\"%s\"", app.name.c_str(), app.path.c_str(),
+          app.target.c_str());
+    }
+  }
   if (visible_) {
     RebuildMatches();
     Present();
@@ -1984,7 +2089,7 @@ void Spotlight::RebuildMatches() {
   std::vector<Match> documents;
 
   for (int i = 0; i < static_cast<int>(apps_.size()); ++i) {
-    const int score = MatchQuery(apps_[static_cast<size_t>(i)].name, needle);
+    const int score = MatchApp(apps_[static_cast<size_t>(i)], needle);
     if (score >= 0) {
       apps.push_back(Match{Kind::App, i, score});
     }

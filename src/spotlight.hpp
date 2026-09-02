@@ -45,13 +45,16 @@ class Spotlight {
     HICON icon = nullptr;
   };
 
- private:
   struct AppEntry {
     std::wstring name;
     std::wstring path;
+    std::wstring target;              // 바로 가기가 가리키는 실행 파일의 전체 경로. 없으면 빈 값.
+    std::vector<std::wstring> keys;   // 검색 보조 키. 모두 소문자로 넣는다.
     HICON icon = nullptr;
     bool filesystem = false;
   };
+
+ private:
 
   struct Match {
     Kind kind = Kind::App;
