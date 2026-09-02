@@ -6,6 +6,9 @@
 
 #include <appmodel.h>
 #include <dwmapi.h>
+#include <ole2.h>
+#include <exdisp.h>
+#include <oleauto.h>
 #include <knownfolders.h>
 #include <propsys.h>
 #include <shellapi.h>
@@ -21,6 +24,7 @@
 #include <cwchar>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace bamti {
 namespace {
@@ -166,10 +170,67 @@ bool SkipChromeExe(const std::wstring& path) {
   return false;
 }
 
-bool IsExplorerFolderWindow(HWND hwnd) {
+bool IsExplorerFolderClass(HWND hwnd) {
   wchar_t cls[256]{};
   GetClassNameW(hwnd, cls, 256);
   return lstrcmpiW(cls, L"CabinetWClass") == 0 || lstrcmpiW(cls, L"ExploreWClass") == 0;
+}
+
+bool IsExplorerFolderWindow(HWND hwnd) {
+  return IsExplorerFolderClass(hwnd);
+}
+
+std::wstring ExplorerExePath() {
+  wchar_t win[MAX_PATH]{};
+  const UINT n = GetSystemWindowsDirectoryW(win, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH) {
+    return L"C:\\Windows\\explorer.exe";
+  }
+  std::wstring path(win, n);
+  if (path.back() != L'\\') {
+    path.push_back(L'\\');
+  }
+  path += L"explorer.exe";
+  return path;
+}
+
+bool IsFilesystemFolder(const std::wstring& path) {
+  if (path.empty()) {
+    return false;
+  }
+  const DWORD attr = GetFileAttributesW(path.c_str());
+  return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+std::unordered_set<HWND> ShellBrowserHwnds() {
+  std::unordered_set<HWND> out;
+  Microsoft::WRL::ComPtr<IShellWindows> windows;
+  if (FAILED(CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&windows))) || !windows) {
+    return out;
+  }
+  long count = 0;
+  if (FAILED(windows->get_Count(&count)) || count <= 0) {
+    return out;
+  }
+  for (long i = 0; i < count; ++i) {
+    VARIANT index;
+    VariantInit(&index);
+    index.vt = VT_I4;
+    index.lVal = i;
+    Microsoft::WRL::ComPtr<IDispatch> disp;
+    if (FAILED(windows->Item(index, disp.GetAddressOf())) || !disp) {
+      continue;
+    }
+    Microsoft::WRL::ComPtr<IWebBrowserApp> browser;
+    if (FAILED(disp.As(&browser)) || !browser) {
+      continue;
+    }
+    SHANDLE_PTR found = 0;
+    if (SUCCEEDED(browser->get_HWND(&found)) && found != 0) {
+      out.insert(reinterpret_cast<HWND>(found));
+    }
+  }
+  return out;
 }
 
 std::wstring WindowExePath(HWND hwnd) {
@@ -205,14 +266,99 @@ bool IsHostExe(const std::wstring& path) {
          stem == L"runtimebroker";
 }
 
-bool SkipGhostWindow(HWND hwnd, const std::wstring& path, const std::wstring& aumid, const std::wstring& title) {
-  if (!path.empty() && Lower(FileStem(path)) == L"explorer" && !IsExplorerFolderWindow(hwnd)) {
+// MSIX 패키지 앱의 실행 파일은 업데이트마다 버전 폴더 이름이 바뀌므로 경로를 핀으로 쓸 수 없다.
+bool IsPackagedPath(const std::wstring& path) {
+  const std::wstring lower = Lower(path);
+  return lower.find(L"\\windowsapps\\") != std::wstring::npos ||
+         lower.find(L"\\systemapps\\") != std::wstring::npos;
+}
+
+// "Name_Version_Arch[_ResourceId]__PublisherId" 폴더 이름에서 버전과 아키텍처를 지우고
+// "name__publisherid"만 남긴다. 패키지 폴더 형식이 아니면 빈 값을 돌려준다.
+std::wstring StripPackageVersion(const std::wstring& segment) {
+  const size_t pub = segment.rfind(L"__");
+  if (pub == std::wstring::npos || pub == 0 || pub + 2 >= segment.size()) {
+    return {};
+  }
+  const size_t name_end = segment.find(L'_');
+  if (name_end == std::wstring::npos || name_end >= pub) {
+    return {};
+  }
+  return segment.substr(0, name_end) + L"__" + segment.substr(pub + 2);
+}
+
+// 패키지 폴더 이름 "Name_Version_Arch[_ResourceId]__PublisherId"에서
+// 패키지 패밀리 이름 "name_publisherid"를 만든다. 형식이 아니면 빈 값이다.
+std::wstring PackageFamilyFromFolder(const std::wstring& segment) {
+  const size_t pub = segment.rfind(L"__");
+  if (pub == std::wstring::npos || pub == 0 || pub + 2 >= segment.size()) {
+    return {};
+  }
+  const size_t name_end = segment.find(L'_');
+  if (name_end == std::wstring::npos || name_end >= pub) {
+    return {};
+  }
+  return Lower(segment.substr(0, name_end) + L"_" + segment.substr(pub + 2));
+}
+
+// WindowsApps 경로에서 패키지 패밀리 이름을 뽑는다. 패키지 경로가 아니면 빈 값이다.
+std::wstring PackageFamilyFromPath(const std::wstring& path) {
+  const std::wstring canon = CanonicalPath(path);
+  const size_t root = canon.find(L"\\windowsapps\\");
+  if (root == std::wstring::npos) {
+    return {};
+  }
+  const size_t begin = root + wcslen(L"\\windowsapps\\");
+  size_t end = canon.find(L'\\', begin);
+  if (end == std::wstring::npos) {
+    end = canon.size();
+  }
+  return PackageFamilyFromFolder(canon.substr(begin, end - begin));
+}
+
+// AUMID "PackageFamilyName!AppId"에서 앞부분을 뽑는다. '!'가 없으면 전체를 쓴다.
+std::wstring PackageFamilyFromAumid(const std::wstring& aumid) {
+  if (aumid.empty()) {
+    return {};
+  }
+  const size_t bang = aumid.find(L'!');
+  return Lower(bang == std::wstring::npos ? aumid : aumid.substr(0, bang));
+}
+
+// 핀을 비교할 때에만 쓰는 형태. 패키지 경로면 버전을 지우고, 아니면 CanonicalPath 그대로다.
+std::wstring PathMatchForm(const std::wstring& path) {
+  std::wstring canon = CanonicalPath(path);
+  const size_t root = canon.find(L"\\windowsapps\\");
+  if (root == std::wstring::npos) {
+    return canon;
+  }
+  const size_t begin = root + wcslen(L"\\windowsapps\\");
+  size_t end = canon.find(L'\\', begin);
+  if (end == std::wstring::npos) {
+    end = canon.size();
+  }
+  const std::wstring stripped = StripPackageVersion(canon.substr(begin, end - begin));
+  if (stripped.empty()) {
+    return canon;
+  }
+  return canon.substr(0, begin) + stripped + canon.substr(end);
+}
+
+bool SkipGhostWindow(HWND hwnd, const std::wstring& path, const std::wstring& aumid, const std::wstring& title,
+                     bool shell_browser) {
+  const bool folder_window = shell_browser || IsExplorerFolderClass(hwnd);
+  if (folder_window) {
+    (void)title;
+    return false;
+  }
+  if (!path.empty() && Lower(FileStem(path)) == L"explorer") {
     return true;
   }
   if (IsHostExe(path) && aumid.empty()) {
     return true;
   }
-  return path.empty() && aumid.empty() && title.empty();
+  (void)title;
+  return path.empty() && aumid.empty();
 }
 
 bool LooksLikeHostedWebApp(const std::wstring& aumid) {
@@ -269,7 +415,7 @@ std::wstring AumidFallbackName(const std::wstring& aumid) {
 }
 
 bool CanPinApp(const DockApp& app) {
-  if (IsSelfExecutable(app.exe_path)) {
+  if (IsSelfExecutable(app.exe_path) || IsFilesystemFolder(app.exe_path)) {
     return false;
   }
   if (!app.aumid.empty()) {
@@ -311,6 +457,35 @@ std::wstring FilePathFromShellItem(IShellItem* item) {
   std::wstring out = path;
   CoTaskMemFree(path);
   return out;
+}
+
+bool CollectAppsFolderEntries(std::vector<std::pair<std::wstring, std::wstring>>& out) {
+  Microsoft::WRL::ComPtr<IShellItem> apps;
+  HRESULT hr = SHGetKnownFolderItem(FOLDERID_AppsFolder, KF_FLAG_DONT_VERIFY, nullptr, IID_PPV_ARGS(&apps));
+  if (FAILED(hr) || !apps) {
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IEnumShellItems> e;
+  hr = apps->BindToHandler(nullptr, BHID_EnumItems, IID_PPV_ARGS(&e));
+  if (FAILED(hr) || !e) {
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IShellItem> item;
+  ULONG fetched = 0;
+  while (e->Next(1, item.ReleaseAndGetAddressOf(), &fetched) == S_OK && fetched == 1) {
+    std::wstring path = FilePathFromShellItem(item.Get());
+    std::wstring aumid;
+    PWSTR id = nullptr;
+    if (SUCCEEDED(item->GetDisplayName(SIGDN_PARENTRELATIVEFORADDRESSBAR, &id)) && id != nullptr) {
+      aumid = id;
+      CoTaskMemFree(id);
+    }
+    if (path.empty() && aumid.empty()) {
+      continue;
+    }
+    out.push_back({std::move(aumid), std::move(path)});
+  }
+  return true;
 }
 
 bool LaunchShellItem(IShellItem* item) {
@@ -758,9 +933,24 @@ bool IsSelfExecutable(const std::wstring& path) {
   return Lower(FileStem(path)) == L"bamti";
 }
 
+DockApp MakeSpotlightDockApp() {
+  DockApp app;
+  app.kind = DockItemKind::kSpotlight;
+  app.key = kSpotlightPin;
+  app.display_name = L"검색";
+  app.pinned = true;
+  app.can_pin = false;
+  return app;
+}
+
+bool IsSpotlightPin(const std::wstring& pin) {
+  return pin == kSpotlightPin || pin == L"\x01spotlight";
+}
+
 std::wstring DockPinId(const DockApp& app) {
   if (!app.aumid.empty() &&
-      (LooksLikeHostedWebApp(app.aumid) || app.exe_path.empty() || IsHostExe(app.exe_path))) {
+      (LooksLikeHostedWebApp(app.aumid) || app.exe_path.empty() || IsHostExe(app.exe_path) ||
+       IsPackagedPath(app.exe_path))) {
     return std::wstring(kAumidPinPrefix) + app.aumid;
   }
   if (!app.exe_path.empty()) {
@@ -773,6 +963,9 @@ std::wstring DockPinId(const DockApp& app) {
 }
 
 bool SameDockPin(const std::wstring& a, const std::wstring& b) {
+  if (IsSpotlightPin(a) || IsSpotlightPin(b)) {
+    return IsSpotlightPin(a) && IsSpotlightPin(b);
+  }
   if (a.empty() || b.empty()) {
     LogPinCmpFalse(L"path", a, b, {}, {});
     return false;
@@ -795,8 +988,8 @@ bool SameDockPin(const std::wstring& a, const std::wstring& b) {
     }
     return same;
   }
-  const std::wstring ca = CanonicalPath(a);
-  const std::wstring cb = CanonicalPath(b);
+  const std::wstring ca = PathMatchForm(a);
+  const std::wstring cb = PathMatchForm(b);
   const bool same = ca == cb;
   if (!same) {
     LogPinCmpFalse(L"path", a, b, ca, cb);
@@ -809,10 +1002,13 @@ void ResetPinCmpLog() {
 }
 
 std::wstring DockPinCompareForm(const std::wstring& pin) {
+  if (IsSpotlightPin(pin)) {
+    return kSpotlightPin;
+  }
   if (IsAumidPin(pin)) {
     return Lower(AumidFromPin(pin));
   }
-  return CanonicalPath(pin);
+  return PathMatchForm(pin);
 }
 
 std::vector<std::wstring> LoadDockPins() {
@@ -868,6 +1064,96 @@ bool SaveDockPins(const std::vector<std::wstring>& paths) {
   return true;
 }
 
+size_t RepairDockPins(std::vector<std::wstring>& pins) {
+  std::vector<size_t> stale;
+  for (size_t i = 0; i < pins.size(); ++i) {
+    const std::wstring& pin = pins[i];
+    if (IsSpotlightPin(pin) || IsAumidPin(pin)) {
+      continue;
+    }
+    const std::wstring primary = PinPrimary(pin);
+    if (GetFileAttributesW(primary.c_str()) != INVALID_FILE_ATTRIBUTES) {
+      continue;
+    }
+    stale.push_back(i);
+  }
+  if (stale.empty()) {
+    return 0;
+  }
+
+  std::vector<std::pair<std::wstring, std::wstring>> candidates;
+  CollectAppsFolderEntries(candidates);
+
+  size_t repaired = 0;
+  for (const size_t i : stale) {
+    const std::wstring primary = PinPrimary(pins[i]);
+    const std::wstring family = PackageFamilyFromPath(primary);
+    const std::pair<std::wstring, std::wstring>* match = nullptr;
+    const wchar_t* by = nullptr;
+
+    if (!family.empty()) {
+      for (const auto& candidate : candidates) {
+        if (PackageFamilyFromAumid(candidate.first) == family) {
+          match = &candidate;
+          by = L"family";
+          break;
+        }
+      }
+    }
+    if (match == nullptr) {
+      const std::wstring form = PathMatchForm(primary);
+      if (!form.empty()) {
+        for (const auto& candidate : candidates) {
+          if (candidate.second.empty() || PathMatchForm(candidate.second) != form) {
+            continue;
+          }
+          match = &candidate;
+          by = L"path";
+          break;
+        }
+      }
+    }
+
+    if (match == nullptr) {
+      Log(L"pins", L"repair miss pin=%s family=%s candidates=%zu", pins[i].c_str(), family.c_str(),
+          candidates.size());
+      continue;
+    }
+
+    const std::wstring extra = PinExtra(pins[i]);
+    std::wstring replacement = match->first.empty() ? match->second : std::wstring(kAumidPinPrefix) + match->first;
+    if (!extra.empty()) {
+      replacement += L'\t';
+      replacement += extra;
+    }
+
+    bool duplicate = false;
+    for (size_t j = 0; j < pins.size(); ++j) {
+      if (j == i) {
+        continue;
+      }
+      if (SameDockPin(pins[j], replacement)) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (duplicate) {
+      Log(L"pins", L"repair miss pin=%s family=%s candidates=%zu", pins[i].c_str(), family.c_str(),
+          candidates.size());
+      continue;
+    }
+
+    const std::wstring stale_pin = pins[i];
+    pins[i] = std::move(replacement);
+    ++repaired;
+    Log(L"pins", L"repaired by=%s stale=%s new=%s", by, stale_pin.c_str(), pins[i].c_str());
+  }
+  if (repaired > 0) {
+    SaveDockPins(pins);
+  }
+  return repaired;
+}
+
 std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_paths) {
   WatchdogStage(L"collect");
   IVirtualDesktopManager* vdm = DesktopManager();
@@ -883,12 +1169,19 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
     bool path_cached = false;
   };
   std::vector<Raw> windows;
+  struct EnumCtx {
+    std::vector<Raw>* windows = nullptr;
+    const std::unordered_set<HWND>* shell_hwnds = nullptr;
+  } enum_ctx;
+  const std::unordered_set<HWND> shell_hwnds = ShellBrowserHwnds();
+  enum_ctx.windows = &windows;
+  enum_ctx.shell_hwnds = &shell_hwnds;
   EnumWindows(
       [](HWND hwnd, LPARAM lp) -> BOOL {
         if (!IsTaskWindow(hwnd)) {
           return TRUE;
         }
-        auto* out = reinterpret_cast<std::vector<Raw>*>(lp);
+        auto* ctx = reinterpret_cast<EnumCtx*>(lp);
         bool path_cached = false;
         const WindowCacheEntry& cached = CachedWindow(hwnd, &path_cached);
         Raw raw{};
@@ -900,13 +1193,14 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
         raw.relaunch_command = cached.props.relaunch_command;
         raw.path_cached = path_cached;
         raw.title = WindowTitle(hwnd);
-        if (SkipGhostWindow(hwnd, raw.path, raw.aumid, raw.title)) {
+        const bool shell_browser = ctx->shell_hwnds != nullptr && ctx->shell_hwnds->count(hwnd) != 0;
+        if (SkipGhostWindow(hwnd, raw.path, raw.aumid, raw.title, shell_browser)) {
           return TRUE;
         }
-        out->push_back(std::move(raw));
+        ctx->windows->push_back(std::move(raw));
         return TRUE;
       },
-      reinterpret_cast<LPARAM>(&windows));
+      reinterpret_cast<LPARAM>(&enum_ctx));
   PruneWindowCache();
 
   std::unordered_map<std::wstring, DockApp> groups;
@@ -936,8 +1230,18 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       if (!raw.path.empty() && (IsSelfExecutable(raw.path) || SkipChromeExe(raw.path))) {
         continue;
       }
+      const bool folder_window = IsExplorerFolderClass(raw.hwnd) || shell_hwnds.count(raw.hwnd) != 0;
+      std::wstring aumid_fs;
+      if (!folder_window && !raw.aumid.empty() && (raw.path.empty() || Lower(FileStem(raw.path)) == L"explorer")) {
+        aumid_fs = FilePathFromShellItem(ShellItemFromAumid(raw.aumid).Get());
+      }
+      const bool folder_identity = folder_window || IsFilesystemFolder(aumid_fs);
       std::wstring key;
-      if (!raw.aumid.empty()) {
+      if (folder_identity) {
+        const std::wstring explorer =
+            !raw.path.empty() && Lower(FileStem(raw.path)) == L"explorer" ? raw.path : ExplorerExePath();
+        key = L"path:" + CanonicalPath(explorer);
+      } else if (!raw.aumid.empty()) {
         key = L"aumid:" + Lower(raw.aumid);
       } else if (!raw.path.empty()) {
         key = L"path:" + CanonicalPath(raw.path);
@@ -953,21 +1257,28 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       if (app.hwnd == nullptr) {
         app.hwnd = raw.hwnd;
       }
-      if (app.aumid.empty()) {
+      if (app.aumid.empty() && !folder_identity) {
         app.aumid = raw.aumid;
       }
-      if (app.icon_resource.empty()) {
+      if (app.icon_resource.empty() && !folder_identity) {
         app.icon_resource = raw.icon_resource;
       }
-      if (app.relaunch_command.empty()) {
+      if (app.relaunch_command.empty() && !folder_identity) {
         app.relaunch_command = raw.relaunch_command;
       }
-      if (app.exe_path.empty() && !raw.path.empty() && !IsHostExe(raw.path)) {
+      if (folder_identity) {
+        if (app.exe_path.empty()) {
+          app.exe_path = !raw.path.empty() && Lower(FileStem(raw.path)) == L"explorer" ? raw.path : ExplorerExePath();
+          path_cached_flag[key] = raw.path_cached ? 1 : 0;
+        }
+      } else if (app.exe_path.empty() && !raw.path.empty() && !IsHostExe(raw.path) && !IsFilesystemFolder(raw.path)) {
         app.exe_path = raw.path;
         path_cached_flag[key] = raw.path_cached ? 1 : 0;
       }
       if (app.display_name.empty()) {
-        if (!raw.aumid.empty()) {
+        if (folder_identity) {
+          app.display_name = DisplayNameFor(app.exe_path, {});
+        } else if (!raw.aumid.empty()) {
           app.display_name = AppsFolderDisplayName(raw.aumid);
         }
         if (app.display_name.empty() && !raw.relaunch_name.empty()) {
@@ -1029,7 +1340,11 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
   };
 
   for (const auto& pin : pinned_paths) {
-    if (!IsAumidPin(pin) && IsSelfExecutable(pin)) {
+    if (IsSpotlightPin(pin)) {
+      result.push_back(MakeSpotlightDockApp());
+      continue;
+    }
+    if (!IsAumidPin(pin) && (IsSelfExecutable(pin) || IsFilesystemFolder(PinPrimary(pin)))) {
       continue;
     }
     DockApp* found = IsAumidPin(pin) ? find_by_aumid(AumidFromPin(pin)) : find_by_path(pin);
@@ -1054,6 +1369,9 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       }
       app.relaunch_command = PinExtra(pin);
       app.exe_path = FilePathFromShellItem(ShellItemFromAumid(app.aumid).Get());
+      if (IsFilesystemFolder(app.exe_path)) {
+        continue;
+      }
       app.pinned = true;
       app.can_pin = true;
       used_keys.push_back(app.key);
@@ -1084,6 +1402,11 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       continue;
     }
     DockApp& app = groups[key];
+    if ((app.exe_path.empty() && app.aumid.empty()) || IsFilesystemFolder(app.exe_path)) {
+      Log(L"dock", L"drop ghost key=%s path=%s aumid=%s name=%s", app.key.c_str(), app.exe_path.c_str(),
+          app.aumid.c_str(), app.display_name.c_str());
+      continue;
+    }
     app.can_pin = CanPinApp(app);
     if (miss_logs < 3) {
       const std::wstring pin_key = DockPinId(app);

@@ -40,8 +40,9 @@ namespace bamti {
 namespace {
 
 constexpr int kIconDip = 36;
-constexpr int kSlotDip = 52;
+constexpr int kSlotDip = 64;
 constexpr int kHeightDip = 64;
+constexpr int kHoverInsetDip = 4;
 constexpr int kPadXDip = 10;
 constexpr int kGroupGapDip = 12;
 constexpr int kDragSlopDip = 6;
@@ -65,7 +66,6 @@ constexpr UINT_PTR kAnimTimerId = 5;
 constexpr UINT kTrayWatchMs = 5000;
 constexpr UINT kAnimTimerMs = 8;
 constexpr UINT kIdlePollMs = 500;
-constexpr wchar_t kSpotlightDockKey[] = L"\x01spotlight";
 constexpr UINT kTasksChangedMsg = WM_APP + 20;
 constexpr UINT kMenuCommandMsg = WM_APP + 21;
 constexpr UINT kTrayChangedMsg = WM_APP + 22;
@@ -347,18 +347,32 @@ HBITMAP BitmapFromIconResource(const std::wstring& resource, int px) {
     }
   }
 
+  auto extract = [&]() -> HBITMAP {
+    HICON icon = nullptr;
+    const UINT got =
+        PrivateExtractIconsW(path.c_str(), has_index ? index : 0, 256, 256, &icon, nullptr, 1, LR_DEFAULTCOLOR);
+    if (got == 0 || icon == nullptr) {
+      return nullptr;
+    }
+    HBITMAP ready = BitmapFromIcon(icon, px);
+    DestroyIcon(icon);
+    return ready;
+  };
+  const wchar_t* ext = PathFindExtensionW(path.c_str());
+  const bool pe = ext != nullptr &&
+                  (_wcsicmp(ext, L".exe") == 0 || _wcsicmp(ext, L".dll") == 0 || _wcsicmp(ext, L".ico") == 0);
+  if (pe) {
+    if (HBITMAP ready = extract()) {
+      return ready;
+    }
+  }
   if (HBITMAP shell = BitmapFromShellItem(path, 256)) {
     if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
       return ready;
     }
   }
-  HICON icon = nullptr;
-  const UINT got =
-      PrivateExtractIconsW(path.c_str(), has_index ? index : 0, 256, 256, &icon, nullptr, 1, LR_DEFAULTCOLOR);
-  if (got != 0 && icon != nullptr) {
-    HBITMAP ready = BitmapFromIcon(icon, px);
-    DestroyIcon(icon);
-    return ready;
+  if (!pe) {
+    return extract();
   }
   return nullptr;
 }
@@ -477,16 +491,6 @@ HBITMAP BitmapFromFluentSearch(int px, bool dark) {
   SelectObject(mem, old_bmp);
   DeleteDC(mem);
   return bmp;
-}
-
-DockApp MakeSpotlightDockApp() {
-  DockApp app;
-  app.kind = DockItemKind::kSpotlight;
-  app.key = kSpotlightDockKey;
-  app.display_name = L"검색";
-  app.pinned = true;
-  app.can_pin = false;
-  return app;
 }
 
 HICON QueryWindowIcon(HWND hwnd) {
@@ -715,6 +719,10 @@ void ToggleLoginItem(const DockApp& app) {
 void ShowInFolder(const DockApp& app) {
   if (app.exe_path.empty() || app.exe_path.find(L'"') != std::wstring::npos) {
     Log(L"dock", L"show in folder skipped name=%s", app.display_name.c_str());
+    return;
+  }
+  if (GetFileAttributesW(app.exe_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    Log(L"dock", L"show in folder missing path=%s", app.exe_path.c_str());
     return;
   }
   const std::wstring args = L"/select,\"" + app.exe_path + L"\"";
@@ -1183,7 +1191,9 @@ bool Dock::Create(HINSTANCE instance, HWND bar_hwnd) {
 
   dark_ = ShellUsesDarkMode();
   pins_ = LoadDockPins();
+  RepairDockPins(pins_);
   SanitizePins();
+  EnsureSpotlightPin();
   Log(L"dock", L"create pins=%zu", pins_.size());
 
   hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_NOACTIVATE, kDockClass,
@@ -1649,8 +1659,8 @@ void Dock::Rebuild() {
   }
   force_collect_ = false;
   last_window_fp_ = fp;
+  EnsureSpotlightPin();
   std::vector<DockApp> next = CollectDockApps(pins_);
-  next.insert(next.begin(), MakeSpotlightDockApp());
   bool pin_miss = false;
   for (const auto& app : next) {
     if (app.running && !app.pinned) {
@@ -1817,6 +1827,15 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
   }
   const bool identity = !app.aumid.empty() || PathImpliesGenericIcon(app.exe_path);
 
+  const wchar_t* exe_name = PathFindFileNameW(app.exe_path.c_str());
+  const bool explorer = exe_name != nullptr && _wcsicmp(exe_name, L"explorer.exe") == 0;
+  if (explorer && !app.exe_path.empty()) {
+    if (HBITMAP shell = BitmapFromShellItem(app.exe_path, 256)) {
+      if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
+        return ready;
+      }
+    }
+  }
   if (!app.aumid.empty()) {
     if (HBITMAP shell = BitmapFromAumid(app.aumid, 256)) {
       if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
@@ -1835,11 +1854,6 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
     }
   }
   if (!app.exe_path.empty() && !PathImpliesGenericIcon(app.exe_path)) {
-    if (HBITMAP shell = BitmapFromShellItem(app.exe_path, 256)) {
-      if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
-        return ready;
-      }
-    }
     HICON extracted = nullptr;
     const UINT got =
         PrivateExtractIconsW(app.exe_path.c_str(), 0, 256, 256, &extracted, nullptr, 1, LR_DEFAULTCOLOR);
@@ -1847,6 +1861,11 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
       HBITMAP ready = BitmapFromIcon(extracted, px);
       DestroyIcon(extracted);
       if (ready != nullptr) {
+        return ready;
+      }
+    }
+    if (HBITMAP shell = BitmapFromShellItem(app.exe_path, 256)) {
+      if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
         return ready;
       }
     }
@@ -1866,6 +1885,17 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
       if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
         return ready;
       }
+    }
+  }
+  // 어떤 방법으로도 아이콘을 얻지 못한 고정 항목은 빈 칸으로 남으므로 일반 앱 아이콘을 대신 그린다.
+  SHSTOCKICONINFO stock{};
+  stock.cbSize = sizeof(stock);
+  if (SUCCEEDED(SHGetStockIconInfo(SIID_APPLICATION, SHGSI_ICON | SHGSI_LARGEICON, &stock)) &&
+      stock.hIcon != nullptr) {
+    HBITMAP ready = BitmapFromIcon(stock.hIcon, px);
+    DestroyIcon(stock.hIcon);
+    if (ready != nullptr) {
+      return ready;
     }
   }
   return nullptr;
@@ -2022,16 +2052,16 @@ void Dock::RenderLayered() {
     if (!(dragging_ && static_cast<int>(i) == drag_index_) && i < anim_x_.size()) {
       x = anim_x_[i];
     }
-    float y = static_cast<float>((height - icon_px) / 2 - Dip(4));
+    float y = static_cast<float>((height - icon_px) / 2);
     if (!dragging_ && static_cast<int>(i) == pressed_) {
       y += static_cast<float>(Dip(1));
     }
     if (!dragging_ && hover_ == static_cast<int>(slot_i) && hover_fill) {
-      const float inset = static_cast<float>(Dip(4));
+      const float inset = static_cast<float>(Dip(kHoverInsetDip));
       const float rr = static_cast<float>(Dip(8));
       const D2D1_ROUNDED_RECT bg{
-          D2D1::RectF(static_cast<float>(slot.left), static_cast<float>(slot.top) + inset,
-                      static_cast<float>(slot.right), static_cast<float>(slot.bottom) - inset),
+          D2D1::RectF(static_cast<float>(slot.left) + inset, static_cast<float>(slot.top) + inset,
+                      static_cast<float>(slot.right) - inset, static_cast<float>(slot.bottom) - inset),
           rr, rr};
       rt->FillRoundedRectangle(bg, hover_fill.Get());
     }
@@ -2387,10 +2417,40 @@ void Dock::ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND
   }
 }
 
+void Dock::EnsureSpotlightPin() {
+  std::vector<std::wstring> next;
+  next.reserve(pins_.size() + 1);
+  bool found = false;
+  for (std::wstring& pin : pins_) {
+    if (IsSpotlightPin(pin)) {
+      if (found) {
+        continue;
+      }
+      pin = kSpotlightPin;
+      found = true;
+    }
+    next.push_back(std::move(pin));
+  }
+  pins_ = std::move(next);
+  if (!found) {
+    pins_.insert(pins_.begin(), kSpotlightPin);
+  }
+}
+
 void Dock::SanitizePins() {
   const auto before = pins_.size();
   pins_.erase(std::remove_if(pins_.begin(), pins_.end(),
-                             [](const std::wstring& path) { return IsSelfExecutable(path); }),
+                             [](const std::wstring& path) {
+                               if (IsSpotlightPin(path)) {
+                                 return false;
+                               }
+                               const std::wstring primary = path.substr(0, path.find(L'\t'));
+                               if (IsSelfExecutable(primary)) {
+                                 return true;
+                               }
+                               const DWORD attr = GetFileAttributesW(primary.c_str());
+                               return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                             }),
               pins_.end());
   if (pins_.size() != before) {
     SaveDockPins(pins_);
@@ -2409,10 +2469,6 @@ bool Dock::Busy() const {
   return popup_.IsOpen() || dragging_ || pressed_ >= 0;
 }
 
-int Dock::SpotlightPrefix() const {
-  return (!items_.empty() && items_[0].kind == DockItemKind::kSpotlight) ? 1 : 0;
-}
-
 int Dock::PinnedCount() const {
   int n = 0;
   for (const auto& app : items_) {
@@ -2426,13 +2482,12 @@ int Dock::PinnedCount() const {
 
 int Dock::DropIndexAt(POINT client) const {
   const int pinned = PinnedCount();
-  const int prefix = SpotlightPrefix();
-  if (pinned <= prefix) {
+  if (pinned <= 0) {
     return -1;
   }
-  int best = prefix;
+  int best = 0;
   int best_dist = INT_MAX;
-  for (int i = prefix; i < pinned && i < static_cast<int>(slots_.size()); ++i) {
+  for (int i = 0; i < pinned && i < static_cast<int>(slots_.size()); ++i) {
     const RECT& slot = slots_[static_cast<size_t>(i)];
     const int cx = slot.left + (slot.right - slot.left) / 2;
     const int dist = client.x > cx ? client.x - cx : cx - client.x;
@@ -2451,8 +2506,7 @@ std::vector<size_t> Dock::DisplayOrder() const {
     return order;
   }
   const int pinned = PinnedCount();
-  const int prefix = SpotlightPrefix();
-  if (drag_index_ < prefix || drop_index_ < prefix || drag_index_ >= pinned || drop_index_ >= pinned) {
+  if (drag_index_ < 0 || drop_index_ < 0 || drag_index_ >= pinned || drop_index_ >= pinned) {
     return order;
   }
   const int from = drag_index_;
@@ -2637,8 +2691,6 @@ void Dock::BeginDragIfNeeded(POINT client) {
     reason = L"index-out-of-range";
   } else if (!items_[static_cast<size_t>(pressed_)].pinned) {
     reason = L"not-pinned";
-  } else if (items_[static_cast<size_t>(pressed_)].kind == DockItemKind::kSpotlight) {
-    reason = L"spotlight";
   }
   if (reason != nullptr) {
     if (NoteDragLog()) {
@@ -2697,14 +2749,11 @@ void Dock::EndDrag(bool commit) {
     ReleaseCapture();
   }
   if (was_dragging && commit && from >= 0 && to >= 0 && from != to) {
-    const int prefix = SpotlightPrefix();
-    const int from_pin = from - prefix;
-    const int to_pin = to - prefix;
     const int pinned = static_cast<int>(pins_.size());
-    if (from >= prefix && to >= prefix && from_pin < pinned && to_pin < pinned) {
-      const std::wstring moved = pins_[static_cast<size_t>(from_pin)];
-      pins_.erase(pins_.begin() + from_pin);
-      pins_.insert(pins_.begin() + to_pin, moved);
+    if (from < pinned && to < pinned) {
+      const std::wstring moved = pins_[static_cast<size_t>(from)];
+      pins_.erase(pins_.begin() + from);
+      pins_.insert(pins_.begin() + to, moved);
       RotatePinnedRange(items_, from, to);
       RotatePinnedRange(icons_, from, to);
       RotatePinnedRange(anim_x_, from, to);

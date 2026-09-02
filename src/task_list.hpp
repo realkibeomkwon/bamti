@@ -9,6 +9,8 @@ namespace bamti {
 
 enum class DockItemKind { kApp, kSpotlight };
 
+inline constexpr wchar_t kSpotlightPin[] = L"bamti.spotlight";
+
 struct DockApp {
   DockItemKind kind = DockItemKind::kApp;
   std::wstring key;
@@ -26,6 +28,7 @@ struct DockApp {
 
 std::vector<std::wstring> LoadDockPins();
 bool SaveDockPins(const std::vector<std::wstring>& paths);
+size_t RepairDockPins(std::vector<std::wstring>& pins);
 
 std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_paths);
 uint64_t TaskWindowFingerprint();
@@ -39,6 +42,8 @@ void RestoreHwnds(const std::vector<HWND>& windows);
 void HideHwnds(const std::vector<HWND>& windows);
 void CloseHwnds(const std::vector<HWND>& windows);
 
+DockApp MakeSpotlightDockApp();
+bool IsSpotlightPin(const std::wstring& pin);
 std::wstring DockPinId(const DockApp& app);
 bool SameDockPin(const std::wstring& a, const std::wstring& b);
 std::wstring DockPinCompareForm(const std::wstring& pin);
