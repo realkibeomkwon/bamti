@@ -1,5 +1,7 @@
 #pragma once
 
+#include "corner.hpp"
+
 #include <d2d1.h>
 #include <dwrite.h>
 #include <windows.h>
@@ -27,6 +29,9 @@ class PopupContent {
   virtual void DragEnd(int /*index*/) {}
   // 참이면 PopupSurface가 배경 둥근 사각형을 그리지 않는다. 내용이 카드 여러 장을 직접 그린다.
   virtual bool PaintsOwnChrome() const { return false; }
+  // 이 콘텐츠를 담는 창의 곡률 계층. 기본은 떠 있는 창이다.
+  // 초점 표면으로 올리려면 corner::kHeroDip 을 돌려주면 된다.
+  virtual int CornerDip() const { return corner::kOverlayDip; }
 };
 
 float PopupTextWidth(UINT dpi, const std::wstring& text);
@@ -118,6 +123,7 @@ class PopupSurface {
   Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> target_;
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> fill_;
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> stroke_;
+  corner::SquircleCache squircle_;
   HDC mem_dc_ = nullptr;
   HBITMAP dib_ = nullptr;
   HGDIOBJ old_dib_ = nullptr;

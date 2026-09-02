@@ -1,5 +1,6 @@
 #include "status_panel.hpp"
 
+#include "corner.hpp"
 #include "log.hpp"
 #include "slider_geom.hpp"
 #include "theme.hpp"
@@ -37,12 +38,6 @@ constexpr int kPanelRowGapDip = 18;
 
 int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
-}
-
-float BarCornerRadius(int bar_h_px, UINT dpi) {
-  const float dock = static_cast<float>(DipToPx(kCornerRadiusDip, dpi));
-  const float half = static_cast<float>(bar_h_px) * 0.5f;
-  return (std::min)(dock, half);
 }
 
 void FillBar(ID2D1RenderTarget* target, float left, float top, float right, float bottom, float radius,
@@ -302,7 +297,7 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
   const int bar_h = DipToPx(kPanelGaugeBarDip, dpi);
   const int note_h = DipToPx(kPanelGaugeNoteDip, dpi);
   const int bar_pad = DipToPx(kPanelBarPadDip, dpi);
-  const float bar_radius = BarCornerRadius(bar_h, dpi);
+  const float bar_radius = corner::PillPx(static_cast<float>(bar_h));
   const auto& rows = panel.rows;
   int hit_i = 0;
   for (size_t i = 0; i < rows.size();) {
@@ -397,14 +392,17 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
           const float t = static_cast<float>(hit.rc.top);
           const float b = static_cast<float>(hit.rc.bottom);
           if (hot_index == hit_i - 1) {
-            target->FillRectangle(D2D1::RectF(static_cast<float>(hit.rc.left), t, static_cast<float>(hit.rc.right), b),
-                                  hover.Get());
+            const float hover_r = corner::HoverPx(b - t, dpi);
+            target->FillRoundedRectangle(
+                D2D1_ROUNDED_RECT{D2D1::RectF(static_cast<float>(hit.rc.left), t, static_cast<float>(hit.rc.right), b),
+                                  hover_r, hover_r},
+                hover.Get());
           }
           const int track_w = DipToPx(kToggleTrackWDip, dpi);
           const int track_h = DipToPx(kToggleTrackHDip, dpi);
           const float track_l = right - static_cast<float>(track_w);
           const float track_t = t + (b - t - static_cast<float>(track_h)) * 0.5f;
-          const float radius = static_cast<float>(track_h) * 0.5f;
+          const float radius = corner::PillPx(static_cast<float>(track_h));
           const D2D1_ROUNDED_RECT track_rc{D2D1::RectF(track_l, track_t, right, track_t + static_cast<float>(track_h)),
                                            radius, radius};
           if (row.on) {
@@ -439,7 +437,7 @@ void StatusPanelContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
         } else {
           const float track_top = static_cast<float>(hit.rc.top + spad);
           const float track_bottom = track_top + static_cast<float>(s_track_h);
-          const float radius = BarCornerRadius(s_track_h, dpi);
+          const float radius = corner::PillPx(static_cast<float>(s_track_h));
           FillBar(target, left, track_top, right, track_bottom, radius, track.Get());
           const float value = ClampUnit(row.value);
           const SliderGeometry geom = SliderGeom(left, right, dpi);

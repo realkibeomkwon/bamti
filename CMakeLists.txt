@@ -21,6 +21,7 @@ add_executable(bamti WIN32
   src/bar_layout.cpp
   src/icon_cache.cpp
   src/theme.cpp
+  src/corner.cpp
   src/pipe_server.cpp
   src/status_registry.cpp
   src/status_panel.cpp

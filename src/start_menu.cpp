@@ -1,5 +1,6 @@
 #include "start_menu.hpp"
 
+#include "corner.hpp"
 #include "dwm.hpp"
 #include "theme.hpp"
 
@@ -362,10 +363,12 @@ void StartMenu::Paint() {
         const Row& row = rows_[i];
         if (static_cast<int>(i) == hot_ && brush) {
           brush->SetColor(MenuItemHoverFill(false, false));
+          const float hover_r =
+              corner::HoverPx(static_cast<float>(row.rect.bottom - row.rect.top), Dpi());
           const D2D1_ROUNDED_RECT hover{
               D2D1::RectF(static_cast<float>(row.rect.left), static_cast<float>(row.rect.top),
                           static_cast<float>(row.rect.right), static_cast<float>(row.rect.bottom)),
-              static_cast<float>(Dip(6)), static_cast<float>(Dip(6))};
+              hover_r, hover_r};
           rt_->FillRoundedRectangle(hover, brush.Get());
         }
 

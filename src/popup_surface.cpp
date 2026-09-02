@@ -542,6 +542,7 @@ void PopupSurface::ReleaseLayeredTarget() {
   fill_.Reset();
   stroke_.Reset();
   target_.Reset();
+  squircle_.Reset();
   if (mem_dc_ != nullptr && old_dib_ != nullptr) {
     SelectObject(mem_dc_, old_dib_);
     old_dib_ = nullptr;
@@ -613,6 +614,7 @@ void PopupSurface::EnsureLayeredTarget() {
   }
   fill_.Reset();
   stroke_.Reset();
+  squircle_.Reset();
   const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
       D2D1_RENDER_TARGET_TYPE_DEFAULT,
       D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
@@ -659,6 +661,7 @@ void PopupSurface::Render() {
     target_.Reset();
     fill_.Reset();
     stroke_.Reset();
+    squircle_.Reset();
     EnsureLayeredTarget();
     if (!target_ || FAILED(target_->BindDC(mem_dc_, &client))) {
       return;
@@ -667,9 +670,8 @@ void PopupSurface::Render() {
   const float width = static_cast<float>(dib_w_);
   const float height = static_cast<float>(dib_h_);
   const bool own_chrome = content_->PaintsOwnChrome();
-  const float max_radius = (std::min)(width, height) * 0.5f - 1.0f;
-  const float radius =
-      (std::max)(0.0f, (std::min)(static_cast<float>(MulDiv(kCornerRadiusDip, static_cast<int>(Dpi()), 96)), max_radius));
+  const int tier = content_->CornerDip();
+  const float radius = corner::ClampPx(corner::ToPx(tier, Dpi()), width, height);
   const D2D1_ROUNDED_RECT rounded{D2D1::RectF(0.5f, 0.5f, width - 0.5f, height - 0.5f), radius, radius};
   const D2D1_COLOR_F fill = DockFillColor(dark_);
   const D2D1_COLOR_F stroke = DockStrokeColor(dark_);
@@ -687,11 +689,21 @@ void PopupSurface::Render() {
   target_->BeginDraw();
   target_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
   if (!own_chrome) {
+    ID2D1PathGeometry* squircle =
+        corner::IsHero(tier) ? squircle_.Get(d2d_.Get(), rounded.rect, radius) : nullptr;
     if (fill_) {
-      target_->FillRoundedRectangle(rounded, fill_.Get());
+      if (squircle != nullptr) {
+        target_->FillGeometry(squircle, fill_.Get());
+      } else {
+        target_->FillRoundedRectangle(rounded, fill_.Get());
+      }
     }
     if (stroke_) {
-      target_->DrawRoundedRectangle(rounded, stroke_.Get(), 1.0f);
+      if (squircle != nullptr) {
+        target_->DrawGeometry(squircle, stroke_.Get(), 1.0f);
+      } else {
+        target_->DrawRoundedRectangle(rounded, stroke_.Get(), 1.0f);
+      }
     }
   }
   content_->Render(target_.Get(), Dpi(), hot_);
@@ -700,6 +712,7 @@ void PopupSurface::Render() {
     target_.Reset();
     fill_.Reset();
     stroke_.Reset();
+    squircle_.Reset();
   }
 }
 

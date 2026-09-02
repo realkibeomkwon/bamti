@@ -31,8 +31,6 @@ constexpr int kWidthDip = 680;
 constexpr int kShadowDip = 18;
 constexpr int kPadDip = 12;
 constexpr int kSearchHeightDip = 48;
-constexpr int kCardRadiusDip = 18;
-constexpr int kSearchRadiusDip = 12;
 constexpr int kRowHeightDip = 36;
 constexpr int kHeaderHeightDip = 24;
 constexpr int kMaxListDip = 420;
@@ -1625,6 +1623,7 @@ bool Spotlight::EnsureLayer(int width, int height) {
 }
 
 void Spotlight::ReleaseLayer() {
+  squircle_.Reset();
   if (layer_dc_ != nullptr && layer_old_ != nullptr) {
     SelectObject(layer_dc_, layer_old_);
     layer_old_ = nullptr;
@@ -2334,6 +2333,7 @@ void Spotlight::Present() {
   const RECT bind{0, 0, width, height};
   if (FAILED(rt_->BindDC(layer_dc_, &bind))) {
     rt_.Reset();
+    squircle_.Reset();
     return;
   }
   rt_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -2342,8 +2342,9 @@ void Spotlight::Present() {
 
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
   rt_->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 0), brush.GetAddressOf());
+  const UINT dpi = Dpi();
   const float shadow = static_cast<float>(Dip(kShadowDip));
-  const float radius = static_cast<float>(Dip(kCardRadiusDip));
+  const float radius = corner::ToPx(corner::kHeroDip, dpi);
   const float card_l = shadow;
   const float card_t = shadow;
   const float card_r = static_cast<float>(width) - shadow;
@@ -2357,11 +2358,18 @@ void Spotlight::Present() {
       rt_->FillRoundedRectangle(sh, brush.Get());
     }
     brush->SetColor(FillColor(dark_));
-    const D2D1_ROUNDED_RECT card{D2D1::RectF(card_l, card_t, card_r, card_b), radius, radius};
-    rt_->FillRoundedRectangle(card, brush.Get());
+    const D2D1_RECT_F card_rect = D2D1::RectF(card_l, card_t, card_r, card_b);
+    const D2D1_ROUNDED_RECT card{card_rect, radius, radius};
+    ID2D1PathGeometry* squircle = squircle_.Get(d2d_.Get(), card_rect, radius);
+    if (squircle != nullptr) {
+      rt_->FillGeometry(squircle, brush.Get());
+    } else {
+      rt_->FillRoundedRectangle(card, brush.Get());
+    }
   }
 
-  const float search_radius = static_cast<float>(Dip(kSearchRadiusDip));
+  const float search_radius =
+      corner::ConcentricPx(radius, static_cast<float>(Dip(kPadDip)), corner::ToPx(corner::kOverlayDip, dpi), dpi);
   if (brush) {
     brush->SetColor(SearchFillColor(dark_));
     const D2D1_ROUNDED_RECT search{
@@ -2453,10 +2461,12 @@ void Spotlight::Present() {
     }
     if (static_cast<int>(i) == hot_ && Selectable(row) && brush) {
       brush->SetColor(MenuItemHoverFill(dark_, false));
+      const float hover_r =
+          corner::HoverPx(static_cast<float>(row.rect.bottom - row.rect.top), dpi);
       const D2D1_ROUNDED_RECT hover{
           D2D1::RectF(static_cast<float>(row.rect.left), static_cast<float>(row.rect.top),
                       static_cast<float>(row.rect.right), static_cast<float>(row.rect.bottom)),
-          static_cast<float>(Dip(8)), static_cast<float>(Dip(8))};
+          hover_r, hover_r};
       rt_->FillRoundedRectangle(hover, brush.Get());
     }
 
@@ -2517,6 +2527,7 @@ void Spotlight::Present() {
   const HRESULT hr = rt_->EndDraw();
   if (hr == D2DERR_RECREATE_TARGET) {
     rt_.Reset();
+    squircle_.Reset();
     return;
   }
 

@@ -1,5 +1,6 @@
 #include "clock_renderer.hpp"
 
+#include "corner.hpp"
 #include "log.hpp"
 #include "theme.hpp"
 
@@ -17,7 +18,6 @@ constexpr float kStartHitWidthDip = 34.0f;
 constexpr float kStartLogoDip = 20.0f;
 constexpr float kStartHoverInsetXDip = 3.0f;
 constexpr float kStartHoverInsetYDip = 3.0f;
-constexpr float kStartHoverRadiusDip = static_cast<float>(kCornerRadiusDip);
 constexpr float kBatteryIconDip = 24.0f;
 constexpr float kLogoView = 11.5f;
 constexpr wchar_t kFluentFont[] = L"Segoe Fluent Icons";
@@ -463,10 +463,13 @@ void ClockRenderer::DrawStartButton(ID2D1SolidColorBrush* brush, bool dark, bool
   const float hit_right = static_cast<float>(start_rect.right - client.left) / px;
   if (hot || pressed) {
     brush->SetColor(MenuItemHoverFill(dark, pressed));
+    const float hover_r = (std::min)(static_cast<float>(corner::kOverlayDip),
+                                     (std::max)(static_cast<float>(corner::kControlDip),
+                                                (height_dip - kStartHoverInsetYDip * 2.0f) * 0.22f));
     const D2D1_ROUNDED_RECT hover{
         D2D1::RectF(hit_left + kStartHoverInsetXDip, kStartHoverInsetYDip, hit_right - kStartHoverInsetXDip,
                     height_dip - kStartHoverInsetYDip),
-        kStartHoverRadiusDip, kStartHoverRadiusDip};
+        hover_r, hover_r};
     rt_->FillRoundedRectangle(hover, brush);
   }
 

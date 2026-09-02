@@ -1,5 +1,7 @@
 #pragma once
 
+#include "corner.hpp"
+
 #include <d2d1.h>
 #include <dwrite.h>
 #include <windows.h>
@@ -155,6 +157,7 @@ class Spotlight {
   Microsoft::WRL::ComPtr<IDWriteTextFormat> meta_format_;
   Microsoft::WRL::ComPtr<IDWriteTextFormat> header_format_;
   Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> rt_;
+  corner::SquircleCache squircle_;
 };
 
 }  // namespace bamti

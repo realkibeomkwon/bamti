@@ -1,5 +1,6 @@
 #include "control_center.hpp"
 
+#include "corner.hpp"
 #include "log.hpp"
 #include "slider_geom.hpp"
 #include "status_item.hpp"
@@ -23,7 +24,6 @@ namespace {
 constexpr int kPanelPadDip = 14;
 constexpr int kCcWidthDip = 340;
 constexpr int kCardWDip = 312;
-constexpr int kRadiusDip = kCornerRadiusDip;
 constexpr int kSectionGapDip = 10;
 constexpr int kConnectHDip = 104;
 constexpr int kConnectRowHDip = 52;
@@ -657,7 +657,7 @@ void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_i
         page_ == Page::kWifi ? 1 : 2);
     return;
   }
-  const float radius = static_cast<float>(DipToPx(kRadiusDip, dpi));
+  const float radius = corner::ToPx(corner::kOverlayDip, dpi);
   const D2D1_COLOR_F fg = ClockTextColor(dark);
   const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
   auto fill_round = [&](const RECT& rc, D2D1_COLOR_F color) {
@@ -767,15 +767,16 @@ void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_i
     const float top = static_cast<float>(track.top);
     const float bottom = static_cast<float>(track.bottom);
     const float h = bottom - top;
+    const float pill = corner::PillPx(h);
     const SliderGeometry geom = SliderGeomThick(left, right, h);
     const float v = ClampUnit(value);
     const float x = geom.lo + (geom.hi - geom.lo) * v;
     brush->SetColor(ScaleAlpha(fg, 0.12f));
-    target->FillRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(left, top, right, bottom), h * 0.5f, h * 0.5f},
+    target->FillRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(left, top, right, bottom), pill, pill},
                                  brush.Get());
     brush->SetColor(AccentFillColor(dark));
     target->FillRoundedRectangle(
-        D2D1_ROUNDED_RECT{D2D1::RectF(left, top, x + h * 0.5f, bottom), h * 0.5f, h * 0.5f}, brush.Get());
+        D2D1_ROUNDED_RECT{D2D1::RectF(left, top, x + h * 0.5f, bottom), pill, pill}, brush.Get());
     const D2D1_RECT_F cap = D2D1::RectF(left, top, left + h, top + h);
     const bool covered = x + h * 0.5f >= left + h - 2.0f;
     brush->SetColor(covered ? AccentOnColor(dark) : ScaleAlpha(fg, 0.7f));
@@ -808,7 +809,7 @@ void ControlCenterContent::RenderListPage(ID2D1RenderTarget* target, UINT dpi, i
   const bool dark = host_.dark;
   const D2D1_COLOR_F fg = ClockTextColor(dark);
   const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
-  const float radius = static_cast<float>(DipToPx(kRadiusDip, dpi));
+  const float radius = corner::ToPx(corner::kOverlayDip, dpi);
   const int pad = DipToPx(kPanelPadDip, dpi);
   const int width = DipToPx(kCcWidthDip, dpi);
   auto fill_round = [&](const RECT& rc, D2D1_COLOR_F color) {
@@ -818,12 +819,20 @@ void ControlCenterContent::RenderListPage(ID2D1RenderTarget* target, UINT dpi, i
                                radius, radius};
     target->FillRoundedRectangle(rr, brush);
   };
+  auto fill_hover = [&](const RECT& rc, D2D1_COLOR_F color) {
+    brush->SetColor(color);
+    const float hover_r = corner::HoverPx(static_cast<float>(rc.bottom - rc.top), dpi);
+    const D2D1_ROUNDED_RECT rr{D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
+                                           static_cast<float>(rc.right), static_cast<float>(rc.bottom)),
+                               hover_r, hover_r};
+    target->FillRoundedRectangle(rr, brush);
+  };
 
   const bool on = page_ == Page::kWifi ? wifi_radio_on_ : bt_on_;
   const wchar_t* title = page_ == Page::kWifi ? L"Wi-Fi" : L"Bluetooth";
   if (show_back_) {
     if (hot_id == kPageBack) {
-      fill_round(RECT{pad, pad, pad + DipToPx(32, dpi), pad + DipToPx(kPageHeaderHDip, dpi)},
+      fill_hover(RECT{pad, pad, pad + DipToPx(32, dpi), pad + DipToPx(kPageHeaderHDip, dpi)},
                  MenuItemHoverFill(dark, false));
     }
     brush->SetColor(fg);
@@ -846,11 +855,12 @@ void ControlCenterContent::RenderListPage(ID2D1RenderTarget* target, UINT dpi, i
   const RECT toggle{width - pad - DipToPx(44, dpi), pad + DipToPx(12, dpi), width - pad,
                     pad + DipToPx(12 + 24, dpi)};
   const float th = static_cast<float>(toggle.bottom - toggle.top);
+  const float toggle_pill = corner::PillPx(th);
   brush->SetColor(on ? AccentFillColor(dark) : BadgeOffFill(dark));
   target->FillRoundedRectangle(
       D2D1_ROUNDED_RECT{D2D1::RectF(static_cast<float>(toggle.left), static_cast<float>(toggle.top),
                                     static_cast<float>(toggle.right), static_cast<float>(toggle.bottom)),
-                        th * 0.5f, th * 0.5f},
+                        toggle_pill, toggle_pill},
       brush);
   const float knob = th - 6.0f;
   const float knob_x = on ? static_cast<float>(toggle.right) - 3.0f - knob : static_cast<float>(toggle.left) + 3.0f;

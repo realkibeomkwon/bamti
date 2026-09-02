@@ -1,5 +1,6 @@
 #include "clock_flyout.hpp"
 
+#include "corner.hpp"
 #include "theme.hpp"
 
 #include <d2d1helper.h>
@@ -13,7 +14,6 @@ namespace {
 
 constexpr int kWidthDip = 360;
 constexpr int kGapDip = 12;
-constexpr int kCardRadiusDip = 8;
 constexpr int kNotifyPadDip = 16;
 constexpr int kNotifyHeaderDip = 40;
 constexpr int kNotifyEmptyDip = 100;
@@ -487,7 +487,7 @@ void ClockFlyoutContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
   const int hot_id = HitIdAt(hot_index);
   const D2D1_COLOR_F fg = ClockTextColor(dark);
   const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
-  const float radius = static_cast<float>(DipToPx(kCardRadiusDip, dpi));
+  const float radius = corner::ToPx(corner::kOverlayDip, dpi);
   auto fill_round = [&](const RECT& rc, D2D1_COLOR_F color) {
     brush->SetColor(color);
     const D2D1_ROUNDED_RECT rr{D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
@@ -521,7 +521,7 @@ void ClockFlyoutContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_ind
 
   auto hover_fill = [&](int id, const RECT& rc) {
     if (hot_id == id) {
-      const float rr = static_cast<float>(DipToPx(4, dpi));
+      const float rr = corner::HoverPx(static_cast<float>(rc.bottom - rc.top), dpi);
       brush->SetColor(MenuItemHoverFill(dark, false));
       target->FillRoundedRectangle(
           D2D1_ROUNDED_RECT{D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
@@ -823,7 +823,7 @@ void ClockMenuContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_index
     const RECT rc = RowRect(i, dpi);
     if (i == hot_index) {
       brush->SetColor(MenuItemHoverFill(dark_, false));
-      const float rr = static_cast<float>(DipToPx(4, dpi));
+      const float rr = corner::HoverPx(static_cast<float>(rc.bottom - rc.top), dpi);
       target->FillRoundedRectangle(
           D2D1_ROUNDED_RECT{D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
                                         static_cast<float>(rc.right), static_cast<float>(rc.bottom)),

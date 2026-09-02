@@ -1,5 +1,6 @@
 #pragma once
 
+#include "corner.hpp"
 #include "popup_surface.hpp"
 #include "task_list.hpp"
 
@@ -128,6 +129,7 @@ class Dock {
   std::map<std::wstring, HBITMAP> icon_cache_;
   std::map<std::wstring, Microsoft::WRL::ComPtr<ID2D1Bitmap>> d2d_icons_;
   Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> layered_rt_;
+  corner::SquircleCache squircle_;
   HBITMAP layered_dib_ = nullptr;
   HDC layered_mem_ = nullptr;
   HGDIOBJ layered_old_ = nullptr;

@@ -1724,6 +1724,7 @@ void Dock::ResetD2dIcons() {
 void Dock::ReleaseLayeredTarget() {
   ResetD2dIcons();
   layered_rt_.Reset();
+  squircle_.Reset();
   if (layered_mem_ != nullptr && layered_old_ != nullptr) {
     SelectObject(layered_mem_, layered_old_);
     layered_old_ = nullptr;
@@ -1997,9 +1998,13 @@ void Dock::RenderLayered() {
   rt->BeginDraw();
   rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
 
-  const float radius = static_cast<float>(Dip(kCornerRadiusDip));
-  const D2D1_ROUNDED_RECT rounded{
-      D2D1::RectF(0.5f, 0.5f, static_cast<float>(width) - 0.5f, static_cast<float>(height) - 0.5f), radius, radius};
+  const UINT dpi = Dpi();
+  const float radius =
+      corner::ClampPx(corner::ToPx(corner::kHeroDip, dpi), static_cast<float>(width), static_cast<float>(height));
+  const D2D1_RECT_F pill =
+      D2D1::RectF(0.5f, 0.5f, static_cast<float>(width) - 0.5f, static_cast<float>(height) - 0.5f);
+  const D2D1_ROUNDED_RECT rounded{pill, radius, radius};
+  ID2D1PathGeometry* squircle = squircle_.Get(D2dFactory(), pill, radius);
 
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> fill;
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> stroke;
@@ -2010,10 +2015,18 @@ void Dock::RenderLayered() {
   rt->CreateSolidColorBrush(DockIndicatorColor(dark_), indicator.GetAddressOf());
   rt->CreateSolidColorBrush(MenuItemHoverFill(dark_, false), hover_fill.GetAddressOf());
   if (fill) {
-    rt->FillRoundedRectangle(rounded, fill.Get());
+    if (squircle != nullptr) {
+      rt->FillGeometry(squircle, fill.Get());
+    } else {
+      rt->FillRoundedRectangle(rounded, fill.Get());
+    }
   }
   if (stroke) {
-    rt->DrawRoundedRectangle(rounded, stroke.Get(), 1.0f);
+    if (squircle != nullptr) {
+      rt->DrawGeometry(squircle, stroke.Get(), 1.0f);
+    } else {
+      rt->DrawRoundedRectangle(rounded, stroke.Get(), 1.0f);
+    }
   }
 
   const int icon_px = Dip(kIconDip);
@@ -2060,7 +2073,8 @@ void Dock::RenderLayered() {
     }
     if (!dragging_ && hover_ == static_cast<int>(slot_i) && hover_fill) {
       const float inset = static_cast<float>(Dip(kHoverInsetDip));
-      const float rr = static_cast<float>(Dip(8));
+      const float hover_h = static_cast<float>(slot.bottom - slot.top) - inset * 2.0f;
+      const float rr = corner::HoverPx(hover_h, dpi);
       const D2D1_ROUNDED_RECT bg{
           D2D1::RectF(static_cast<float>(slot.left) + inset, static_cast<float>(slot.top) + inset,
                       static_cast<float>(slot.right) - inset, static_cast<float>(slot.bottom) - inset),
@@ -2073,7 +2087,8 @@ void Dock::RenderLayered() {
       const float dot_h = static_cast<float>(Dip(3));
       const float dx = x + (static_cast<float>(icon_px) - dot_w) * 0.5f;
       const float dy = static_cast<float>(height - Dip(10));
-      const D2D1_ROUNDED_RECT dot{D2D1::RectF(dx, dy, dx + dot_w, dy + dot_h), dot_h * 0.5f, dot_h * 0.5f};
+      const D2D1_ROUNDED_RECT dot{D2D1::RectF(dx, dy, dx + dot_w, dy + dot_h), corner::PillPx(dot_h),
+                                 corner::PillPx(dot_h)};
       rt->FillRoundedRectangle(dot, indicator.Get());
     }
   }
