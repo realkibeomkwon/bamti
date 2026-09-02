@@ -76,6 +76,7 @@ class Dock {
   void UpdateIdleTimer();
   void SetOverlaysTopmost(bool topmost);
   void SanitizePins();
+  void EnsureSpotlightPin();
   void BeginDragIfNeeded(POINT client);
   void UpdateDrag(POINT client);
   void EndDrag(bool commit);
@@ -89,7 +90,6 @@ class Dock {
   float SlotIconX(size_t slot) const;
   bool NoteDragLog();
   bool Busy() const;
-  int SpotlightPrefix() const;
   int PinnedCount() const;
   int DropIndexAt(POINT client) const;
   std::vector<size_t> DisplayOrder() const;
@@ -108,6 +108,8 @@ class Dock {
   bool fullscreen_occluded_ = false;
   bool dark_ = true;
   bool hide_armed_ = false;
+  bool leave_armed_ = false;
+  bool hot_leave_armed_ = false;
   bool dragging_ = false;
   bool pending_rebuild_ = false;
   bool force_collect_ = false;

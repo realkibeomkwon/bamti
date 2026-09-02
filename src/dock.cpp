@@ -1356,6 +1356,7 @@ LRESULT Dock::HandleHot(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     case WM_MOUSELEAVE:
+      hot_leave_armed_ = false;
       if (!PointerOverUi()) {
         StartHideTimer();
       }
@@ -1497,6 +1498,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       return 0;
     }
     case WM_MOUSELEAVE:
+      leave_armed_ = false;
       if (hover_ != -1) {
         hover_ = -1;
         if (shown_ && !dragging_) {
@@ -2121,6 +2123,7 @@ void Dock::ShowPill() {
 }
 
 void Dock::HidePill() {
+  leave_armed_ = false;
   CancelHideTimer();
   if (popup_.IsOpen()) {
     popup_.Close();
@@ -2159,25 +2162,29 @@ void Dock::CancelHideTimer() {
 }
 
 void Dock::ArmMouseLeave() {
-  if (hwnd_ == nullptr || !shown_) {
+  if (hwnd_ == nullptr || !shown_ || leave_armed_) {
     return;
   }
   TRACKMOUSEEVENT track{};
   track.cbSize = sizeof(track);
   track.dwFlags = TME_LEAVE;
   track.hwndTrack = hwnd_;
-  TrackMouseEvent(&track);
+  if (TrackMouseEvent(&track) != FALSE) {
+    leave_armed_ = true;
+  }
 }
 
 void Dock::ArmHotMouseLeave() {
-  if (hot_hwnd_ == nullptr) {
+  if (hot_hwnd_ == nullptr || hot_leave_armed_) {
     return;
   }
   TRACKMOUSEEVENT track{};
   track.cbSize = sizeof(track);
   track.dwFlags = TME_LEAVE;
   track.hwndTrack = hot_hwnd_;
-  TrackMouseEvent(&track);
+  if (TrackMouseEvent(&track) != FALSE) {
+    hot_leave_armed_ = true;
+  }
 }
 
 void Dock::UpdateIdleTimer() {

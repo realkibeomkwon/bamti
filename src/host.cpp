@@ -18,7 +18,9 @@
 namespace bamti {
 namespace {
 
-constexpr UINT kMsgFloodLimit = 500;
+// 폴링 레이트가 높은 마우스는 정상 이동만으로도 초당 500건을 넘긴다.
+// 되먹임 폭주는 만 단위로 나타나므로 그 사이에 선을 긋는다.
+constexpr UINT kMsgFloodLimit = 3000;
 constexpr size_t kMsgFloodSlots = 64;
 
 struct MsgFloodSlot {
