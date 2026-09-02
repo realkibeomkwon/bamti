@@ -216,7 +216,10 @@ void DrawBattery(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const D2D1_
       sink->Close();
       brush->SetColor(D2D1::ColorF(0xFFD400));
       rt->FillGeometry(bolt.Get(), brush);
-      brush->SetColor(outline);
+      // 번개의 채움색은 테마와 무관하게 밝은 노랑으로 고정되어 있다. 테두리만 테마를
+      // 따라가면 다크 테마에서 흰 테두리가 노란 면과 붙어 형태가 뭉개지므로, 테두리도
+      // 채움색과 짝을 이루도록 검은색으로 고정한다.
+      brush->SetColor(D2D1::ColorF(D2D1::ColorF::Black));
       rt->DrawGeometry(bolt.Get(), brush, stroke);
     }
   }
