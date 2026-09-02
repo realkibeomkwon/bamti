@@ -456,7 +456,9 @@ void AutostartMigrate() {
     if (!have.empty() && !want.empty() && lstrcmpiW(have.c_str(), want.c_str()) != 0) {
       RegisterBamtiTask(service.Get(), folder.Get());
     }
-    Log(L"host", L"autostart migrate task=1 run_removed=0");
+    // 작업이 이미 있는데 Run 값도 남아 있으면 로그온마다 프로세스가 하나 더 뜬다.
+    const bool removed = RunValueExists() && DeleteRunValue();
+    Log(L"host", L"autostart migrate task=1 run_removed=%d", removed ? 1 : 0);
     return;
   }
   if (!RunValueExists()) {
