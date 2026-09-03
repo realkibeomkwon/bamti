@@ -460,7 +460,8 @@ class TrayBackendIntercept final : public TrayBackend {
     const ULONGLONG now = GetTickCount64();
     const ULONGLONG last = last_self_broadcast_.load(std::memory_order_acquire);
     if (last != 0 && now - last < kSelfBroadcastSuppressMs) {
-      Log(L"tray", L"intercept shell restart suppressed");
+      Log(L"tray", L"intercept shell restart suppressed elapsed_ms=%llu",
+          started_at_ == 0 ? 0 : GetTickCount64() - started_at_);
       return;
     }
     HWND spy = nullptr;
@@ -774,10 +775,12 @@ class TrayBackendIntercept final : public TrayBackend {
     const ULONGLONG now = GetTickCount64();
     const ULONGLONG last = last_self_broadcast_.load(std::memory_order_acquire);
     if (last != 0 && now - last < kSelfBroadcastSuppressMs) {
-      Log(L"tray", L"intercept shell restart suppressed");
+      Log(L"tray", L"intercept shell restart suppressed elapsed_ms=%llu",
+          started_at_ == 0 ? 0 : now - started_at_);
       return;
     }
-    Log(L"tray", L"intercept shell restart");
+    Log(L"tray", L"intercept shell restart elapsed_ms=%llu adds_before=%u",
+        started_at_ == 0 ? 0 : now - started_at_, adds_before_);
     const bool acquired = WaitForPriority(spy);
     EnterFast(spy);
     if (!acquired) {
@@ -1072,6 +1075,9 @@ class TrayBackendIntercept final : public TrayBackend {
         }
       } else if (parsed.message_type == NIM_ADD || parsed.message_type == NIM_MODIFY ||
                  parsed.message_type == NIM_SETVERSION) {
+        if (parsed.message_type == NIM_ADD) {
+          ++adds_before_;
+        }
         StoredIcon* slot = nullptr;
         for (StoredIcon& one : items_) {
           if (one.info.key == key) {
@@ -1173,6 +1179,7 @@ class TrayBackendIntercept final : public TrayBackend {
   std::function<bool(uint64_t, RECT*)> rect_lookup_;
   UINT prio_timer_ms_ = kPrioTimerSlowMs;
   ULONGLONG started_at_ = 0;
+  unsigned adds_before_ = 0;
   ULONGLONG fast_until_ = 0;
   std::atomic<ULONGLONG> last_self_broadcast_{0};
   ULONGLONG rebroadcast_window_start_ = 0;

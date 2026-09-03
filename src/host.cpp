@@ -10,6 +10,7 @@
 #include "tray_probe.hpp"
 #include "watchdog.hpp"
 
+#include <windows.h>
 #include <objbase.h>
 #include <shellapi.h>
 #include <uxtheme.h>
@@ -227,8 +228,36 @@ void WaitForShell(DWORD timeout_ms) {
   const int progman_ok = GetShellWindow() != nullptr ? 1 : 0;
   const int notify_ok =
       (tray != nullptr && FindWindowExW(tray, nullptr, L"TrayNotifyWnd", nullptr) != nullptr) ? 1 : 0;
-  Log(L"host", L"shell wait ms=%llu found=%d tray=%d progman=%d notify=%d", GetTickCount64() - start, found,
-      tray_ok, progman_ok, notify_ok);
+  long long explorer_age_ms = -1;
+  if (tray != nullptr) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(tray, &pid);
+    if (pid != 0) {
+      HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+      if (process != nullptr) {
+        FILETIME created{};
+        FILETIME exit_time{};
+        FILETIME kernel{};
+        FILETIME user{};
+        if (GetProcessTimes(process, &created, &exit_time, &kernel, &user) != FALSE) {
+          FILETIME now{};
+          GetSystemTimeAsFileTime(&now);
+          ULARGE_INTEGER created_u{};
+          ULARGE_INTEGER now_u{};
+          created_u.LowPart = created.dwLowDateTime;
+          created_u.HighPart = created.dwHighDateTime;
+          now_u.LowPart = now.dwLowDateTime;
+          now_u.HighPart = now.dwHighDateTime;
+          if (now_u.QuadPart >= created_u.QuadPart) {
+            explorer_age_ms = static_cast<long long>((now_u.QuadPart - created_u.QuadPart) / 10000ULL);
+          }
+        }
+        CloseHandle(process);
+      }
+    }
+  }
+  Log(L"host", L"shell wait ms=%llu found=%d tray=%d progman=%d notify=%d explorer_age_ms=%lld",
+      GetTickCount64() - start, found, tray_ok, progman_ok, notify_ok, explorer_age_ms);
 }
 
 }  // namespace
