@@ -97,7 +97,7 @@ class Dock {
   int HitTest(POINT client) const;
   bool PointerOverUi() const;
   bool PointerOverHotEdge() const;
-  HBITMAP LoadIconBitmap(const DockApp& app, int px);
+  HBITMAP LoadIconBitmap(const DockApp& app, int px, const wchar_t** source = nullptr);
   UINT Dpi() const;
   int Dip(int value) const;
 

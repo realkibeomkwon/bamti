@@ -1852,14 +1852,56 @@ void Dock::EnsureIcons() {
   const int px = Dip(kIconDip);
   icons_.assign(items_.size(), nullptr);
   std::map<std::wstring, bool> live;
+  const ULONGLONG icons_started = warming_up_ ? GetTickCount64() : 0;
+  unsigned cache_hits = 0;
+  unsigned loaded = 0;
+  unsigned aumid_ms = 0;
+  unsigned aumid_n = 0;
+  unsigned exe_shell_ms = 0;
+  unsigned exe_shell_n = 0;
+  unsigned exe_extract_ms = 0;
+  unsigned exe_extract_n = 0;
+  unsigned spotlight_ms = 0;
+  unsigned spotlight_n = 0;
+  unsigned other_ms = 0;
+  unsigned other_n = 0;
   for (size_t i = 0; i < items_.size(); ++i) {
     live[items_[i].key] = true;
     const std::wstring key = items_[i].key + L"|" + std::to_wstring(px);
     auto it = icon_cache_.find(key);
     if (it == icon_cache_.end() || it->second == nullptr) {
       d2d_icons_.erase(key);
-      icon_cache_[key] = LoadIconBitmap(items_[i], px);
+      const wchar_t* source = nullptr;
+      LARGE_INTEGER t0{};
+      LARGE_INTEGER t1{};
+      if (warming_up_) {
+        QueryPerformanceCounter(&t0);
+      }
+      icon_cache_[key] = LoadIconBitmap(items_[i], px, warming_up_ ? &source : nullptr);
+      if (warming_up_) {
+        QueryPerformanceCounter(&t1);
+        const unsigned ms = static_cast<unsigned>(QpcMs(t0, t1) + 0.5);
+        ++loaded;
+        if (source != nullptr && _wcsicmp(source, L"aumid") == 0) {
+          aumid_ms += ms;
+          ++aumid_n;
+        } else if (source != nullptr && _wcsicmp(source, L"exe_shell") == 0) {
+          exe_shell_ms += ms;
+          ++exe_shell_n;
+        } else if (source != nullptr && _wcsicmp(source, L"exe_extract") == 0) {
+          exe_extract_ms += ms;
+          ++exe_extract_n;
+        } else if (source != nullptr && _wcsicmp(source, L"spotlight") == 0) {
+          spotlight_ms += ms;
+          ++spotlight_n;
+        } else if (source != nullptr) {
+          other_ms += ms;
+          ++other_n;
+        }
+      }
       it = icon_cache_.find(key);
+    } else if (warming_up_) {
+      ++cache_hits;
     }
     icons_[i] = it->second;
   }
@@ -1876,10 +1918,24 @@ void Dock::EnsureIcons() {
       ++it;
     }
   }
+  if (warming_up_) {
+    const unsigned total_ms = static_cast<unsigned>(GetTickCount64() - icons_started);
+    Log(L"perf",
+        L"icons total=%u loaded=%u cache_hit=%u aumid=%u/%u exe_shell=%u/%u exe_extract=%u/%u "
+        L"spotlight=%u/%u other=%u/%u (ms/n)",
+        total_ms, loaded, cache_hits, aumid_ms, aumid_n, exe_shell_ms, exe_shell_n, exe_extract_ms,
+        exe_extract_n, spotlight_ms, spotlight_n, other_ms, other_n);
+  }
 }
 
-HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
+HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px, const wchar_t** source) {
+  auto note = [&](const wchar_t* name) {
+    if (source != nullptr) {
+      *source = name;
+    }
+  };
   if (app.kind == DockItemKind::kSpotlight) {
+    note(L"spotlight");
     return BitmapFromFluentSearch(px, dark_);
   }
   const bool identity = !app.aumid.empty() || PathImpliesGenericIcon(app.exe_path);
@@ -1890,6 +1946,7 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
     if (HBITMAP shell = BitmapFromShellItem(app.exe_path, ShellIconRequestPx(px))) {
       if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
         Log(L"dock", L"icon source=%s name=%s px=%d", L"exe_shell", app.display_name.c_str(), px);
+        note(L"exe_shell");
         return ready;
       }
     }
@@ -1898,6 +1955,7 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
     if (HBITMAP shell = BitmapFromAumid(app.aumid, ShellIconRequestPx(px))) {
       if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
         Log(L"dock", L"icon source=%s name=%s px=%d", L"aumid", app.display_name.c_str(), px);
+        note(L"aumid");
         return ready;
       }
     }
@@ -1905,12 +1963,14 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
   if (!app.icon_resource.empty()) {
     if (HBITMAP ready = BitmapFromIconResource(app.icon_resource, px)) {
       Log(L"dock", L"icon source=%s name=%s px=%d", L"icon_resource", app.display_name.c_str(), px);
+      note(L"icon_resource");
       return ready;
     }
   }
   if (identity && app.hwnd != nullptr) {
     if (HBITMAP ready = BitmapFromIcon(QueryWindowIcon(app.hwnd), px)) {
       Log(L"dock", L"icon source=%s name=%s px=%d", L"window_icon", app.display_name.c_str(), px);
+      note(L"window_icon");
       return ready;
     }
   }
@@ -1924,18 +1984,21 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
       DestroyIcon(extracted);
       if (ready != nullptr) {
         Log(L"dock", L"icon source=%s name=%s px=%d", L"exe_extract", app.display_name.c_str(), px);
+        note(L"exe_extract");
         return ready;
       }
     }
     if (HBITMAP shell = BitmapFromShellItem(app.exe_path, ShellIconRequestPx(px))) {
       if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
         Log(L"dock", L"icon source=%s name=%s px=%d", L"exe_shell", app.display_name.c_str(), px);
+        note(L"exe_shell");
         return ready;
       }
     }
     if (HBITMAP jumbo = BitmapFromJumboList(app.exe_path)) {
       if (HBITMAP ready = FinalizeIconBitmap(jumbo, px, true)) {
         Log(L"dock", L"icon source=%s name=%s px=%d", L"jumbo", app.display_name.c_str(), px);
+        note(L"jumbo");
         return ready;
       }
     }
@@ -1943,6 +2006,7 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
   if (app.hwnd != nullptr) {
     if (HBITMAP ready = BitmapFromIcon(QueryWindowIcon(app.hwnd), px)) {
       Log(L"dock", L"icon source=%s name=%s px=%d", L"window_icon", app.display_name.c_str(), px);
+      note(L"window_icon");
       return ready;
     }
   }
@@ -1950,6 +2014,7 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
     if (HBITMAP shell = BitmapFromShellItem(app.exe_path, ShellIconRequestPx(px))) {
       if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
         Log(L"dock", L"icon source=%s name=%s px=%d", L"exe_shell", app.display_name.c_str(), px);
+        note(L"exe_shell");
         return ready;
       }
     }
@@ -1963,6 +2028,7 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px) {
     DestroyIcon(stock.hIcon);
     if (ready != nullptr) {
       Log(L"dock", L"icon source=%s name=%s px=%d", L"stock", app.display_name.c_str(), px);
+      note(L"stock");
       return ready;
     }
   }

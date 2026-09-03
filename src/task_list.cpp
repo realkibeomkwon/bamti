@@ -1154,9 +1154,25 @@ size_t RepairDockPins(std::vector<std::wstring>& pins) {
   return repaired;
 }
 
+namespace {
+
+double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
+  static LARGE_INTEGER freq{};
+  if (freq.QuadPart == 0) {
+    QueryPerformanceFrequency(&freq);
+  }
+  if (freq.QuadPart == 0) {
+    return 0.0;
+  }
+  return (end.QuadPart - start.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+}
+
+}  // namespace
+
 std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_paths) {
   WatchdogStage(L"collect");
   IVirtualDesktopManager* vdm = DesktopManager();
+  const ULONGLONG total_started = GetTickCount64();
 
   struct Raw {
     HWND hwnd;
@@ -1172,18 +1188,37 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
   struct EnumCtx {
     std::vector<Raw>* windows = nullptr;
     const std::unordered_set<HWND>* shell_hwnds = nullptr;
+    double cached_ms = 0;
+    double title_ms = 0;
+    unsigned window_count = 0;
+    unsigned cache_hits = 0;
   } enum_ctx;
+  LARGE_INTEGER t0{};
+  LARGE_INTEGER t1{};
+  QueryPerformanceCounter(&t0);
   const std::unordered_set<HWND> shell_hwnds = ShellBrowserHwnds();
+  QueryPerformanceCounter(&t1);
+  const unsigned shell_ms = static_cast<unsigned>(QpcMs(t0, t1) + 0.5);
   enum_ctx.windows = &windows;
   enum_ctx.shell_hwnds = &shell_hwnds;
+  QueryPerformanceCounter(&t0);
   EnumWindows(
       [](HWND hwnd, LPARAM lp) -> BOOL {
         if (!IsTaskWindow(hwnd)) {
           return TRUE;
         }
         auto* ctx = reinterpret_cast<EnumCtx*>(lp);
+        ++ctx->window_count;
         bool path_cached = false;
+        LARGE_INTEGER c0{};
+        LARGE_INTEGER c1{};
+        QueryPerformanceCounter(&c0);
         const WindowCacheEntry& cached = CachedWindow(hwnd, &path_cached);
+        QueryPerformanceCounter(&c1);
+        ctx->cached_ms += QpcMs(c0, c1);
+        if (path_cached) {
+          ++ctx->cache_hits;
+        }
         Raw raw{};
         raw.hwnd = hwnd;
         raw.path = cached.path;
@@ -1192,7 +1227,10 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
         raw.relaunch_name = cached.props.relaunch_name;
         raw.relaunch_command = cached.props.relaunch_command;
         raw.path_cached = path_cached;
+        QueryPerformanceCounter(&c0);
         raw.title = WindowTitle(hwnd);
+        QueryPerformanceCounter(&c1);
+        ctx->title_ms += QpcMs(c0, c1);
         const bool shell_browser = ctx->shell_hwnds != nullptr && ctx->shell_hwnds->count(hwnd) != 0;
         if (SkipGhostWindow(hwnd, raw.path, raw.aumid, raw.title, shell_browser)) {
           return TRUE;
@@ -1202,6 +1240,10 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       },
       reinterpret_cast<LPARAM>(&enum_ctx));
   PruneWindowCache();
+  QueryPerformanceCounter(&t1);
+  const unsigned enum_ms = static_cast<unsigned>(QpcMs(t0, t1) + 0.5);
+  const unsigned cached_ms = static_cast<unsigned>(enum_ctx.cached_ms + 0.5);
+  const unsigned title_ms = static_cast<unsigned>(enum_ctx.title_ms + 0.5);
 
   std::unordered_map<std::wstring, DockApp> groups;
   std::vector<std::wstring> order;
@@ -1291,10 +1333,13 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
     }
   };
 
+  QueryPerformanceCounter(&t0);
   ingest(true);
   if (groups.empty() && !windows.empty()) {
     ingest(false);
   }
+  QueryPerformanceCounter(&t1);
+  const unsigned ingest_ms = static_cast<unsigned>(QpcMs(t0, t1) + 0.5);
 
   std::vector<DockApp> result;
   std::vector<std::wstring> used_keys;
@@ -1339,6 +1384,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
     return nullptr;
   };
 
+  QueryPerformanceCounter(&t0);
   for (const auto& pin : pinned_paths) {
     if (IsSpotlightPin(pin)) {
       result.push_back(MakeSpotlightDockApp());
@@ -1395,6 +1441,8 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       result.push_back(std::move(app));
     }
   }
+  QueryPerformanceCounter(&t1);
+  const unsigned pins_ms = static_cast<unsigned>(QpcMs(t0, t1) + 0.5);
 
   int miss_logs = 0;
   for (const auto& key : order) {
@@ -1422,6 +1470,10 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
     result.push_back(app);
   }
 
+  const unsigned total_ms = static_cast<unsigned>(GetTickCount64() - total_started);
+  Log(L"perf", L"collect total=%u shell=%u enum=%u ingest=%u pins=%u (ms) windows=%u cache_hit=%u",
+      total_ms, shell_ms, enum_ms, ingest_ms, pins_ms, enum_ctx.window_count, enum_ctx.cache_hits);
+  Log(L"perf", L"collect enum cached=%u title=%u (ms)", cached_ms, title_ms);
   return result;
 }
 
