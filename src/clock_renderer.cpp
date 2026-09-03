@@ -304,6 +304,71 @@ bool ClockRenderer::Initialize() {
   return true;
 }
 
+bool ClockRenderer::EnsureDcTarget() {
+  if (rt_) {
+    return true;
+  }
+  if (!d2d_) {
+    return false;
+  }
+  const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+      D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+      static_cast<FLOAT>(dpi_), static_cast<FLOAT>(dpi_));
+  const HRESULT hr = d2d_->CreateDCRenderTarget(&props, rt_.ReleaseAndGetAddressOf());
+  if (FAILED(hr)) {
+    return false;
+  }
+  icons_.SetRenderTarget(rt_.Get());
+  logo_brush_.Reset();
+  logo_geom_size_ = 0.0f;
+  return true;
+}
+
+void ClockRenderer::WarmTarget() {
+  if (!d2d_ || rt_) {
+    return;
+  }
+  const ULONGLONG started = GetTickCount64();
+  if (!EnsureDcTarget()) {
+    Log(L"bar", L"render target warm=%d %ums", 0, static_cast<unsigned>(GetTickCount64() - started));
+    return;
+  }
+
+  HDC screen = GetDC(nullptr);
+  HDC mem = CreateCompatibleDC(nullptr);
+  HBITMAP bmp = nullptr;
+  HGDIOBJ old = nullptr;
+  if (mem != nullptr) {
+    bmp = CreateCompatibleBitmap(screen != nullptr ? screen : mem, 8, 8);
+  }
+  if (mem != nullptr && bmp != nullptr) {
+    old = SelectObject(mem, bmp);
+    const RECT dirty{0, 0, 8, 8};
+    if (SUCCEEDED(rt_->BindDC(mem, &dirty))) {
+      rt_->BeginDraw();
+      Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+      if (SUCCEEDED(rt_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f),
+                                               brush.ReleaseAndGetAddressOf()))) {
+        rt_->FillRectangle(D2D1::RectF(0.0f, 0.0f, 1.0f, 1.0f), brush.Get());
+      }
+      rt_->EndDraw();
+    }
+    SelectObject(mem, old);
+  }
+  if (bmp != nullptr) {
+    DeleteObject(bmp);
+  }
+  if (mem != nullptr) {
+    DeleteDC(mem);
+  }
+  if (screen != nullptr) {
+    ReleaseDC(nullptr, screen);
+  }
+  Log(L"bar", L"render target warm=%d %ums", rt_ ? 1 : 0,
+      static_cast<unsigned>(GetTickCount64() - started));
+}
+
 void ClockRenderer::DropTarget() {
   icons_.Clear();
   logo_brush_.Reset();
@@ -532,18 +597,8 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
   LARGE_INTEGER t0{};
   LARGE_INTEGER t1{};
   QueryPerformanceCounter(&t0);
-  if (!rt_) {
-    const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
-        static_cast<FLOAT>(dpi_), static_cast<FLOAT>(dpi_));
-    const HRESULT hr = d2d_->CreateDCRenderTarget(&props, rt_.ReleaseAndGetAddressOf());
-    if (FAILED(hr)) {
-      return false;
-    }
-    icons_.SetRenderTarget(rt_.Get());
-    logo_brush_.Reset();
-    logo_geom_size_ = 0.0f;
+  if (!rt_ && !EnsureDcTarget()) {
+    return false;
   }
   icons_.SetDark(dark);
   QueryPerformanceCounter(&t1);

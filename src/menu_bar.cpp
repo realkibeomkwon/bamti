@@ -292,6 +292,7 @@ bool MenuBar::Create(HINSTANCE instance) {
 
   layout_.SetDpi(Dpi());
   clock_.SetDpi(Dpi());
+  clock_.WarmTarget();  // SetDpi가 렌더 타깃을 버리므로 반드시 그 뒤에서 부른다
   ApplyBackdrop();
   if (!RegisterAppBar()) {
     return false;

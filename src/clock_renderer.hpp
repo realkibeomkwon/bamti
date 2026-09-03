@@ -24,6 +24,10 @@ class ClockRenderer {
  public:
   bool Initialize();
   void SetDpi(UINT dpi);
+  // 첫 그리기 전에 렌더 타깃과 D2D 장치를 미리 구성한다.
+  // 그리지 않으면 장치 구성이 EndDraw까지 미뤄지므로, 작은 메모리 DC에
+  // 실제로 한 번 그려서 비용을 여기서 치른다.
+  void WarmTarget();
   bool Draw(HDC hdc, const RECT& client, const RECT& dirty, bool dark, const BarLayoutResult& layout,
             BarLayout* text, bool start_hot, bool start_pressed, DrawTimings* timings = nullptr);
   std::wstring CurrentTimeText() const;
@@ -38,6 +42,7 @@ class ClockRenderer {
   void DrawFluentOrFallback(ID2D1SolidColorBrush* brush, const D2D1_RECT_F& box, const wchar_t* fluent,
                             const wchar_t* fallback);
 
+  bool EnsureDcTarget();
   void DropTarget();
 
   Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
