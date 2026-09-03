@@ -114,6 +114,8 @@ class Dock {
   bool dragging_ = false;
   bool pending_rebuild_ = false;
   bool warming_up_ = false;
+  unsigned warmup_collect_ms_ = 0;
+  unsigned warmup_icons_ms_ = 0;
   bool force_collect_ = false;
   int pressed_ = -1;
   int hover_ = -1;

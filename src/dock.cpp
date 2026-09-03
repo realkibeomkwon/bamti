@@ -1440,8 +1440,8 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           Rebuild();
           warming_up_ = false;
           pending_rebuild_ = true;
-          Log(L"dock", L"warmup items=%zu %ums", items_.size(),
-              static_cast<unsigned>(GetTickCount64() - started));
+          Log(L"dock", L"warmup items=%zu %ums collect=%u icons=%u (ms)", items_.size(),
+              static_cast<unsigned>(GetTickCount64() - started), warmup_collect_ms_, warmup_icons_ms_);
         }
       }
       return 0;
@@ -1684,13 +1684,20 @@ void Dock::Rebuild() {
     Log(L"perf", L"rebuild fingerprint %ums", fp_ms);
   }
   if (!force_collect_ && fp == last_window_fp_ && !items_.empty()) {
+    if (warming_up_) {
+      warmup_collect_ms_ = 0;
+      warmup_icons_ms_ = 0;
+    }
     Log(L"perf", L"rebuild skip fingerprint items=%zu %ums", items_.size(), fp_ms);
     return;
   }
   force_collect_ = false;
   last_window_fp_ = fp;
   EnsureSpotlightPin();
+  const ULONGLONG collect_started = warming_up_ ? GetTickCount64() : 0;
   std::vector<DockApp> next = CollectDockApps(pins_);
+  const unsigned collect_ms =
+      warming_up_ ? static_cast<unsigned>(GetTickCount64() - collect_started) : 0;
   bool pin_miss = false;
   for (const auto& app : next) {
     if (app.running && !app.pinned) {
@@ -1710,6 +1717,10 @@ void Dock::Rebuild() {
   }
   const std::wstring snap = CollectSnap(next);
   if (snap == last_collect_snap_ && !items_.empty()) {
+    if (warming_up_) {
+      warmup_collect_ms_ = collect_ms;
+      warmup_icons_ms_ = 0;
+    }
     Log(L"perf", L"rebuild skip items=%zu %ums", items_.size(),
         static_cast<unsigned>(GetTickCount64() - started));
     Log(L"dock", L"order after-rebuild %s", JoinItemNames(next).c_str());
@@ -1717,7 +1728,14 @@ void Dock::Rebuild() {
   }
   last_collect_snap_ = snap;
   items_ = std::move(next);
-  EnsureIcons();
+  unsigned icons_ms = 0;
+  {
+    const ULONGLONG icons_started = warming_up_ ? GetTickCount64() : 0;
+    EnsureIcons();
+    if (warming_up_) {
+      icons_ms += static_cast<unsigned>(GetTickCount64() - icons_started);
+    }
+  }
   size_t kept = 0;
   for (size_t i = 0; i < items_.size(); ++i) {
     if (items_[i].kind == DockItemKind::kSpotlight || items_[i].pinned ||
@@ -1730,7 +1748,15 @@ void Dock::Rebuild() {
   }
   if (kept != items_.size()) {
     items_.resize(kept);
+    const ULONGLONG icons_started = warming_up_ ? GetTickCount64() : 0;
     EnsureIcons();
+    if (warming_up_) {
+      icons_ms += static_cast<unsigned>(GetTickCount64() - icons_started);
+    }
+  }
+  if (warming_up_) {
+    warmup_collect_ms_ = collect_ms;
+    warmup_icons_ms_ = icons_ms;
   }
   Log(L"perf", L"rebuild items=%zu pins=%zu shown=%d %ums", items_.size(), pins_.size(), shown_ ? 1 : 0,
       static_cast<unsigned>(GetTickCount64() - started));
