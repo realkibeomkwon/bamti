@@ -140,6 +140,7 @@ class MenuBar {
   PerfAcc perf_full_;
   PerfAcc perf_seg_;
   PerfAcc perf_compute_;
+  PerfAcc perf_create_;
   PerfAcc perf_bind_;
   PerfAcc perf_brush_;
   PerfAcc perf_begin_;

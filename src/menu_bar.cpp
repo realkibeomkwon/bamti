@@ -1097,6 +1097,7 @@ void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, con
   } else {
     perf_seg_.Add(draw_ms);
   }
+  perf_create_.Add(draw.create_ms);
   perf_bind_.Add(draw.bind_ms);
   perf_brush_.Add(draw.brush_ms);
   perf_begin_.Add(draw.begin_ms);
@@ -1104,8 +1105,9 @@ void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, con
   perf_end_.Add(draw.end_ms);
   perf_bpbegin_.Add(bpbegin_ms);
   perf_bpend_.Add(bpend_ms);
-  const double other_ms =
-      draw_ms - (draw.bind_ms + draw.brush_ms + draw.begin_ms + draw.draw_ms + draw.end_ms + bpbegin_ms + bpend_ms);
+  // draw_ms는 clock_.Draw() 하나의 시간이다. bpbegin/bpend는 그 바깥에서 재므로 빼지 않는다.
+  const double other_ms = draw_ms - (draw.create_ms + draw.bind_ms + draw.brush_ms + draw.begin_ms +
+                                     draw.draw_ms + draw.end_ms);
   perf_other_.Add(other_ms);
   ++perf_frames_;
   if (perf_frames_ % 100 != 0) {
@@ -1133,14 +1135,15 @@ void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, con
       static_cast<unsigned>(last.segments.size()), static_cast<unsigned>(last.overflow.size()),
       perf_cold_ ? L" cold" : L"");
   Log(L"perf",
-      L"draw bind=%.2f/%.1f brush=%.2f/%.1f begin=%.2f/%.1f draw=%.2f/%.1f end=%.2f/%.1f "
+      L"draw create=%.2f/%.1f bind=%.2f/%.1f brush=%.2f/%.1f begin=%.2f/%.1f draw=%.2f/%.1f end=%.2f/%.1f "
       L"bpbegin=%.2f/%.1f bpend=%.2f/%.1f other=%.2f/%.1f (ms, avg/max)",
-      avg(perf_bind_), mx(perf_bind_), avg(perf_brush_), mx(perf_brush_), avg(perf_begin_), mx(perf_begin_),
-      avg(perf_draw_), mx(perf_draw_), avg(perf_end_), mx(perf_end_), avg(perf_bpbegin_), mx(perf_bpbegin_),
-      avg(perf_bpend_), mx(perf_bpend_), avg(perf_other_), mx(perf_other_));
+      avg(perf_create_), mx(perf_create_), avg(perf_bind_), mx(perf_bind_), avg(perf_brush_), mx(perf_brush_),
+      avg(perf_begin_), mx(perf_begin_), avg(perf_draw_), mx(perf_draw_), avg(perf_end_), mx(perf_end_),
+      avg(perf_bpbegin_), mx(perf_bpbegin_), avg(perf_bpend_), mx(perf_bpend_), avg(perf_other_), mx(perf_other_));
   perf_full_.Reset();
   perf_seg_.Reset();
   perf_compute_.Reset();
+  perf_create_.Reset();
   perf_bind_.Reset();
   perf_brush_.Reset();
   perf_begin_.Reset();

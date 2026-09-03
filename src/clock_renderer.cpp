@@ -529,6 +529,9 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
     return false;
   }
 
+  LARGE_INTEGER t0{};
+  LARGE_INTEGER t1{};
+  QueryPerformanceCounter(&t0);
   if (!rt_) {
     const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
         D2D1_RENDER_TARGET_TYPE_SOFTWARE,
@@ -543,9 +546,11 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
     logo_geom_size_ = 0.0f;
   }
   icons_.SetDark(dark);
+  QueryPerformanceCounter(&t1);
+  if (timings != nullptr) {
+    timings->create_ms = QpcMs(t0, t1);
+  }
 
-  LARGE_INTEGER t0{};
-  LARGE_INTEGER t1{};
   QueryPerformanceCounter(&t0);
   HRESULT hr = rt_->BindDC(hdc, &dirty);
   QueryPerformanceCounter(&t1);

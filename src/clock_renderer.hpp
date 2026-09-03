@@ -12,6 +12,7 @@
 namespace bamti {
 
 struct DrawTimings {
+  double create_ms = 0;  // 렌더 타깃 생성. rt_가 비어 있던 프레임에만 0이 아니다.
   double bind_ms = 0;
   double brush_ms = 0;
   double begin_ms = 0;
