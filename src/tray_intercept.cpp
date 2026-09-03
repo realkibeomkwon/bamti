@@ -34,6 +34,11 @@ constexpr UINT kShellRestartMsg = WM_APP + 41;
 constexpr UINT kPrioTimerId = 1;
 constexpr UINT kPrioTimerFastMs = 100;
 constexpr UINT kPrioTimerSlowMs = 1000;
+// 부팅 직후에는 explorer가 셸을 초기화하면서 Shell_TrayWnd를 여러 번 다시 만든다.
+// 상실을 감지한 뒤에 되찾으면 그 사이에 등록한 앱을 놓치므로, 이 구간에서는
+// 매 틱마다 선제적으로 최상위를 주장한다.
+constexpr ULONGLONG kBootHoldMs = 90000;
+constexpr UINT kPrioTimerBootMs = 100;
 constexpr ULONGLONG kFastWindowMs = 5000;
 constexpr UINT kPrioAcquireMs = 500;
 constexpr UINT kPrioAcquireStepMs = 20;
@@ -525,6 +530,7 @@ class TrayBackendIntercept final : public TrayBackend {
   }
 
   void SpyLoop() {
+    started_at_ = GetTickCount64();
     const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     {
       std::lock_guard lock(mu_);
@@ -574,8 +580,9 @@ class TrayBackendIntercept final : public TrayBackend {
       std::lock_guard lock(mu_);
       spy_ = spy;
     }
-    SetTimer(spy, kPrioTimerId, kPrioTimerSlowMs, nullptr);
-    prio_timer_ms_ = kPrioTimerSlowMs;
+    const UINT first_period = InBootHold() ? kPrioTimerBootMs : kPrioTimerSlowMs;
+    SetTimer(spy, kPrioTimerId, first_period, nullptr);
+    prio_timer_ms_ = first_period;
     SetWindowPos(spy, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     if (ready_ != nullptr) {
       SetEvent(ready_);
@@ -653,7 +660,9 @@ class TrayBackendIntercept final : public TrayBackend {
     }
     if (msg == WM_TIMER && wp == kPrioTimerId) {
       KeepPriority(hwnd);
-      if (prio_timer_ms_ == kPrioTimerFastMs && GetTickCount64() >= fast_until_) {
+      if (InBootHold()) {
+        SetPrioPeriod(hwnd, kPrioTimerBootMs);
+      } else if (prio_timer_ms_ == kPrioTimerFastMs && GetTickCount64() >= fast_until_) {
         SetPrioPeriod(hwnd, kPrioTimerSlowMs);
       }
       FlushPending();
@@ -684,16 +693,25 @@ class TrayBackendIntercept final : public TrayBackend {
     return DefWindowProcW(hwnd, msg, wp, lp);
   }
 
+  bool InBootHold() const {
+    return GetTickCount64() - started_at_ < kBootHoldMs;
+  }
+
   void KeepPriority(HWND spy) {
     const HWND first = FindWindowW(kSpyClass, nullptr);
-    if (first == spy) {
+    const bool lost = first != spy;
+    if (lost) {
+      ++z_loss_;
+      Log(L"tray", L"intercept z-order lost first=0x%llX spy=0x%llX count=%u",
+          static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(first)),
+          static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(spy)), z_loss_);
+    }
+    if (lost || InBootHold()) {
+      SetWindowPos(spy, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    if (!lost) {
       return;
     }
-    ++z_loss_;
-    Log(L"tray", L"intercept z-order lost first=0x%llX spy=0x%llX count=%u",
-        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(first)),
-        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(spy)), z_loss_);
-    SetWindowPos(spy, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     const HWND after = FindWindowW(kSpyClass, nullptr);
     if (after == spy) {
       Log(L"tray", L"intercept z-order restored");
@@ -720,6 +738,9 @@ class TrayBackendIntercept final : public TrayBackend {
   }
 
   void SetPrioPeriod(HWND spy, UINT ms) {
+    if (InBootHold()) {
+      ms = kPrioTimerBootMs;
+    }
     if (prio_timer_ms_ == ms) {
       return;
     }
@@ -1151,6 +1172,7 @@ class TrayBackendIntercept final : public TrayBackend {
   std::function<void()> on_change_;
   std::function<bool(uint64_t, RECT*)> rect_lookup_;
   UINT prio_timer_ms_ = kPrioTimerSlowMs;
+  ULONGLONG started_at_ = 0;
   ULONGLONG fast_until_ = 0;
   std::atomic<ULONGLONG> last_self_broadcast_{0};
   ULONGLONG rebroadcast_window_start_ = 0;
