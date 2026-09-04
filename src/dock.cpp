@@ -2071,7 +2071,7 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px, const wchar_t** source)
       shell = BitmapFromAumid(app.aumid, ShellIconRequestPx(px));
     }
     if (shell != nullptr) {
-      if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
+      if (HBITMAP ready = FinalizeIconBitmap(shell, px, false, prefer_plated)) {
         Log(L"dock", L"icon source=%s name=%s px=%d unplated=%d plated=%d", L"aumid", app.display_name.c_str(), px,
             unplated, prefer_plated ? 1 : 0);
         note(L"aumid");

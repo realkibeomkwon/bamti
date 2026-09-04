@@ -268,6 +268,23 @@ void CropPaddedJumbo(BgraImage& image) {
   CropImageToBounds(image, loose);
 }
 
+// 앱 자산이 규격대로 남겨 둔 투명 여백을 걷어내서, 그림이 아이콘 칸을 이웃과 같은 정도로
+// 채우게 한다. 여백이 아니라 작은 그림을 크게 늘리는 일이 없도록, 이미 캔버스의 절반 이상을
+// 채우고 있을 때에만 자른다.
+void TrimTransparentBorder(BgraImage& image) {
+  if (image.width < 8 || image.height < 8) {
+    return;
+  }
+  const InkBounds ink = FindInkBounds(image, 12);
+  if (!ink.ok()) {
+    return;
+  }
+  if (ink.width() < image.width / 2 || ink.height() < image.height / 2) {
+    return;
+  }
+  CropImageToBounds(image, ink);
+}
+
 void ZeroTransparentRgb(BgraImage& image) {
   const size_t n = image.pixels.size() / 4;
   for (size_t i = 0; i < n; ++i) {
@@ -454,7 +471,7 @@ HBITMAP BgraToBitmap(const BgraImage& image, int px) {
   return dib;
 }
 
-HBITMAP FinalizeIconBitmap(HBITMAP source, int px, bool straight_alpha) {
+HBITMAP FinalizeIconBitmap(HBITMAP source, int px, bool straight_alpha, bool trim_padding) {
   if (source == nullptr) {
     return nullptr;
   }
@@ -464,7 +481,11 @@ HBITMAP FinalizeIconBitmap(HBITMAP source, int px, bool straight_alpha) {
   if (!ok) {
     return nullptr;
   }
-  CropPaddedJumbo(image);
+  if (trim_padding) {
+    TrimTransparentBorder(image);
+  } else {
+    CropPaddedJumbo(image);
+  }
   ZeroTransparentRgb(image);
   if (straight_alpha || HasStraightAlpha(image)) {
     StraightToPremul(image);

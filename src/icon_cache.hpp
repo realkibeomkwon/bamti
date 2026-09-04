@@ -29,7 +29,7 @@ void StraightToPremul(BgraImage& image);
 void PremulToStraight(BgraImage& image);
 void DefringePremul(BgraImage& image);
 HBITMAP BgraToBitmap(const BgraImage& image, int px);
-HBITMAP FinalizeIconBitmap(HBITMAP source, int px, bool straight_alpha);
+HBITMAP FinalizeIconBitmap(HBITMAP source, int px, bool straight_alpha, bool trim_padding = false);
 HBITMAP BitmapFromIcon(HICON icon, int px);
 
 class IconCache {
