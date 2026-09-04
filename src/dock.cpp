@@ -9,6 +9,7 @@
 #include "theme.hpp"
 #include "watchdog.hpp"
 
+#include <appmodel.h>
 #include <commctrl.h>
 #include <commoncontrols.h>
 #include <d2d1.h>
@@ -252,6 +253,104 @@ int ShellIconRequestPx(int px) {
   return 256;
 }
 
+// AUMID는 "<패키지 패밀리 이름>!<앱 아이디>" 꼴이다.
+std::wstring PackageFamilyFromAumid(const std::wstring& aumid) {
+  const size_t bang = aumid.find(L'!');
+  return bang == std::wstring::npos ? aumid : aumid.substr(0, bang);
+}
+
+std::wstring PackageInstallPath(const std::wstring& family) {
+  if (family.empty()) {
+    return {};
+  }
+  const UINT32 filters = PACKAGE_FILTER_HEAD | PACKAGE_FILTER_DIRECT;
+  UINT32 count = 0;
+  UINT32 chars = 0;
+  LONG rc = FindPackagesByPackageFamily(family.c_str(), filters, &count, nullptr, &chars, nullptr, nullptr);
+  if (rc != ERROR_INSUFFICIENT_BUFFER || count == 0 || chars == 0) {
+    return {};
+  }
+  std::vector<PWSTR> names(count, nullptr);
+  std::vector<wchar_t> buffer(chars, L'\0');
+  std::vector<UINT32> props(count, 0);
+  rc = FindPackagesByPackageFamily(family.c_str(), filters, &count, names.data(), &chars, buffer.data(),
+                                   props.data());
+  if (rc != ERROR_SUCCESS || count == 0 || names[0] == nullptr) {
+    return {};
+  }
+  UINT32 path_chars = 0;
+  rc = GetPackagePathByFullName(names[0], &path_chars, nullptr);
+  if (rc != ERROR_INSUFFICIENT_BUFFER || path_chars == 0) {
+    return {};
+  }
+  std::wstring path(path_chars, L'\0');
+  rc = GetPackagePathByFullName(names[0], &path_chars, path.data());
+  if (rc != ERROR_SUCCESS) {
+    return {};
+  }
+  // 돌려받은 길이에는 끝의 널 문자가 포함되어 있다.
+  path.resize(path_chars > 0 ? path_chars - 1 : 0);
+  return path;
+}
+
+int MaxUnplatedTargetSize(const std::wstring& dir) {
+  int best = 0;
+  WIN32_FIND_DATAW fd{};
+  HANDLE find = FindFirstFileW((dir + L"\\*unplated*.png").c_str(), &fd);
+  if (find == INVALID_HANDLE_VALUE) {
+    return 0;
+  }
+  do {
+    if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+      continue;
+    }
+    std::wstring name = fd.cFileName;
+    CharLowerBuffW(name.data(), static_cast<DWORD>(name.size()));
+    const size_t at = name.find(L"targetsize-");
+    if (at == std::wstring::npos) {
+      continue;
+    }
+    const int value = _wtoi(name.c_str() + at + 11);
+    if (value > best) {
+      best = value;
+    }
+  } while (FindNextFileW(find, &fd) != FALSE);
+  FindClose(find);
+  return best;
+}
+
+// 패키지가 담고 있는 판 없는 아이콘 자산의 최대 크기를 돌려준다. 확인하지 못하면 0을 돌려준다.
+// EnsureIcons는 독 스레드에서만 돌기 때문에 잠금 없는 정적 캐시로 충분하다.
+int LargestUnplatedAssetPx(const std::wstring& aumid) {
+  static std::map<std::wstring, int> cache;
+  const auto found = cache.find(aumid);
+  if (found != cache.end()) {
+    return found->second;
+  }
+  int best = 0;
+  const std::wstring root = PackageInstallPath(PackageFamilyFromAumid(aumid));
+  if (!root.empty()) {
+    best = MaxUnplatedTargetSize(root);
+    // 자산은 보통 Assets 같은 하위 폴더에 들어 있으므로 한 단계만 더 내려가 본다.
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((root + L"\\*").c_str(), &fd);
+    if (find != INVALID_HANDLE_VALUE) {
+      do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+          continue;
+        }
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) {
+          continue;
+        }
+        best = (std::max)(best, MaxUnplatedTargetSize(root + L"\\" + fd.cFileName));
+      } while (FindNextFileW(find, &fd) != FALSE);
+      FindClose(find);
+    }
+  }
+  cache.emplace(aumid, best);
+  return best;
+}
+
 HBITMAP BitmapFromShellItem(const std::wstring& path, int request_px) {
   Microsoft::WRL::ComPtr<IShellItem> item;
   if (FAILED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item))) || !item) {
@@ -269,7 +368,9 @@ HBITMAP BitmapFromShellItem(const std::wstring& path, int request_px) {
   return bmp;
 }
 
-HBITMAP BitmapFromShellItemObject(IShellItem* item, int request_px) {
+constexpr int kShellIconFlags = SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK;
+
+HBITMAP BitmapFromShellItemObject(IShellItem* item, int request_px, int flags = kShellIconFlags) {
   if (item == nullptr) {
     return nullptr;
   }
@@ -279,7 +380,7 @@ HBITMAP BitmapFromShellItemObject(IShellItem* item, int request_px) {
   }
   HBITMAP bmp = nullptr;
   const SIZE size{request_px, request_px};
-  if (FAILED(factory->GetImage(size, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, &bmp))) {
+  if (FAILED(factory->GetImage(size, flags, &bmp))) {
     return nullptr;
   }
   return bmp;
@@ -306,12 +407,12 @@ Microsoft::WRL::ComPtr<IShellItem> ShellItemFromAumid(const std::wstring& aumid)
   return item;
 }
 
-HBITMAP BitmapFromAumid(const std::wstring& aumid, int request_px) {
+HBITMAP BitmapFromAumid(const std::wstring& aumid, int request_px, int flags = kShellIconFlags) {
   Microsoft::WRL::ComPtr<IShellItem> item = ShellItemFromAumid(aumid);
   if (!item) {
     return nullptr;
   }
-  return BitmapFromShellItemObject(item.Get(), request_px);
+  return BitmapFromShellItemObject(item.Get(), request_px, flags);
 }
 
 bool PathImpliesGenericIcon(const std::wstring& path) {
@@ -1952,9 +2053,27 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px, const wchar_t** source)
     }
   }
   if (!app.aumid.empty()) {
-    if (HBITMAP shell = BitmapFromAumid(app.aumid, ShellIconRequestPx(px))) {
+    // 판 없는 자산을 작게만 담은 패키지 앱은 셸이 그 작은 자산을 확대해서 돌려주므로 아이콘이
+    // 뭉개진다. 그때만 SIIGBF_ICONONLY를 빼서 판이 포함된 원본 자산을 그대로 받는다.
+    const int unplated = LargestUnplatedAssetPx(app.aumid);
+    const bool prefer_plated = unplated > 0 && unplated < px;
+    HBITMAP shell = nullptr;
+    if (prefer_plated) {
+      shell = BitmapFromAumid(app.aumid, ShellIconRequestPx(px), SIIGBF_BIGGERSIZEOK);
+      // 판이 있는 자산이 오히려 더 작으면 얻는 것이 없으므로 원래 경로로 되돌린다.
+      BITMAP bm{};
+      if (shell != nullptr && GetObjectW(shell, sizeof(bm), &bm) != 0 && bm.bmWidth < unplated) {
+        DeleteObject(shell);
+        shell = nullptr;
+      }
+    }
+    if (shell == nullptr) {
+      shell = BitmapFromAumid(app.aumid, ShellIconRequestPx(px));
+    }
+    if (shell != nullptr) {
       if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
-        Log(L"dock", L"icon source=%s name=%s px=%d", L"aumid", app.display_name.c_str(), px);
+        Log(L"dock", L"icon source=%s name=%s px=%d unplated=%d plated=%d", L"aumid", app.display_name.c_str(), px,
+            unplated, prefer_plated ? 1 : 0);
         note(L"aumid");
         return ready;
       }
