@@ -261,12 +261,10 @@ case kAccess:   OpenSettingsPage(L"ms-settings:easeofaccess");         break;   
 
 ```cpp
 case kSaver:
-  if (!battery_saver_toggle_ok_) {
-    OpenSettingsPage(L"ms-settings:batterysaver");
-    break;
-  }
   if (battery_ac_) {
-    // AC 전원에서는 Windows가 절전 모드를 켜지 않는다. 설정 앱으로 넘긴다.
+    break;   // 2.1.1절 참고. 흐리게 그린 채로 아무것도 하지 않는다
+  }
+  if (!battery_saver_toggle_ok_) {
     OpenSettingsPage(L"ms-settings:batterysaver");
     break;
   }
@@ -284,6 +282,68 @@ case kSaver:
 ```
 
 `saver_on_`을 미리 뒤집는 것은 낙관적 반영이다. 다음 폴링에서 `ApplyLive`가 실제 상태로 덮으므로, 실패하면 몇백 밀리초 뒤에 원래대로 돌아온다. 이것이 눌러도 아무 반응이 없는 것보다 낫다.
+
+### 2.1.1 AC 전원일 때는 타일을 흐리게 그리고 아무 일도 하지 않는다
+
+**이 절은 2026-09-05에 사용자가 동작을 확인한 뒤 고친 내용이다.** 처음에는 AC 전원일 때 설정 앱을 열도록 적었는데, 사용자가 타일을 눌렀더니 토글되지 않고 Windows 전원 및 배터리 설정만 떠서 잘못을 알아차렸다.
+
+측정한 사실은 이렇다. 개발기는 `PowerLineStatus = Online`, 배터리 100%였고, 그래서 `battery_ac_` 분기로 빠졌다. **AC 전원에서 절전 모드를 켤 수 없다는 것 자체는 맞다.** `src/power_saver.cpp`는 `GUID_ENERGY_SAVER_BATTERY_THRESHOLD`를 100으로 올리는 방식이라 배터리로 돌 때만 걸리고, Windows 11 빠른 설정도 충전 중에는 배터리 절약 모드 스위치를 회색으로 죽여 놓는다. 어떤 공개 API로도 켤 수 없다.
+
+**틀린 것은 물러서는 방향이었다.** 설정 앱에 보내 봐야 거기 토글도 똑같이 회색이라 사용자가 할 수 있는 일이 없다. 아무 도움도 안 되는 곳으로 화면만 튀는 셈이다.
+
+그래서 판정 기준을 이렇게 세운다.
+
+> 물러설 곳이 도움이 되면 설정 앱을 열고, 도움이 안 되면 아무것도 하지 않되 그 사실이 화면에 보이게 한다.
+
+이 기준을 적용한 결과는 다음과 같다.
+
+| 상황 | 타일 모양 | 누르면 |
+| --- | --- | --- |
+| AC 전원 | 흐리게 | 아무 일도 없다 |
+| `battery_saver_toggle_ok_`이 거짓 | 보통 | 설정 앱을 연다. 우리 경로만 실패했을 뿐 설정 앱의 토글은 살아 있다 |
+| 그 밖 | 보통 | 즉시 토글한다 |
+
+야간 모드 타일도 같은 기준을 따른다. `night_known_`이 거짓인 것은 블롭 형식을 우리가 못 읽었다는 뜻이지 Windows가 막았다는 뜻이 아니므로, 보통 밝기로 두고 설정 앱을 연다. 지금 코드가 이미 그렇게 되어 있으니 손대지 않는다.
+
+구현은 `Render`의 빠른 설정 반복문을 고친다. `Quick` 구조체에 `enabled`를 더한다.
+
+```cpp
+struct Quick {
+  int id;
+  int col;
+  int row;
+  const wchar_t* glyph;
+  const wchar_t* name;
+  bool on;
+  bool enabled;
+};
+
+const Quick quick[] = {
+    {kSaver, 0, 0, kSaverGlyph, L"절전 모드", saver_on_, !battery_ac_},
+    {kNight, 1, 0, kNightGlyph, L"야간 모드", night_on_, true},
+};
+```
+
+흐리게 만드는 배율은 `panel::DrawToggle`이 비활성 토글에 쓰는 값과 같은 **0.40**을 쓴다. 이 저장소에 이미 있는 규칙이니 새 숫자를 들이지 않는다.
+
+- 배지의 채움색과 글리프색, 이름 텍스트색에 각각 `ScaleAlpha(..., 0.40f)`를 먹인다. 카드 바탕(`CardFillColor`)은 그대로 둔다. 카드까지 흐려지면 타일이 사라진 것처럼 보인다.
+- `enabled`가 거짓이면 호버 채움을 그리지 않는다. 눌리지 않는 타일에 반응이 보이면 안 된다.
+- `BuildHits`의 히트 사각형은 그대로 남긴다. 지워 버리면 클릭이 뒤쪽 카드로 새어 나간다.
+- **`StickyRow`가 `kSaver`를 비활성일 때 참으로 돌려주게 한다.** 이것을 빠뜨리면 "아무 일도 없다"가 지켜지지 않는다. `PopupSurface`는 비고정 행을 누르면 `Dismiss`를 먼저 부르고 나서 `Invoke`를 부르므로(`src/popup_surface.cpp:373`, `src/popup_surface.cpp:925`), 흐린 타일을 눌러도 제어센터가 닫혀 버린다. Windows 빠른 설정은 회색 스위치를 눌러도 팝업이 그대로 남아 있으니 그쪽에 맞춘다.
+
+  ```cpp
+  bool ControlCenterContent::StickyRow(int index) const {
+    ...
+    if (id == kSaver && battery_ac_) {
+      return true;
+    }
+    ...
+  }
+  ```
+
+  `StickyInvoke`는 이미 `Invoke`를 그대로 부르므로 따로 손댈 곳은 없다. `Invoke`가 곧바로 `break`하니 팝업만 남고 아무 일도 일어나지 않는다.
+
+`draw_badge` 람다는 연결 행도 같이 쓰므로 시그니처를 바꾸지 말고, 타일 쪽에서 그린 뒤 흐리게 덮는 대신 **배지를 그리기 전에 색을 정하는 방식**을 택한다. 람다에 `float alpha = 1.0f` 기본 인자를 하나 붙여서 `on`에 따라 고른 색에 곱해 주는 것이 가장 작은 변경이다.
 
 ### 2.2 야간 모드 — CloudStore 블롭을 직접 고친다
 
@@ -321,6 +381,22 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\C
 5. 다시 손으로 끄고 원래 블롭으로 돌아왔는지 확인한다.
 
 실측이 규칙과 다르면 그 결과를 이 문서에 적고 구현을 맞춘다.
+
+2026-09-05 이 개발기에서 설정 앱의 "지금 켜기"로 켠 뒤 `fc /b`로 비교한 결과는 다음과 같다. 레지스트리는 쓰지 않았다.
+
+꺼짐 41바이트:
+
+```
+43 42 01 00 0a 02 01 00 2a 06 8e 9c 87 cc 06 2a 2b 0e 13 43 42 01 00 d0 0a 02 c6 14 d6 b1 d4 d5 df 9a dc ed 01 00 00 00 00
+```
+
+켜짐 43바이트:
+
+```
+43 42 01 00 0a 02 01 00 2a 06 87 ad f0 d4 06 2a 2b 0e 15 43 42 01 00 10 00 d0 0a 02 c6 14 98 ee f2 c5 8f a7 cf ee 01 00 00 00 00
+```
+
+널리 알려진 "오프셋 18에 `10 00`을 끼운다"는 이 빌드와 맞지 않는다. 오프셋 18은 안쪽 길이 바이트이고, 꺼짐에서 `13`, 켜짐에서 `15`다. `10 00`은 시각 varint 다음의 `2a 2b 0e <len> 43 42 01 00` 뒤에 들어간다. 5바이트 varint이면 그 자리는 오프셋 23이다. 앞쪽 시각 varint는 갱신되고, 안쪽에도 다른 시각 비슷한 값이 바뀌지만 구현은 지시서대로 앞쪽 varint와 `10 00` 삽입·삭제, 길이 바이트 ±2만 다룬다. 설정 앱으로 다시 끄면 길이는 41바이트로 돌아오고 `10 00`은 사라지며, 달라지는 것은 시각 값뿐이다.
 
 구현은 `src/night_light.hpp`와 `src/night_light.cpp`를 새로 만들어 담는다. `CMakeLists.txt`의 `add_executable` 목록에 `src/night_light.cpp`를 더한다.
 
@@ -391,7 +467,8 @@ case kNight:
 3. 빠른 설정에 절전 모드와 야간 모드 두 장만 한 줄로 놓여 있다. 비행기 모드와 접근성이 있던 자리에 빈 공간이나 잘린 카드가 남아 있지 않다.
 4. 디스플레이와 사운드 슬라이더가 사운드 패널의 슬라이더와 같은 두께, 같은 노브, 같은 좌우 아이콘 배치를 갖는다. 두 화면을 나란히 놓고 눈으로 비교한다.
 5. 슬라이더를 끌면 값이 따라오고, 트랙 양 끝에서 0과 100에 정확히 닿는다. 카드 어느 곳을 눌러도 드래그가 시작된다.
-6. 절전 모드 타일을 누르면 설정 앱이 뜨지 않고 배지가 강조색으로 바뀐다. Windows 설정의 배터리 절약 모드 표시도 함께 바뀐다. AC 전원이면 설정 앱이 뜬다.
+6. AC 전원을 꽂은 채로 절전 모드 타일을 보면 배지와 글자가 흐리고, 마우스를 올려도 밝아지지 않으며, 눌러도 아무 일이 없다. 특히 **설정 앱이 뜨지 않고 제어센터도 닫히지 않아야 한다.**
+6-1. 전원을 뽑아 배터리로 돌린 뒤 같은 타일을 누르면 배지가 강조색으로 바뀌고 Windows 설정의 배터리 절약 모드 표시도 함께 바뀐다.
 7. 야간 모드 타일을 누르면 화면 색온도가 즉시 따뜻해지고, Windows 설정의 야간 모드 스위치도 켜져 있다. 다시 누르면 돌아온다.
 8. `%LOCALAPPDATA%\bamti\night_light_backup.bin`이 만들어져 있고 크기가 41바이트다.
 
