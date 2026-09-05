@@ -28,6 +28,7 @@ namespace bamti {
 
 inline constexpr wchar_t kMenuBarClass[] = L"bamti.MenuBar";
 inline constexpr UINT kToggleSpotlightMsg = WM_APP + 8;
+inline constexpr UINT kCornerWatchMsg = WM_APP + 10;
 
 class MenuBar {
  public:
@@ -64,11 +65,13 @@ class MenuBar {
   void ApplySettings(const WidgetSettings& next);
   void StartTrayPeek();
   void EndTrayPeek();
-  bool PeekZoneHit(POINT client) const;
-  bool DesktopPeekWanted(POINT client) const;
-  void UpdateDesktopPeek(POINT client);
+  bool CornerHit() const;
+  bool DesktopPeekWanted() const;
+  void UpdateDesktopPeek();
   void StartDesktopPeek();
   void StopDesktopPeek();
+  void StartCornerWatch();
+  void StopCornerWatch();
   void RefreshFullscreenState();
   void SetFullscreenOccluded(bool occluded);
   void UpdateProviderActive();
@@ -210,7 +213,7 @@ class MenuBar {
   UINT open_submenu_cmd_ = 0;
   bool peek_latched_ = false;
   bool peek_dwell_armed_ = false;
-  POINT peek_pt_{};
+  bool corner_watch_on_ = false;
   int wheel_accum_ = 0;
 };
 

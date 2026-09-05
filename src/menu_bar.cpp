@@ -57,28 +57,27 @@ struct ComScope {
 };
 
 void ToggleDesktop() {
+  HWND probe = GetForegroundWindow();
+  const int before = (probe != nullptr && IsIconic(probe)) ? 1 : 0;
+  HRESULT hr = E_FAIL;
   ComScope com;
-  if (!com.ok) {
-    return;
+  if (com.ok) {
+    Microsoft::WRL::ComPtr<IDispatch> shell;
+    hr = CoCreateInstance(CLSID_Shell, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&shell));
+    if (FAILED(hr) || shell == nullptr) {
+      Log(L"peek", L"CoCreateInstance Shell hr=0x%08lx", static_cast<unsigned long>(hr));
+    } else {
+      Microsoft::WRL::ComPtr<IShellDispatch4> dispatch4;
+      hr = shell.As(&dispatch4);
+      if (FAILED(hr) || dispatch4 == nullptr) {
+        Log(L"peek", L"IShellDispatch4 hr=0x%08lx", static_cast<unsigned long>(hr));
+      } else {
+        hr = dispatch4->ToggleDesktop();
+      }
+    }
   }
-  Microsoft::WRL::ComPtr<IDispatch> shell;
-  HRESULT hr = CoCreateInstance(CLSID_Shell, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&shell));
-  if (FAILED(hr) || shell == nullptr) {
-    Log(L"peek", L"CoCreateInstance Shell hr=0x%08lx", static_cast<unsigned long>(hr));
-    return;
-  }
-  Microsoft::WRL::ComPtr<IShellDispatch4> dispatch4;
-  hr = shell.As(&dispatch4);
-  if (FAILED(hr) || dispatch4 == nullptr) {
-    Log(L"peek", L"IShellDispatch4 hr=0x%08lx", static_cast<unsigned long>(hr));
-    return;
-  }
-  hr = dispatch4->ToggleDesktop();
-  if (FAILED(hr)) {
-    Log(L"peek", L"ToggleDesktop hr=0x%08lx", static_cast<unsigned long>(hr));
-    return;
-  }
-  Log(L"peek", L"toggle");
+  const int after = (probe != nullptr && IsIconic(probe)) ? 1 : 0;
+  Log(L"peek", L"toggle hr=0x%08lx iconic_before=%d iconic_after=%d", static_cast<unsigned long>(hr), before, after);
 }
 
 constexpr UINT kAppBarCallback = WM_APP + 1;
@@ -116,9 +115,9 @@ constexpr UINT kPowerCmdBase = 5200;
 constexpr UINT_PTR kPeekTimerId = 4;
 constexpr UINT kPeekMs = 10000;
 constexpr UINT_PTR kDesktopPeekDwellTimerId = 5;
-constexpr UINT_PTR kDesktopPeekPollTimerId = 6;
+constexpr UINT_PTR kCornerWatchTimerId = 7;
 constexpr UINT kDesktopPeekDwellMs = 300;
-constexpr UINT kDesktopPeekPollMs = 100;
+constexpr UINT kCornerWatchMs = 60;
 constexpr int kPeekZoneDip = 8;
 constexpr char kSpotlightItemId[] = "bamti.widget/spotlight";
 constexpr char kControlCenterItemId[] = "bamti.widget/control_center";
@@ -256,8 +255,7 @@ void InjectWinKey(DWORD vk, bool up) {
 }
 
 LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
-  if (code != HC_ACTION || g_menu_bar == nullptr || g_menu_bar->hwnd() == nullptr ||
-      !g_menu_bar->win_key_enabled()) {
+  if (code != HC_ACTION) {
     return CallNextHookEx(g_key_hook, code, wparam, lparam);
   }
   const auto* info = reinterpret_cast<KBDLLHOOKSTRUCT*>(lparam);
@@ -268,6 +266,17 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
   const bool down = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
   const bool up = wparam == WM_KEYUP || wparam == WM_SYSKEYUP;
   const DWORD vk = info->vkCode;
+  const bool is_ctrl = vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL;
+  if (is_ctrl && g_menu_bar != nullptr && g_menu_bar->hwnd() != nullptr) {
+    if (down) {
+      PostMessageW(g_menu_bar->hwnd(), kCornerWatchMsg, 1, 0);
+    } else if (up) {
+      PostMessageW(g_menu_bar->hwnd(), kCornerWatchMsg, 0, 0);
+    }
+  }
+  if (g_menu_bar == nullptr || g_menu_bar->hwnd() == nullptr || !g_menu_bar->win_key_enabled()) {
+    return CallNextHookEx(g_key_hook, code, wparam, lparam);
+  }
   const bool is_win = vk == VK_LWIN || vk == VK_RWIN;
 
   if (is_win) {
@@ -504,13 +513,22 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (wparam == kDesktopPeekDwellTimerId) {
         KillTimer(hwnd_, kDesktopPeekDwellTimerId);
         peek_dwell_armed_ = false;
-        if (DesktopPeekWanted(peek_pt_)) {
+        if (DesktopPeekWanted() && CornerHit()) {
           StartDesktopPeek();
         }
         return 0;
       }
-      if (wparam == kDesktopPeekPollTimerId) {
-        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0) {
+      if (wparam == kCornerWatchTimerId) {
+        POINT pt{};
+        RECT rc{};
+        if (GetCursorPos(&pt) != FALSE && GetWindowRect(hwnd_, &rc) != FALSE && PtInRect(&rc, pt) != FALSE &&
+            pt.x >= rc.right - DipToPx(kPeekZoneDip, Dpi())) {
+          UpdateDesktopPeek();
+        } else {
+          if (hwnd_ != nullptr) {
+            KillTimer(hwnd_, kDesktopPeekDwellTimerId);
+          }
+          peek_dwell_armed_ = false;
           StopDesktopPeek();
         }
         return 0;
@@ -532,6 +550,13 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           status_.Dispatch(ev);
           open_panel_id_.clear();
         }
+      }
+      return 0;
+    case kCornerWatchMsg:
+      if (wparam != 0) {
+        StartCornerWatch();
+      } else {
+        StopCornerWatch();
       }
       return 0;
     case kFullscreenWatchMsg:
@@ -619,7 +644,6 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         return 0;
       }
       UpdateChrome(pt);
-      UpdateDesktopPeek(pt);
       return 0;
     }
     case WM_MOUSELEAVE:
@@ -1081,8 +1105,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kToggleTimerId);
       KillTimer(hwnd_, kPeekTimerId);
       KillTimer(hwnd_, kDesktopPeekDwellTimerId);
-      KillTimer(hwnd_, kDesktopPeekPollTimerId);
+      KillTimer(hwnd_, kCornerWatchTimerId);
       peek_dwell_armed_ = false;
+      corner_watch_on_ = false;
       StopDesktopPeek();
       StopFullscreenWatch(hwnd_);
       UnregisterSessionWatch();
@@ -2295,27 +2320,33 @@ void MenuBar::StartTrayPeek() {
   taskbar_.Restore();
 }
 
-bool MenuBar::PeekZoneHit(POINT client) const {
+bool MenuBar::CornerHit() const {
+  if (hwnd_ == nullptr) {
+    return false;
+  }
+  POINT pt{};
   RECT rc{};
-  GetClientRect(hwnd_, &rc);
-  return client.x >= rc.right - DipToPx(kPeekZoneDip, Dpi());
+  if (GetCursorPos(&pt) == FALSE || GetWindowRect(hwnd_, &rc) == FALSE) {
+    return false;
+  }
+  if (PtInRect(&rc, pt) == FALSE) {
+    return false;
+  }
+  return pt.x >= rc.right - DipToPx(kPeekZoneDip, Dpi());
 }
 
-bool MenuBar::DesktopPeekWanted(POINT client) const {
+bool MenuBar::DesktopPeekWanted() const {
   if (fullscreen_occluded_ || reorder_active_) {
     return false;
   }
   if (status_popup_.IsOpen() || bar_submenu_popup_.IsOpen()) {
     return false;
   }
-  if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0) {
-    return false;
-  }
-  return PeekZoneHit(client);
+  return (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
 }
 
-void MenuBar::UpdateDesktopPeek(POINT client) {
-  if (!DesktopPeekWanted(client)) {
+void MenuBar::UpdateDesktopPeek() {
+  if (!DesktopPeekWanted() || !CornerHit()) {
     if (hwnd_ != nullptr) {
       KillTimer(hwnd_, kDesktopPeekDwellTimerId);
     }
@@ -2323,8 +2354,6 @@ void MenuBar::UpdateDesktopPeek(POINT client) {
     StopDesktopPeek();
     return;
   }
-  peek_pt_ = client;
-  ArmMouseLeave();
   if (peek_latched_ || peek_dwell_armed_) {
     return;
   }
@@ -2338,14 +2367,33 @@ void MenuBar::StartDesktopPeek() {
   }
   ToggleDesktop();
   peek_latched_ = true;
-  SetTimer(hwnd_, kDesktopPeekPollTimerId, kDesktopPeekPollMs, nullptr);
 }
 
 void MenuBar::StopDesktopPeek() {
-  if (hwnd_ != nullptr) {
-    KillTimer(hwnd_, kDesktopPeekPollTimerId);
-  }
   peek_latched_ = false;
+}
+
+void MenuBar::StartCornerWatch() {
+  if (corner_watch_on_ || hwnd_ == nullptr) {
+    return;
+  }
+  corner_watch_on_ = true;
+  SetTimer(hwnd_, kCornerWatchTimerId, kCornerWatchMs, nullptr);
+  Log(L"peek", L"watch on=1");
+}
+
+void MenuBar::StopCornerWatch() {
+  if (hwnd_ != nullptr) {
+    KillTimer(hwnd_, kCornerWatchTimerId);
+    KillTimer(hwnd_, kDesktopPeekDwellTimerId);
+  }
+  const bool was_on = corner_watch_on_;
+  corner_watch_on_ = false;
+  peek_dwell_armed_ = false;
+  StopDesktopPeek();
+  if (was_on) {
+    Log(L"peek", L"watch on=0");
+  }
 }
 
 void MenuBar::EndTrayPeek() {
