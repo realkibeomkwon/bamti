@@ -44,6 +44,7 @@ add_executable(bamti WIN32
   src/bar_menu.cpp
   src/menu_style.cpp
   src/winx_menu.cpp
+  src/live_preview.cpp
   src/start_menu.cpp
   src/spotlight.cpp
   src/tray_probe.cpp

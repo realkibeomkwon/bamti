@@ -16,6 +16,7 @@
 #include "tray_mirror.hpp"
 #include "widgets/builtin.hpp"
 #include "winx_menu.hpp"
+#include "live_preview.hpp"
 
 #include <windows.h>
 
@@ -64,6 +65,11 @@ class MenuBar {
   void ApplySettings(const WidgetSettings& next);
   void StartTrayPeek();
   void EndTrayPeek();
+  bool PeekZoneHit(POINT client) const;
+  bool DesktopPeekWanted(POINT client) const;
+  void UpdateDesktopPeek(POINT client, bool ctrl_down);
+  void StartDesktopPeek();
+  void StopDesktopPeek();
   void RefreshFullscreenState();
   void SetFullscreenOccluded(bool occluded);
   void UpdateProviderActive();
@@ -203,6 +209,10 @@ class MenuBar {
   std::vector<uint64_t> tray_menu_keys_;
   std::vector<WinXEntry> winx_entries_;
   UINT open_submenu_cmd_ = 0;
+  bool peek_active_ = false;
+  bool peek_dwell_armed_ = false;
+  POINT peek_pt_{};
+  bool peek_ctrl_ = false;
   int wheel_accum_ = 0;
 };
 

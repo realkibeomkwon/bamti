@@ -9,6 +9,7 @@
 #include "settings.hpp"
 #include "theme.hpp"
 #include "tray_popup_guard.hpp"
+#include "live_preview.hpp"
 #include "watchdog.hpp"
 #include "winx_menu.hpp"
 
@@ -61,6 +62,11 @@ constexpr UINT kPowerSubCmd = 5199;
 constexpr UINT kPowerCmdBase = 5200;
 constexpr UINT_PTR kPeekTimerId = 4;
 constexpr UINT kPeekMs = 10000;
+constexpr UINT_PTR kDesktopPeekDwellTimerId = 5;
+constexpr UINT_PTR kDesktopPeekPollTimerId = 6;
+constexpr UINT kDesktopPeekDwellMs = 300;
+constexpr UINT kDesktopPeekPollMs = 100;
+constexpr int kPeekZoneDip = 8;
 constexpr char kSpotlightItemId[] = "bamti.widget/spotlight";
 constexpr char kControlCenterItemId[] = "bamti.widget/control_center";
 constexpr char kNetworkItemId[] = "bamti.widget/network";
@@ -442,6 +448,20 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (wparam == kPeekTimerId) {
         EndTrayPeek();
       }
+      if (wparam == kDesktopPeekDwellTimerId) {
+        KillTimer(hwnd_, kDesktopPeekDwellTimerId);
+        peek_dwell_armed_ = false;
+        if (peek_ctrl_ && DesktopPeekWanted(peek_pt_)) {
+          StartDesktopPeek();
+        }
+        return 0;
+      }
+      if (wparam == kDesktopPeekPollTimerId) {
+        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0) {
+          StopDesktopPeek();
+        }
+        return 0;
+      }
       return 0;
     case kPopupClosedMsg:
       if (!status_popup_.IsOpen()) {
@@ -546,9 +566,15 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         return 0;
       }
       UpdateChrome(pt);
+      UpdateDesktopPeek(pt, (wparam & MK_CONTROL) != 0);
       return 0;
     }
     case WM_MOUSELEAVE:
+      StopDesktopPeek();
+      if (hwnd_ != nullptr) {
+        KillTimer(hwnd_, kDesktopPeekDwellTimerId);
+      }
+      peek_dwell_armed_ = false;
       if (start_hot_ || start_pressed_) {
         start_hot_ = false;
         start_pressed_ = false;
@@ -1001,6 +1027,10 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kRepaintTimerId);
       KillTimer(hwnd_, kToggleTimerId);
       KillTimer(hwnd_, kPeekTimerId);
+      KillTimer(hwnd_, kDesktopPeekDwellTimerId);
+      KillTimer(hwnd_, kDesktopPeekPollTimerId);
+      peek_dwell_armed_ = false;
+      StopDesktopPeek();
       StopFullscreenWatch(hwnd_);
       UnregisterSessionWatch();
       status_.StopAll();
@@ -1349,6 +1379,11 @@ bool MenuBar::ReorderCursor(POINT client) const {
 }
 
 void MenuBar::BeginReorder(const std::string& id, POINT pt) {
+  StopDesktopPeek();
+  if (hwnd_ != nullptr) {
+    KillTimer(hwnd_, kDesktopPeekDwellTimerId);
+  }
+  peek_dwell_armed_ = false;
   reorder_active_ = true;
   reorder_moved_ = false;
   reorder_id_ = id;
@@ -2061,6 +2096,7 @@ void MenuBar::CloseBarSubmenu(const wchar_t* reason) {
 }
 
 void MenuBar::ShowStartContextMenu(POINT screen) {
+  StopDesktopPeek();
   if (fullscreen_occluded_) {
     return;
   }
@@ -2117,6 +2153,7 @@ void MenuBar::ShowStartContextMenu(POINT screen) {
 }
 
 void MenuBar::ShowContextMenu(POINT screen) {
+  StopDesktopPeek();
   if (fullscreen_occluded_) {
     return;
   }
@@ -2146,6 +2183,7 @@ void MenuBar::ShowContextMenu(POINT screen) {
 }
 
 void MenuBar::ShowTrayIconMenu(POINT screen, const std::string& id) {
+  StopDesktopPeek();
   if (fullscreen_occluded_) {
     return;
   }
@@ -2204,6 +2242,68 @@ void MenuBar::StartTrayPeek() {
   taskbar_.Restore();
 }
 
+bool MenuBar::PeekZoneHit(POINT client) const {
+  RECT rc{};
+  GetClientRect(hwnd_, &rc);
+  return client.x >= rc.right - DipToPx(kPeekZoneDip, Dpi());
+}
+
+bool MenuBar::DesktopPeekWanted(POINT client) const {
+  if (fullscreen_occluded_ || reorder_active_) {
+    return false;
+  }
+  if (status_popup_.IsOpen() || bar_submenu_popup_.IsOpen()) {
+    return false;
+  }
+  if (!peek_ctrl_ && (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
+      (GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0) {
+    return false;
+  }
+  return PeekZoneHit(client);
+}
+
+void MenuBar::UpdateDesktopPeek(POINT client, bool ctrl_down) {
+  peek_ctrl_ = ctrl_down || (GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
+               (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+  if (!DesktopPeekWanted(client)) {
+    if (hwnd_ != nullptr) {
+      KillTimer(hwnd_, kDesktopPeekDwellTimerId);
+    }
+    peek_dwell_armed_ = false;
+    StopDesktopPeek();
+    return;
+  }
+  peek_pt_ = client;
+  ArmMouseLeave();
+  if (peek_active_ || peek_dwell_armed_) {
+    return;
+  }
+  peek_dwell_armed_ = true;
+  SetTimer(hwnd_, kDesktopPeekDwellTimerId, kDesktopPeekDwellMs, nullptr);
+}
+
+void MenuBar::StartDesktopPeek() {
+  if (peek_active_ || !LivePreviewAvailable()) {
+    return;
+  }
+  peek_active_ = true;
+  SetLivePreview(true, hwnd_);
+  SetTimer(hwnd_, kDesktopPeekPollTimerId, kDesktopPeekPollMs, nullptr);
+  Log(L"peek", L"on");
+}
+
+void MenuBar::StopDesktopPeek() {
+  if (hwnd_ != nullptr) {
+    KillTimer(hwnd_, kDesktopPeekPollTimerId);
+  }
+  if (!peek_active_) {
+    return;
+  }
+  peek_active_ = false;
+  SetLivePreview(false, hwnd_);
+  Log(L"peek", L"off");
+}
+
 void MenuBar::EndTrayPeek() {
   if (hwnd_ != nullptr) {
     KillTimer(hwnd_, kPeekTimerId);
@@ -2252,6 +2352,13 @@ void MenuBar::UnregisterSessionWatch() {
 void MenuBar::SetFullscreenOccluded(bool occluded) {
   if (fullscreen_occluded_ == occluded) {
     return;
+  }
+  if (occluded) {
+    StopDesktopPeek();
+    if (hwnd_ != nullptr) {
+      KillTimer(hwnd_, kDesktopPeekDwellTimerId);
+    }
+    peek_dwell_armed_ = false;
   }
   fullscreen_occluded_ = occluded;
   UpdateProviderActive();
