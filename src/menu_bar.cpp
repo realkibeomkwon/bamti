@@ -10,6 +10,7 @@
 #include "theme.hpp"
 #include "tray_popup_guard.hpp"
 #include "watchdog.hpp"
+#include "winx_menu.hpp"
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -55,6 +56,9 @@ constexpr UINT kSettingsCmd = 25;
 constexpr UINT kMenuWidgetsSubCmd = 30;
 constexpr UINT kMenuTraySubCmd = 31;
 constexpr UINT kTrayItemCmdBase = 4000;
+constexpr UINT kWinXCmdBase = 5000;
+constexpr UINT kPowerSubCmd = 5199;
+constexpr UINT kPowerCmdBase = 5200;
 constexpr UINT_PTR kPeekTimerId = 4;
 constexpr UINT kPeekMs = 10000;
 constexpr char kSpotlightItemId[] = "bamti.widget/spotlight";
@@ -699,6 +703,11 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     }
     case WM_RBUTTONUP: {
       POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      if (HitStart(pt)) {
+        ClientToScreen(hwnd_, &pt);
+        ShowStartContextMenu(pt);
+        return 0;
+      }
       if (HitClock(pt)) {
         ShowClockMenu();
         return 0;
@@ -911,6 +920,15 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (cmd == kSettingsCmd) {
         // TODO: 설정 페이지
         Log(L"bar", L"settings page not implemented yet");
+      }
+      if (cmd >= kWinXCmdBase && cmd < kPowerSubCmd) {
+        const size_t idx = static_cast<size_t>(cmd - kWinXCmdBase);
+        if (idx < winx_entries_.size()) {
+          LaunchWinXEntry(winx_entries_[idx]);
+        }
+      }
+      if (cmd >= kPowerCmdBase && cmd < kPowerCmdBase + 5) {
+        InvokePowerAction(static_cast<PowerAction>(cmd - kPowerCmdBase));
       }
       return 0;
     }
@@ -2005,6 +2023,14 @@ void MenuBar::OpenBarSubmenu(UINT cmd) {
     bar_submenu_->Add(kTrayOverflowIconsCmd, L"숨긴 아이콘도 표시", tray.tray_overflow_icons);
     bar_submenu_->AddSeparator();
     bar_submenu_->Add(kTrayPeekCmd, L"알림 영역 잠시 표시");
+  } else if (cmd == kPowerSubCmd) {
+    bar_submenu_->Add(kPowerCmdBase + static_cast<UINT>(PowerAction::kLogoff), L"로그아웃");
+    bar_submenu_->Add(kPowerCmdBase + static_cast<UINT>(PowerAction::kSleep), L"절전");
+    if (HibernateAvailable()) {
+      bar_submenu_->Add(kPowerCmdBase + static_cast<UINT>(PowerAction::kHibernate), L"최대 절전 모드");
+    }
+    bar_submenu_->Add(kPowerCmdBase + static_cast<UINT>(PowerAction::kShutdown), L"시스템 종료");
+    bar_submenu_->Add(kPowerCmdBase + static_cast<UINT>(PowerAction::kRestart), L"다시 시작");
   } else {
     return;
   }
@@ -2032,6 +2058,63 @@ void MenuBar::CloseBarSubmenu(const wchar_t* reason) {
   Log(L"bar", L"submenu close reason=%s", reason != nullptr ? reason : L"explicit");
   status_popup_.SetAllied(nullptr);
   bar_submenu_popup_.Close();
+}
+
+void MenuBar::ShowStartContextMenu(POINT screen) {
+  if (fullscreen_occluded_) {
+    return;
+  }
+  if (start_menu_.visible()) {
+    start_menu_.Hide();
+    InvalidateArea(hwnd_, StartRect());
+  }
+  winx_entries_ = LoadWinXEntries();
+  if (winx_entries_.empty()) {
+    Log(L"winx", L"empty, falling back to context menu");
+    ShowContextMenu(screen);
+    return;
+  }
+  if (!bar_menu_) {
+    bar_menu_ = std::make_unique<BarMenuContent>();
+  }
+  CloseBarSubmenu(L"reopen");
+  bar_menu_->Reset(hwnd_, dark_);
+  bar_menu_->SetPopup(&status_popup_);
+
+  int prev_group = 0;
+  bool power_added = false;
+  for (size_t i = 0; i < winx_entries_.size(); ++i) {
+    const WinXEntry& entry = winx_entries_[i];
+    if (prev_group != 0 && entry.group != prev_group) {
+      bar_menu_->AddSeparator();
+    }
+    if (entry.group == 1 && !power_added) {
+      bar_menu_->Add(kPowerSubCmd, L"종료 또는 로그아웃", false, true, true);
+      power_added = true;
+    }
+    bar_menu_->Add(kWinXCmdBase + static_cast<UINT>(i), entry.label);
+    prev_group = entry.group;
+  }
+  if (!power_added) {
+    if (prev_group != 0) {
+      bar_menu_->AddSeparator();
+    }
+    bar_menu_->Add(kPowerSubCmd, L"종료 또는 로그아웃", false, true, true);
+  }
+  HibernateAvailable();
+
+  RECT start = StartRect();
+  POINT anchor{start.left, start.bottom};
+  ClientToScreen(hwnd_, &anchor);
+
+  cc_open_ = false;
+  clock_open_ = false;
+  open_panel_id_.clear();
+  status_popup_.SetDark(dark_);
+  status_popup_.SetAfterTick(&MenuBar::AfterBarPopupTick, this);
+  if (!status_popup_.Open(bar_menu_.get(), anchor, PopupSurface::Anchor::BelowAt)) {
+    Log(L"bar", L"start context menu open failed err=%lu", GetLastError());
+  }
 }
 
 void MenuBar::ShowContextMenu(POINT screen) {

@@ -15,6 +15,7 @@
 #include "taskbar_controller.hpp"
 #include "tray_mirror.hpp"
 #include "widgets/builtin.hpp"
+#include "winx_menu.hpp"
 
 #include <windows.h>
 
@@ -54,6 +55,7 @@ class MenuBar {
   void NotePerf(double compute_ms, double draw_ms, const RECT& dirty, const RECT& client, const DrawTimings& draw,
                 double bpbegin_ms, double bpend_ms);
   void ShowContextMenu(POINT screen);
+  void ShowStartContextMenu(POINT screen);
   void ShowTrayIconMenu(POINT screen, const std::string& id);
   void SyncBarSubmenu();
   void OpenBarSubmenu(UINT cmd);
@@ -199,6 +201,7 @@ class MenuBar {
   std::vector<std::string> reorder_order_;
   std::string tray_menu_id_;
   std::vector<uint64_t> tray_menu_keys_;
+  std::vector<WinXEntry> winx_entries_;
   UINT open_submenu_cmd_ = 0;
   int wheel_accum_ = 0;
 };
