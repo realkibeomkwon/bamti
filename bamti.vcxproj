@@ -103,7 +103,6 @@
     <ClCompile Include="src\panel_style.cpp" />
     <ClCompile Include="src\menu_style.cpp" />
     <ClCompile Include="src\winx_menu.cpp" />
-    <ClCompile Include="src\live_preview.cpp" />
     <ClCompile Include="src\start_menu.cpp" />
     <ClCompile Include="src\spotlight.cpp" />
     <ClCompile Include="src\tray_backend_uia.cpp" />
@@ -137,7 +136,6 @@
     <ClInclude Include="src\panel_style.hpp" />
     <ClInclude Include="src\menu_style.hpp" />
     <ClInclude Include="src\winx_menu.hpp" />
-    <ClInclude Include="src\live_preview.hpp" />
     <ClInclude Include="src\start_menu.hpp" />
     <ClInclude Include="src\spotlight.hpp" />
     <ClInclude Include="src\tray_backend.hpp" />

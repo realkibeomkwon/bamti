@@ -9,16 +9,18 @@
 #include "settings.hpp"
 #include "theme.hpp"
 #include "tray_popup_guard.hpp"
-#include "live_preview.hpp"
 #include "watchdog.hpp"
 #include "winx_menu.hpp"
 
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <objbase.h>
 #include <shellapi.h>
+#include <shldisp.h>
 #include <uxtheme.h>
 #include <windowsx.h>
 #include <wtsapi32.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -27,6 +29,57 @@
 
 namespace bamti {
 namespace {
+
+struct ComScope {
+  bool ok = false;
+  bool uninit = false;
+
+  ComScope() {
+    const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (hr == S_OK) {
+      ok = true;
+      uninit = true;
+    } else if (hr == S_FALSE || hr == RPC_E_CHANGED_MODE) {
+      ok = true;
+    } else {
+      Log(L"peek", L"CoInitializeEx hr=0x%08lx", static_cast<unsigned long>(hr));
+    }
+  }
+
+  ~ComScope() {
+    if (uninit) {
+      CoUninitialize();
+    }
+  }
+
+  ComScope(const ComScope&) = delete;
+  ComScope& operator=(const ComScope&) = delete;
+};
+
+void ToggleDesktop() {
+  ComScope com;
+  if (!com.ok) {
+    return;
+  }
+  Microsoft::WRL::ComPtr<IDispatch> shell;
+  HRESULT hr = CoCreateInstance(CLSID_Shell, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&shell));
+  if (FAILED(hr) || shell == nullptr) {
+    Log(L"peek", L"CoCreateInstance Shell hr=0x%08lx", static_cast<unsigned long>(hr));
+    return;
+  }
+  Microsoft::WRL::ComPtr<IShellDispatch4> dispatch4;
+  hr = shell.As(&dispatch4);
+  if (FAILED(hr) || dispatch4 == nullptr) {
+    Log(L"peek", L"IShellDispatch4 hr=0x%08lx", static_cast<unsigned long>(hr));
+    return;
+  }
+  hr = dispatch4->ToggleDesktop();
+  if (FAILED(hr)) {
+    Log(L"peek", L"ToggleDesktop hr=0x%08lx", static_cast<unsigned long>(hr));
+    return;
+  }
+  Log(L"peek", L"toggle");
+}
 
 constexpr UINT kAppBarCallback = WM_APP + 1;
 constexpr UINT kToggleStartMsg = WM_APP + 7;
@@ -2272,7 +2325,7 @@ void MenuBar::UpdateDesktopPeek(POINT client) {
   }
   peek_pt_ = client;
   ArmMouseLeave();
-  if (peek_active_ || peek_dwell_armed_) {
+  if (peek_latched_ || peek_dwell_armed_) {
     return;
   }
   peek_dwell_armed_ = true;
@@ -2280,25 +2333,19 @@ void MenuBar::UpdateDesktopPeek(POINT client) {
 }
 
 void MenuBar::StartDesktopPeek() {
-  if (peek_active_ || !LivePreviewAvailable()) {
+  if (peek_latched_) {
     return;
   }
-  peek_active_ = true;
-  SetLivePreview(true, hwnd_);
+  ToggleDesktop();
+  peek_latched_ = true;
   SetTimer(hwnd_, kDesktopPeekPollTimerId, kDesktopPeekPollMs, nullptr);
-  Log(L"peek", L"on");
 }
 
 void MenuBar::StopDesktopPeek() {
   if (hwnd_ != nullptr) {
     KillTimer(hwnd_, kDesktopPeekPollTimerId);
   }
-  if (!peek_active_) {
-    return;
-  }
-  peek_active_ = false;
-  SetLivePreview(false, hwnd_);
-  Log(L"peek", L"off");
+  peek_latched_ = false;
 }
 
 void MenuBar::EndTrayPeek() {

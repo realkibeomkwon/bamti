@@ -16,7 +16,6 @@
 #include "tray_mirror.hpp"
 #include "widgets/builtin.hpp"
 #include "winx_menu.hpp"
-#include "live_preview.hpp"
 
 #include <windows.h>
 
@@ -209,7 +208,7 @@ class MenuBar {
   std::vector<uint64_t> tray_menu_keys_;
   std::vector<WinXEntry> winx_entries_;
   UINT open_submenu_cmd_ = 0;
-  bool peek_active_ = false;
+  bool peek_latched_ = false;
   bool peek_dwell_armed_ = false;
   POINT peek_pt_{};
   int wheel_accum_ = 0;
