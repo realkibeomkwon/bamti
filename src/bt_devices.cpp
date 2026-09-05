@@ -424,4 +424,70 @@ std::vector<BtDeviceInfo> EnumBtDevices() {
   return out;
 }
 
+std::vector<BtDeviceInfo> ScanBtDevices() {
+  std::vector<BtDeviceInfo> out;
+  LARGE_INTEGER t0{};
+  LARGE_INTEGER t1{};
+  QueryPerformanceCounter(&t0);
+
+  BLUETOOTH_FIND_RADIO_PARAMS radio_params{};
+  radio_params.dwSize = sizeof(radio_params);
+  HANDLE radio = nullptr;
+  const HBLUETOOTH_RADIO_FIND radio_find = BluetoothFindFirstRadio(&radio_params, &radio);
+  if (radio_find == nullptr) {
+    QueryPerformanceCounter(&t1);
+    Log(L"bt", L"scan took %.0f ms n=%d", QpcMs(t0, t1), 0);
+    return out;
+  }
+
+  BLUETOOTH_DEVICE_SEARCH_PARAMS search{};
+  search.dwSize = sizeof(search);
+  search.fReturnAuthenticated = FALSE;
+  search.fReturnRemembered = FALSE;
+  search.fReturnUnknown = TRUE;
+  search.fReturnConnected = FALSE;
+  search.fIssueInquiry = TRUE;
+  search.cTimeoutMultiplier = 4;  // 1당 1.28초이므로 약 5.1초
+  search.hRadio = radio;
+  BLUETOOTH_DEVICE_INFO info{};
+  info.dwSize = sizeof(info);
+  const HBLUETOOTH_DEVICE_FIND find = BluetoothFindFirstDevice(&search, &info);
+  if (find != nullptr) {
+    do {
+      BtDeviceInfo row;
+      row.raw = info;
+      row.name = info.szName;
+      row.connected = info.fConnected != FALSE;
+      row.paired = info.fAuthenticated != FALSE || info.fRemembered != FALSE;
+      row.address = AddrToHex(info.Address);
+      out.push_back(std::move(row));
+      info = {};
+      info.dwSize = sizeof(info);
+    } while (BluetoothFindNextDevice(find, &info));
+    BluetoothFindDeviceClose(find);
+  }
+  if (radio != nullptr) {
+    CloseHandle(radio);
+  }
+  BluetoothFindRadioClose(radio_find);
+
+  std::stable_sort(out.begin(), out.end(), [](const BtDeviceInfo& a, const BtDeviceInfo& b) {
+    const bool a_empty = a.name.empty();
+    const bool b_empty = b.name.empty();
+    if (a_empty != b_empty) {
+      return !a_empty;
+    }
+    return a.name < b.name;
+  });
+
+  constexpr int kBtScanMax = 8;
+  if (out.size() > static_cast<size_t>(kBtScanMax)) {
+    out.resize(static_cast<size_t>(kBtScanMax));
+  }
+
+  QueryPerformanceCounter(&t1);
+  Log(L"bt", L"scan took %.0f ms n=%d", QpcMs(t0, t1), static_cast<int>(out.size()));
+  return out;
+}
+
 }  // namespace bamti

@@ -26,6 +26,9 @@ struct BtDeviceInfo {
 BtRadioState QueryBtRadio();
 bool SetBtRadio(bool on);
 std::vector<BtDeviceInfo> EnumBtDevices();
+// 주변을 실제로 훑는다. 5초 안팎이 걸리므로 UI 스레드에서 부르면 안 된다.
+// 이미 짝지어졌거나 기억된 장치는 결과에서 뺀다.
+std::vector<BtDeviceInfo> ScanBtDevices();
 const wchar_t* BtClassGlyph(ULONG class_of_device);
 
 }  // namespace bamti

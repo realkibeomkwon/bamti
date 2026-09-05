@@ -479,6 +479,8 @@ ControlCenterLive BuiltinWidgets::LiveForControlCenter() const {
   live.bt_on = last_bt_on_;
   live.bt_can_toggle = last_bt_can_toggle_;
   live.bt_name = last_bt_name_;
+  live.bt_scanning = bt_scanning_;
+  live.bt_scan_rev = bt_scan_rev_;
   live.battery_ok = last_battery_ok_;
   live.battery_level = last_battery_level_;
   live.battery_ac = last_battery_ac_;
@@ -492,6 +494,11 @@ ControlCenterLive BuiltinWidgets::LiveForControlCenter() const {
   live.cpu_kernel = last_cpu_kernel_;
   live.cpu_nproc = last_cpu_nproc_;
   return live;
+}
+
+std::vector<BtDeviceInfo> BuiltinWidgets::BtScanResult() const {
+  std::lock_guard lock(mu_);
+  return bt_scan_result_;
 }
 
 void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
@@ -636,6 +643,25 @@ void BuiltinWidgets::OnEvent(const StatusEvent& ev) {
     std::lock_guard lock(mu_);
     pending_bt_on_ = ev.on;
     wake = true;
+  } else if (ev.id == kBluetoothId && ev.row_id == "bt_scan") {
+    std::lock_guard lock(mu_);
+    if (ev.on) {
+      if (bt_scanning_) {
+        // inquiry를 겹쳐 돌리면 드라이버가 오류를 돌려준다.
+        Log(L"bt", L"scan ignored already running");
+      } else {
+        pending_bt_scan_ = true;
+        bt_scanning_ = true;
+        wake = true;
+      }
+    } else {
+      // BluetoothFindFirstDevice는 중간에 취소할 수 없다.
+      // 중지는 결과가 와도 버린다는 표시일 뿐이고, 화면은 곧바로 검색 전 상태로 돌아간다.
+      bt_scan_discard_ = true;
+      bt_scanning_ = false;
+      pending_bt_scan_ = false;
+      bt_scan_result_.clear();
+    }
   } else if (ev.event == "toggle" && ev.id == kBatteryId && ev.row_id == "saver") {
     std::lock_guard lock(mu_);
     pending_saver_on_ = ev.on;
@@ -1437,6 +1463,35 @@ void BuiltinWidgets::WorkerLoop() {
     if (bt_on) {
       SetBtRadio(*bt_on);
       bluetooth_due_ = 0;
+    }
+    bool do_bt_scan = false;
+    {
+      std::lock_guard lock(mu_);
+      if (pending_bt_scan_) {
+        pending_bt_scan_ = false;
+        do_bt_scan = true;
+        bt_scanning_ = true;
+        bt_scan_discard_ = false;
+      }
+    }
+    if (do_bt_scan) {
+      std::vector<BtDeviceInfo> found = ScanBtDevices();
+      {
+        std::lock_guard lock(mu_);
+        if (bt_scan_discard_) {
+          // BluetoothFindFirstDevice는 중간에 취소할 수 없다.
+          // 중지는 결과가 와도 버린다는 표시일 뿐이고, 화면은 곧바로 검색 전 상태로 돌아간다.
+          bt_scan_result_.clear();
+        } else {
+          bt_scan_result_ = std::move(found);
+          ++bt_scan_rev_;
+        }
+        if (pending_bt_scan_) {
+          bt_scanning_ = true;
+        } else {
+          bt_scanning_ = false;
+        }
+      }
     }
     if (saver_on) {
       WidgetSettings snap;

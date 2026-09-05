@@ -9,6 +9,7 @@
 #include <dwrite.h>
 #include <wrl/client.h>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -39,6 +40,8 @@ struct ControlCenterLive {
   bool bt_on = false;
   bool bt_can_toggle = false;
   std::wstring bt_name;
+  bool bt_scanning = false;
+  uint64_t bt_scan_rev = 0;
   bool battery_ok = false;
   float battery_level = 0.0f;
   bool battery_ac = false;
@@ -58,6 +61,7 @@ struct ControlCenterHost {
   HWND popup_hwnd = nullptr;
   std::function<void(const StatusEvent&)> dispatch;
   std::function<ControlCenterLive()> live;
+  std::function<std::vector<BtDeviceInfo>()> bt_scan_result;
   std::function<void()> present;
   std::function<void(HWND)> set_allied;
 };
@@ -114,6 +118,7 @@ class ControlCenterContent : public PopupContent {
     kPagePowerSettings,
     kPageTaskManager,
     kPageSaverSettings,
+    kPageScan,
     kPageList = 200,
   };
 
@@ -207,6 +212,8 @@ class ControlCenterContent : public PopupContent {
   bool bt_known_ = false;
   bool bt_present_ = false;
   bool bt_can_toggle_ = false;
+  bool bt_scanning_ = false;
+  uint64_t bt_scan_rev_ = 0;
   bool battery_ok_ = false;
   float battery_level_ = 0.0f;
   bool battery_ac_ = false;
@@ -224,6 +231,7 @@ class ControlCenterContent : public PopupContent {
   bool wifi_iface_ok_ = false;
   std::vector<WifiNetwork> wifi_nets_;
   std::vector<BtDevice> bt_devices_;
+  std::vector<BtDevice> bt_found_;
   std::vector<AudioEndpoint> audio_outs_;
   ULONGLONG list_due_ = 0;
   ULONGLONG wifi_scan_due_ = 0;

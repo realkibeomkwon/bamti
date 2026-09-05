@@ -1598,6 +1598,7 @@ bool MenuBar::ShowControlCenter(const RECT& item_rect, ControlCenterPage page) {
   host.popup_hwnd = status_popup_.hwnd();
   host.dispatch = [this](const StatusEvent& ev) { status_.Dispatch(ev); };
   host.live = [this]() { return widgets_.LiveForControlCenter(); };
+  host.bt_scan_result = [this]() { return widgets_.BtScanResult(); };
   host.present = [this]() {
     if (status_popup_.IsOpen()) {
       status_popup_.Present();

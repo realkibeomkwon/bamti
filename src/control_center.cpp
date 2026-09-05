@@ -65,6 +65,7 @@ constexpr wchar_t kLockGlyph[] = L"\xE72E";
 constexpr int kPageHeaderHDip = 48;
 constexpr int kPageRowHDip = 52;
 constexpr int kBtListMax = 8;
+constexpr int kBtScanMax = 8;
 constexpr int kAudioListMax = 8;
 constexpr int kVolumeSliderRowHDip = 28;
 constexpr int kVolumeSliderIconDip = 14;
@@ -443,17 +444,26 @@ struct BluetoothPageMetrics {
   int height = 0;
   int header_y = panel::kTopPadDip;
   int div1_y = 0;
+  int mine_header_y = -1;
   int list_y = -1;
   int list_n = 0;
   int empty_y = -1;
   const wchar_t* empty_text = nullptr;
+  int other_header_y = -1;
+  int found_y = -1;
+  int found_n = 0;
+  int scanning_y = -1;
   int div2_y = 0;
+  int scan_y = -1;
+  const wchar_t* scan_text = nullptr;
   int settings_y = 0;
 };
 
-BluetoothPageMetrics MakeBluetoothPage(bool present, bool on, int device_n) {
+BluetoothPageMetrics MakeBluetoothPage(bool present, bool on, int device_n, int found_n, bool scanning) {
   BluetoothPageMetrics m;
   m.list_n = device_n > 0 ? (std::min)(device_n, kBtListMax) : 0;
+  m.found_n = found_n > 0 ? (std::min)(found_n, kBtScanMax) : 0;
+  const bool show_other = present && on && (scanning || m.found_n > 0);
   panel::Stack s;
   m.header_y = s.Take(panel::kHeaderHDip);
   s.Gap(panel::kHeaderGapDip);
@@ -465,15 +475,38 @@ BluetoothPageMetrics MakeBluetoothPage(bool present, bool on, int device_n) {
   } else if (!on) {
     m.empty_y = s.Take(panel::kRowHDip);
     m.empty_text = L"Bluetooth가 꺼져 있습니다";
-  } else if (m.list_n == 0) {
-    m.empty_y = s.Take(panel::kRowHDip);
-    m.empty_text = L"연결된 장치가 없습니다";
   } else {
-    m.list_y = s.Take(panel::kRowHDip * m.list_n);
+    if (m.list_n > 0) {
+      if (show_other) {
+        m.mine_header_y = s.Take(panel::kSectionHDip);
+      }
+      m.list_y = s.Take(panel::kRowHDip * m.list_n);
+    } else if (!show_other) {
+      m.empty_y = s.Take(panel::kRowHDip);
+      m.empty_text = L"연결된 장치가 없습니다";
+    }
+    if (show_other) {
+      m.other_header_y = s.Take(panel::kSectionHDip);
+      if (m.found_n > 0) {
+        m.found_y = s.Take(panel::kRowHDip * m.found_n);
+      } else {
+        m.scanning_y = s.Take(panel::kRowHDip);
+      }
+    }
   }
   s.Gap(panel::kDivGapDip);
   m.div2_y = s.Take(panel::kDivHDip);
   s.Gap(panel::kDivGapDip);
+  if (present && on) {
+    m.scan_y = s.Take(panel::kSettingsHDip);
+    if (scanning) {
+      m.scan_text = L"검색 중지";
+    } else if (m.found_n > 0) {
+      m.scan_text = L"다시 검색\u2026";
+    } else {
+      m.scan_text = L"장치 추가\u2026";
+    }
+  }
   m.settings_y = s.Take(panel::kSettingsHDip);
   m.height = s.Finish();
   return m;
@@ -1201,6 +1234,17 @@ void ControlCenterContent::Dismissed() {
   CloseWifiPassword();
   StopWlanNotify();
   connecting_ssid_.clear();
+  bt_found_.clear();
+  bt_scan_rev_ = 0;
+  bt_scanning_ = false;
+  if (host_.dispatch) {
+    StatusEvent ev;
+    ev.id = "bamti.widget/bluetooth";
+    ev.event = "toggle";
+    ev.row_id = "bt_scan";
+    ev.on = false;
+    host_.dispatch(ev);
+  }
 }
 
 void ControlCenterContent::Reset(ControlCenterHost host, ControlCenterPage page) {
@@ -1310,6 +1354,24 @@ void ControlCenterContent::ApplyLive() {
   bt_present_ = live.bt_present;
   bt_on_ = live.bt_on;
   bt_can_toggle_ = live.bt_can_toggle;
+  bt_scanning_ = live.bt_scanning;
+  if (live.bt_scan_rev != bt_scan_rev_) {
+    bt_found_.clear();
+    if (host_.bt_scan_result) {
+      const std::vector<BtDeviceInfo> found = host_.bt_scan_result();
+      for (const BtDeviceInfo& d : found) {
+        BtDevice row;
+        row.name = d.name;
+        row.info = d.raw;
+        row.connected = d.connected;
+        row.paired = d.paired;
+        row.battery = d.battery;
+        row.address = d.address;
+        bt_found_.push_back(std::move(row));
+      }
+    }
+    bt_scan_rev_ = live.bt_scan_rev;
+  }
   bt_known_ = true;
   battery_ok_ = live.battery_ok;
   battery_level_ = live.battery_level;
@@ -1548,7 +1610,9 @@ int ControlCenterContent::HeightDip() const {
     return MakeVolumePage(static_cast<int>(audio_outs_.size()), DefaultAudioIsBluetooth(audio_outs_)).height;
   }
   if (page_ == Page::kBluetooth) {
-    return MakeBluetoothPage(bt_present_, bt_on_, static_cast<int>(bt_devices_.size())).height;
+    return MakeBluetoothPage(bt_present_, bt_on_, static_cast<int>(bt_devices_.size()),
+                             static_cast<int>(bt_found_.size()), bt_scanning_)
+        .height;
   }
   if (page_ == Page::kBattery) {
     return MakeBatteryPage(!battery_ac_ && !battery_remain_text_.empty()).height;
@@ -1710,7 +1774,8 @@ void ControlCenterContent::BuildHits(UINT dpi) {
   }
   if (page_ == Page::kBluetooth) {
     const BluetoothPageMetrics m =
-        MakeBluetoothPage(bt_present_, bt_on_, static_cast<int>(bt_devices_.size()));
+        MakeBluetoothPage(bt_present_, bt_on_, static_cast<int>(bt_devices_.size()),
+                          static_cast<int>(bt_found_.size()), bt_scanning_);
     const int width = DipToPx(panel::kWidthDip, dpi);
     const int inset = DipToPx(panel::kInsetDip, dpi);
     if (show_back_) {
@@ -1724,6 +1789,15 @@ void ControlCenterContent::BuildHits(UINT dpi) {
     for (int i = 0; i < m.list_n; ++i) {
       const int top = DipToPx(m.list_y + i * panel::kRowHDip, dpi);
       add(kPageList + i, RECT{inset, top, width - inset, top + DipToPx(panel::kRowHDip, dpi)}, i);
+    }
+    for (int i = 0; i < m.found_n; ++i) {
+      const int top = DipToPx(m.found_y + i * panel::kRowHDip, dpi);
+      add(kPageList + kBtListMax + i, RECT{inset, top, width - inset, top + DipToPx(panel::kRowHDip, dpi)},
+          kBtListMax + i);
+    }
+    if (m.scan_y >= 0) {
+      add(kPageScan, RECT{inset, DipToPx(m.scan_y, dpi), width - inset,
+                          DipToPx(m.scan_y + panel::kSettingsHDip, dpi)});
     }
     add(kPageBtSettings,
         RECT{inset, DipToPx(m.settings_y, dpi), width - inset,
@@ -2243,7 +2317,8 @@ void ControlCenterContent::RenderBluetoothPage(ID2D1RenderTarget* target, UINT d
   const D2D1_COLOR_F fg = ClockTextColor(dark);
   const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
   const BluetoothPageMetrics m =
-      MakeBluetoothPage(bt_present_, bt_on_, static_cast<int>(bt_devices_.size()));
+      MakeBluetoothPage(bt_present_, bt_on_, static_cast<int>(bt_devices_.size()),
+                        static_cast<int>(bt_found_.size()), bt_scanning_);
   const int width = DipToPx(panel::kWidthDip, dpi);
   const int inset = DipToPx(panel::kInsetDip, dpi);
 
@@ -2278,6 +2353,11 @@ void ControlCenterContent::RenderBluetoothPage(ID2D1RenderTarget* target, UINT d
 
   panel::DrawDivider(target, brush, m.div1_y, dpi, dark);
 
+  if (m.mine_header_y >= 0) {
+    panel::DrawSectionHeader(target, dwrite_.Get(), regular12_.Get(), brush, m.mine_header_y, dpi, dark,
+                             L"내 장치");
+  }
+
   if (m.empty_text != nullptr) {
     brush->SetColor(muted);
     DrawTrimmed(target, dwrite_.Get(), regular14_ ? regular14_.Get() : regular12_.Get(), brush,
@@ -2285,7 +2365,7 @@ void ControlCenterContent::RenderBluetoothPage(ID2D1RenderTarget* target, UINT d
                             static_cast<float>(width - inset),
                             static_cast<float>(DipToPx(m.empty_y + panel::kRowHDip, dpi))),
                 m.empty_text);
-  } else {
+  } else if (m.list_y >= 0) {
     const float circle = DipToPxF(static_cast<float>(panel::kCircleDip), dpi);
     for (int i = 0; i < m.list_n; ++i) {
       if (i < 0 || i >= static_cast<int>(bt_devices_.size())) {
@@ -2321,9 +2401,50 @@ void ControlCenterContent::RenderBluetoothPage(ID2D1RenderTarget* target, UINT d
     }
   }
 
+  if (m.other_header_y >= 0) {
+    panel::DrawSectionHeader(target, dwrite_.Get(), regular12_.Get(), brush, m.other_header_y, dpi, dark,
+                             L"다른 장치");
+  }
+  if (m.scanning_y >= 0) {
+    brush->SetColor(muted);
+    DrawTrimmed(target, dwrite_.Get(), regular14_ ? regular14_.Get() : regular12_.Get(), brush,
+                D2D1::RectF(static_cast<float>(inset), static_cast<float>(DipToPx(m.scanning_y, dpi)),
+                            static_cast<float>(width - inset),
+                            static_cast<float>(DipToPx(m.scanning_y + panel::kRowHDip, dpi))),
+                L"검색 중\u2026");
+  } else if (m.found_y >= 0) {
+    const float circle = DipToPxF(static_cast<float>(panel::kCircleDip), dpi);
+    for (int i = 0; i < m.found_n; ++i) {
+      if (i < 0 || i >= static_cast<int>(bt_found_.size())) {
+        continue;
+      }
+      const BtDevice& dev = bt_found_[static_cast<size_t>(i)];
+      const RECT row{inset, DipToPx(m.found_y + i * panel::kRowHDip, dpi), width - inset,
+                     DipToPx(m.found_y + (i + 1) * panel::kRowHDip, dpi)};
+      if (hot_id == kPageList + kBtListMax + i) {
+        panel::FillHover(target, brush, row, dpi, dark);
+      }
+      const float cy = static_cast<float>(row.top + row.bottom) * 0.5f;
+      const float cx = static_cast<float>(row.left) + circle * 0.5f;
+      panel::DrawRowCircle(target, dwrite_.Get(), fluent14_.Get(), brush, cx, cy, dpi, dark, false,
+                           BtClassGlyph(dev.info.ulClassofDevice));
+      const wchar_t* name = dev.name.empty() ? L"알 수 없는 장치" : dev.name.c_str();
+      brush->SetColor(muted);
+      DrawTrimmed(target, dwrite_.Get(), regular14_ ? regular14_.Get() : regular12_.Get(), brush,
+                  D2D1::RectF(static_cast<float>(DipToPx(panel::kTextLeftDip, dpi)), static_cast<float>(row.top),
+                              static_cast<float>(row.right), static_cast<float>(row.bottom)),
+                  name);
+    }
+  }
+
   panel::DrawDivider(target, brush, m.div2_y, dpi, dark);
-  panel::DrawSettingsRow(target, dwrite_.Get(), regular13_ ? regular13_.Get() : regular12_.Get(), brush,
-                         m.settings_y, dpi, dark, hot_id == kPageBtSettings, L"Bluetooth 설정\u2026");
+  IDWriteTextFormat* settings_fmt = regular13_ ? regular13_.Get() : regular12_.Get();
+  if (m.scan_y >= 0 && m.scan_text != nullptr) {
+    panel::DrawSettingsRow(target, dwrite_.Get(), settings_fmt, brush, m.scan_y, dpi, dark, hot_id == kPageScan,
+                           m.scan_text);
+  }
+  panel::DrawSettingsRow(target, dwrite_.Get(), settings_fmt, brush, m.settings_y, dpi, dark,
+                         hot_id == kPageBtSettings, L"Bluetooth 설정\u2026");
 }
 
 void ControlCenterContent::RenderBatteryPage(ID2D1RenderTarget* target, UINT dpi, int hot_id,
@@ -2683,6 +2804,24 @@ void ControlCenterContent::Invoke(int index) {
         }
       }
       break;
+    case kPageScan: {
+      const bool start = !bt_scanning_;
+      if (start) {
+        bt_scanning_ = true;
+      } else {
+        bt_scanning_ = false;
+        bt_found_.clear();
+      }
+      if (host_.dispatch) {
+        StatusEvent ev;
+        ev.id = "bamti.widget/bluetooth";
+        ev.event = "toggle";
+        ev.row_id = "bt_scan";
+        ev.on = start;
+        host_.dispatch(ev);
+      }
+      break;
+    }
     case kPageMore:
     case kPageBtSettings:
       OpenSettingsPage(L"ms-settings:bluetooth");
@@ -2736,7 +2875,7 @@ void ControlCenterContent::Invoke(int index) {
       OpenSettingsPage(L"ms-settings:");
       break;
     default:
-      if (hit.id >= kPageList && hit.id < kPageList + kWifiListTotalMax) {
+      if (hit.id >= kPageList && hit.id < kPageList + kBtListMax + kBtScanMax) {
         const int i = hit.extra;
         if (page_ == Page::kWifi && i >= 0 && i < static_cast<int>(wifi_nets_.size())) {
           const WifiNetwork& net = wifi_nets_[static_cast<size_t>(i)];
@@ -2797,6 +2936,30 @@ void ControlCenterContent::Invoke(int index) {
             list_due_ = 0;
             RefreshPageLists(true);
           }
+        } else if (page_ == Page::kBluetooth && i >= kBtListMax) {
+          const int fi = i - kBtListMax;
+          if (fi >= 0 && fi < static_cast<int>(bt_found_.size())) {
+            BtDevice& dev = bt_found_[static_cast<size_t>(fi)];
+            BLUETOOTH_FIND_RADIO_PARAMS params{};
+            params.dwSize = sizeof(params);
+            HANDLE radio = nullptr;
+            const HBLUETOOTH_RADIO_FIND find = BluetoothFindFirstRadio(&params, &radio);
+            DWORD err = static_cast<DWORD>(-1);
+            if (find != nullptr) {
+              if (radio != nullptr) {
+                err = BluetoothAuthenticateDeviceEx(nullptr, radio, &dev.info, nullptr, MITMProtectionNotRequired);
+                Log(L"cc", L"bt auth %s err=%lu",
+                    dev.name.empty() ? L"알 수 없는 장치" : dev.name.c_str(), static_cast<unsigned long>(err));
+                CloseHandle(radio);
+              }
+              BluetoothFindRadioClose(find);
+            }
+            if (err == ERROR_SUCCESS) {
+              bt_found_.erase(bt_found_.begin() + fi);
+            }
+            list_due_ = 0;
+            RefreshPageLists(true);
+          }
         }
       }
       break;
@@ -2808,10 +2971,10 @@ bool ControlCenterContent::StickyRow(int index) const {
     return false;
   }
   const int id = hits_[static_cast<size_t>(index)].id;
-  if (id == kWifi || id == kBluetooth || id == kPageBack || id == kPageToggle) {
+  if (id == kWifi || id == kBluetooth || id == kPageBack || id == kPageToggle || id == kPageScan) {
     return true;
   }
-  return id >= kPageList && id < kPageList + kWifiListTotalMax;
+  return id >= kPageList && id < kPageList + kBtListMax + kBtScanMax;
 }
 
 void ControlCenterContent::StickyInvoke(int index) {

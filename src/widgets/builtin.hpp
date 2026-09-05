@@ -35,6 +35,7 @@ class BuiltinWidgets : public StatusSource {
   void SetSettings(const WidgetSettings& next);
   void NotePowerEvent(bool resumed);
   ControlCenterLive LiveForControlCenter() const;
+  std::vector<BtDeviceInfo> BtScanResult() const;
 
  private:
   enum class PendingAction {
@@ -87,6 +88,11 @@ class BuiltinWidgets : public StatusSource {
   std::optional<bool> pending_bt_on_;
   std::optional<bool> pending_saver_on_;
   bool pending_volume_device_ = false;
+  bool pending_bt_scan_ = false;
+  bool bt_scanning_ = false;
+  uint64_t bt_scan_rev_ = 0;
+  std::vector<BtDeviceInfo> bt_scan_result_;
+  bool bt_scan_discard_ = false;
   std::unique_ptr<VolumeControl> volume_;
   bool logged_notify_latency_ = false;
   ULONGLONG battery_due_ = 0;
