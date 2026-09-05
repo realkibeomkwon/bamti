@@ -12,6 +12,8 @@ D2D1_COLOR_F MenuItemHoverFill(bool dark, bool pressed);
 D2D1_COLOR_F DockFillColor(bool dark);
 D2D1_COLOR_F DockStrokeColor(bool dark);
 D2D1_COLOR_F DockIndicatorColor(bool dark);
+D2D1_COLOR_F DockLabelFill(bool dark);
+D2D1_COLOR_F DockLabelText(bool dark);
 D2D1_COLOR_F AccentFillColor(bool dark);
 D2D1_COLOR_F AccentOnColor(bool dark);
 D2D1_COLOR_F CardFillColor(bool dark);

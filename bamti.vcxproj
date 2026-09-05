@@ -53,7 +53,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>dwmapi.lib;d2d1.lib;dwrite.lib;shell32.lib;user32.lib;gdi32.lib;uxtheme.lib;ole32.lib;oleaut32.lib;advapi32.lib;shcore.lib;comctl32.lib;propsys.lib;uuid.lib;msimg32.lib;windowscodecs.lib;powrprof.lib;imm32.lib;shlwapi.lib;winmm.lib;iphlpapi.lib;wtsapi32.lib;uiautomationcore.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwmapi.lib;d2d1.lib;dwrite.lib;shell32.lib;user32.lib;gdi32.lib;uxtheme.lib;ole32.lib;oleaut32.lib;advapi32.lib;shcore.lib;comctl32.lib;propsys.lib;uuid.lib;msimg32.lib;windowscodecs.lib;powrprof.lib;imm32.lib;shlwapi.lib;winmm.lib;iphlpapi.lib;wtsapi32.lib;uiautomationcore.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -94,6 +94,7 @@
     <ClCompile Include="src\fullscreen.cpp" />
     <ClCompile Include="src\task_list.cpp" />
     <ClCompile Include="src\dock.cpp" />
+    <ClCompile Include="src\dock_label.cpp" />
     <ClCompile Include="src\popup_surface.cpp" />
     <ClCompile Include="src\wifi_password.cpp" />
     <ClCompile Include="src\start_menu.cpp" />
@@ -120,6 +121,7 @@
     <ClInclude Include="src\fullscreen.hpp" />
     <ClInclude Include="src\task_list.hpp" />
     <ClInclude Include="src\dock.hpp" />
+    <ClInclude Include="src\dock_label.hpp" />
     <ClInclude Include="src\popup_surface.hpp" />
     <ClInclude Include="src\wifi_password.hpp" />
     <ClInclude Include="src\start_menu.hpp" />

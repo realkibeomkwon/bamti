@@ -1,6 +1,7 @@
 #pragma once
 
 #include "corner.hpp"
+#include "dock_label.hpp"
 #include "popup_surface.hpp"
 #include "task_list.hpp"
 
@@ -45,8 +46,8 @@ class Dock {
   LRESULT HandleHot(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
   bool RegisterClasses(HINSTANCE instance);
-  bool CreateTooltip();
   void ApplyBackdrop();
+  void UpdateHoverLabel();
   void Layout();
   void LayoutHot();
   void Paint();
@@ -104,7 +105,6 @@ class Dock {
   HWND hwnd_ = nullptr;
   HWND bar_hwnd_ = nullptr;
   HWND hot_hwnd_ = nullptr;
-  HWND tooltip_ = nullptr;
   bool shown_ = false;
   bool fullscreen_occluded_ = false;
   bool dark_ = true;
@@ -138,8 +138,8 @@ class Dock {
   HGDIOBJ layered_old_ = nullptr;
   int layered_w_ = 0;
   int layered_h_ = 0;
-  std::wstring tooltip_text_;
   std::vector<HWINEVENTHOOK> hooks_;
+  DockLabel label_;
   PopupSurface popup_;
   PopupSurface submenu_;
   std::unique_ptr<DockMenuContent> menu_content_;

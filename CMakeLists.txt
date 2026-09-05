@@ -26,15 +26,16 @@ add_executable(bamti WIN32
   src/status_registry.cpp
   src/status_panel.cpp
   src/control_center.cpp
+  src/wifi_password.cpp
   src/widgets/brightness.cpp
   src/widgets/brightness_wmi.cpp
   src/taskbar_controller.cpp
   src/fullscreen.cpp
   src/task_list.cpp
   src/dock.cpp
+  src/dock_label.cpp
   src/autostart.cpp
   src/popup_surface.cpp
-  src/wifi_password.cpp
   src/bar_menu.cpp
   src/start_menu.cpp
   src/spotlight.cpp
@@ -106,6 +107,7 @@ target_link_libraries(bamti PRIVATE
   wbemuuid
   taskschd
   secur32
+  version
 )
 
 set_property(TARGET bamti PROPERTY VS_DPI_AWARE "PerMonitor")

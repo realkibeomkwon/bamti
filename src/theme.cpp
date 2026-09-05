@@ -64,6 +64,20 @@ D2D1_COLOR_F DockIndicatorColor(bool dark) {
   return D2D1::ColorF(0.22f, 0.22f, 0.22f, 0.55f);
 }
 
+D2D1_COLOR_F DockLabelFill(bool dark) {
+  if (dark) {
+    return D2D1::ColorF(0.16f, 0.16f, 0.16f, 0.95f);
+  }
+  return D2D1::ColorF(0.96f, 0.96f, 0.96f, 0.95f);
+}
+
+D2D1_COLOR_F DockLabelText(bool dark) {
+  if (dark) {
+    return D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.92f);
+  }
+  return D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.85f);
+}
+
 D2D1_COLOR_F AccentFillColor(bool dark) {
   return dark ? D2D1::ColorF(0x0A84FF) : D2D1::ColorF(0x0078D4);
 }

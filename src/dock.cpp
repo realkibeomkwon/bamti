@@ -40,23 +40,29 @@
 namespace bamti {
 namespace {
 
-constexpr int kIconDip = 36;
-constexpr int kSlotDip = 64;
+constexpr int kIconDip = 40;
+constexpr int kSlotDip = 52;
 constexpr int kHeightDip = 64;
-constexpr int kHoverInsetDip = 4;
-constexpr int kPadXDip = 10;
+constexpr int kPadXDip = 12;
 constexpr int kGroupGapDip = 12;
 constexpr int kDragSlopDip = 6;
 constexpr int kMarginBottomDip = 8;
 constexpr int kHotDip = 8;
+// 맥 독 우클릭 메뉴는 일반 NSMenu(22)보다 행이 높다. 13pt 글자에 위아래
+// 여유를 두면 행 30, 바깥 6, 구분 11 이 스크린샷과 맞는다.
 constexpr int kMenuPadDip = 6;
-constexpr int kMenuRowDip = 28;
-constexpr int kMenuSepDip = 8;
-constexpr int kMenuMinWidthDip = 168;
+constexpr int kMenuRowDip = 30;
+constexpr int kMenuSepDip = 11;
+constexpr int kMenuMinWidthDip = 160;
 constexpr int kMenuMaxWidthDip = 280;
-constexpr int kMenuTextPadDip = 12;
-constexpr int kMenuCheckDip = 16;
-constexpr int kMenuArrowDip = 14;
+constexpr int kMenuCheckDip = 18;
+constexpr int kMenuArrowDip = 16;
+constexpr int kMenuHoverRadiusDip = 6;
+// 강조 칠이 행을 꽉 채우지 않게 위아래로 물러나는 양.
+// 맥 메뉴는 강조가 행의 70% 정도만 차지한다.
+constexpr int kMenuHoverInsetDip = 4;
+constexpr int kMenuCornerDip = 10;
+constexpr int kGroupSepInsetDip = 8;
 constexpr UINT kHideDelayMs = 100;
 constexpr UINT kRebuildDelayMs = 300;
 constexpr UINT_PTR kHideTimerId = 1;
@@ -859,6 +865,165 @@ struct DockMenuRow {
   bool submenu = false;
 };
 
+namespace {
+
+struct DockMenuMetrics {
+  int pad = 0;
+  int row_h = 0;
+  int sep_h = 0;
+  int check_w = 0;
+  int arrow_w = 0;
+};
+
+DockMenuMetrics MakeDockMenuMetrics(UINT dpi) {
+  return DockMenuMetrics{
+      DipToPx(kMenuPadDip, dpi),
+      DipToPx(kMenuRowDip, dpi),
+      DipToPx(kMenuSepDip, dpi),
+      DipToPx(kMenuCheckDip, dpi),
+      DipToPx(kMenuArrowDip, dpi),
+  };
+}
+
+SIZE MeasureDockMenuRows(const std::vector<DockMenuRow>& rows, UINT dpi) {
+  const DockMenuMetrics m = MakeDockMenuMetrics(dpi);
+  int text_w = 0;
+  for (const DockMenuRow& row : rows) {
+    if (row.separator || row.text.empty()) {
+      continue;
+    }
+    text_w = (std::max)(text_w, static_cast<int>(PopupTextWidth(dpi, row.text) + 0.5f));
+  }
+  int width = text_w + m.pad * 2 + m.check_w + m.arrow_w;
+  width = (std::max)(width, DipToPx(kMenuMinWidthDip, dpi));
+  width = (std::min)(width, DipToPx(kMenuMaxWidthDip, dpi));
+  int height = m.pad * 2;
+  for (const DockMenuRow& row : rows) {
+    height += row.separator ? m.sep_h : m.row_h;
+  }
+  return SIZE{width, height};
+}
+
+RECT DockMenuRowRectOf(const std::vector<DockMenuRow>& rows, int index, UINT dpi, int width) {
+  RECT result{};
+  if (index < 0 || index >= static_cast<int>(rows.size())) {
+    return result;
+  }
+  const DockMenuMetrics m = MakeDockMenuMetrics(dpi);
+  int y = m.pad;
+  for (int i = 0; i < index; ++i) {
+    y += rows[static_cast<size_t>(i)].separator ? m.sep_h : m.row_h;
+  }
+  const int h = rows[static_cast<size_t>(index)].separator ? m.sep_h : m.row_h;
+  result = {m.pad, y, width - m.pad, y + h};
+  return result;
+}
+
+void DrawDockMenuStroke(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, ID2D1StrokeStyle* style,
+                        const D2D1_POINT_2F* pts, UINT count, float stroke_px) {
+  if (target == nullptr || brush == nullptr || pts == nullptr || count < 2) {
+    return;
+  }
+  for (UINT i = 1; i < count; ++i) {
+    target->DrawLine(pts[i - 1], pts[i], brush, stroke_px, style);
+  }
+}
+
+void DrawDockMenuCheck(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, ID2D1StrokeStyle* style,
+                       const D2D1_RECT_F& col, UINT dpi) {
+  const float s = static_cast<float>(dpi) / 96.0f;
+  const float cx = (col.left + col.right) * 0.5f;
+  const float cy = (col.top + col.bottom) * 0.5f;
+  const D2D1_POINT_2F pts[] = {
+      D2D1::Point2F(cx - 4.2f * s, cy + 0.3f * s),
+      D2D1::Point2F(cx - 1.1f * s, cy + 3.2f * s),
+      D2D1::Point2F(cx + 4.6f * s, cy - 3.5f * s),
+  };
+  DrawDockMenuStroke(target, brush, style, pts, 3, 1.7f * s);
+}
+
+void DrawDockMenuChevron(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, ID2D1StrokeStyle* style,
+                         const D2D1_RECT_F& col, UINT dpi) {
+  const float s = static_cast<float>(dpi) / 96.0f;
+  const float cx = col.right - 6.5f * s;
+  const float cy = (col.top + col.bottom) * 0.5f;
+  const D2D1_POINT_2F pts[] = {
+      D2D1::Point2F(cx - 2.4f * s, cy - 4.0f * s),
+      D2D1::Point2F(cx + 1.8f * s, cy),
+      D2D1::Point2F(cx - 2.4f * s, cy + 4.0f * s),
+  };
+  DrawDockMenuStroke(target, brush, style, pts, 3, 1.5f * s);
+}
+
+void RenderDockMenuRows(ID2D1RenderTarget* target, UINT dpi, int hot, bool dark,
+                        const std::vector<DockMenuRow>& rows) {
+  if (target == nullptr) {
+    return;
+  }
+  const D2D1_SIZE_F sz = target->GetSize();
+  const int width = static_cast<int>(sz.width);
+  const DockMenuMetrics m = MakeDockMenuMetrics(dpi);
+  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> ink;
+  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover;
+  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> line;
+  const D2D1_COLOR_F text_c = ClockTextColor(dark);
+  const D2D1_COLOR_F hot_text_c = AccentOnColor(dark);
+  const D2D1_COLOR_F hover_c = AccentFillColor(dark);
+  const D2D1_COLOR_F line_c = DockStrokeColor(dark);
+  target->CreateSolidColorBrush(text_c, ink.GetAddressOf());
+  target->CreateSolidColorBrush(hover_c, hover.GetAddressOf());
+  target->CreateSolidColorBrush(D2D1::ColorF(line_c.r, line_c.g, line_c.b, line_c.a), line.GetAddressOf());
+  ID2D1Factory* factory = nullptr;
+  target->GetFactory(&factory);
+  Microsoft::WRL::ComPtr<ID2D1StrokeStyle> stroke_style;
+  if (factory != nullptr) {
+    factory->CreateStrokeStyle(
+        D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+                                    D2D1_LINE_JOIN_ROUND, 2.0f),
+        nullptr, 0, stroke_style.GetAddressOf());
+  }
+  const float hover_r = corner::ToPx(kMenuHoverRadiusDip, dpi);
+  for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+    const DockMenuRow& row = rows[static_cast<size_t>(i)];
+    const RECT rc = DockMenuRowRectOf(rows, i, dpi, width);
+    const D2D1_RECT_F box = D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
+                                        static_cast<float>(rc.right), static_cast<float>(rc.bottom));
+    if (row.separator) {
+      if (!line) {
+        continue;
+      }
+      const float y = static_cast<float>(rc.top + (rc.bottom - rc.top) / 2) + 0.5f;
+      target->DrawLine(D2D1::Point2F(box.left, y), D2D1::Point2F(box.right, y), line.Get(), 1.0f);
+      continue;
+    }
+    const bool selected = i == hot;
+    if (selected && hover) {
+      const float inset = corner::ToPx(kMenuHoverInsetDip, dpi);
+      const D2D1_RECT_F fill_box{box.left, box.top + inset, box.right, box.bottom - inset};
+      const float rr = corner::ClampPx(hover_r, fill_box.right - fill_box.left, fill_box.bottom - fill_box.top);
+      target->FillRoundedRectangle(D2D1_ROUNDED_RECT{fill_box, rr, rr}, hover.Get());
+    }
+    if (!ink) {
+      continue;
+    }
+    ink->SetColor(selected ? hot_text_c : text_c);
+    if (row.checked) {
+      DrawDockMenuCheck(target, ink.Get(), stroke_style.Get(),
+                        D2D1::RectF(box.left, box.top, box.left + static_cast<float>(m.check_w), box.bottom), dpi);
+    }
+    DrawPopupText(target, dpi, row.text,
+                  D2D1::RectF(box.left + static_cast<float>(m.check_w), box.top,
+                              box.right - static_cast<float>(m.arrow_w), box.bottom),
+                  ink.Get());
+    if (row.submenu) {
+      DrawDockMenuChevron(target, ink.Get(), stroke_style.Get(),
+                          D2D1::RectF(box.right - static_cast<float>(m.arrow_w), box.top, box.right, box.bottom), dpi);
+    }
+  }
+}
+
+}  // namespace
+
 class DockMenuContent : public PopupContent {
  public:
   void Reset(Dock* owner, const DockApp& app) {
@@ -963,86 +1128,12 @@ class DockMenuContent : public PopupContent {
     return true;
   }
 
-  SIZE Measure(UINT dpi) override {
-    const int pad = DipToPx(kMenuPadDip, dpi);
-    const int row_h = DipToPx(kMenuRowDip, dpi);
-    const int sep_h = DipToPx(kMenuSepDip, dpi);
-    const int text_pad = DipToPx(kMenuTextPadDip, dpi);
-    const int check_w = DipToPx(kMenuCheckDip, dpi);
-    const int arrow_w = DipToPx(kMenuArrowDip, dpi);
-    int text_w = 0;
-    for (const DockMenuRow& row : rows_) {
-      if (row.separator || row.text.empty()) {
-        continue;
-      }
-      text_w = (std::max)(text_w, static_cast<int>(PopupTextWidth(dpi, row.text) + 0.5f));
-    }
-    int width = text_w + pad * 2 + text_pad * 2 + check_w + arrow_w;
-    width = (std::max)(width, DipToPx(kMenuMinWidthDip, dpi));
-    width = (std::min)(width, DipToPx(kMenuMaxWidthDip, dpi));
-    int height = pad * 2;
-    for (const DockMenuRow& row : rows_) {
-      height += row.separator ? sep_h : row_h;
-    }
-    return SIZE{width, height};
-  }
+  int CornerDip() const override { return kMenuCornerDip; }
+
+  SIZE Measure(UINT dpi) override { return MeasureDockMenuRows(rows_, dpi); }
 
   void Render(ID2D1RenderTarget* target, UINT dpi, int hot) override {
-    if (target == nullptr) {
-      return;
-    }
-    const D2D1_SIZE_F sz = target->GetSize();
-    const RECT client{0, 0, static_cast<LONG>(sz.width), static_cast<LONG>(sz.height)};
-    const bool dark = owner_ != nullptr ? owner_->dark_ : true;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> text;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> line;
-    const D2D1_COLOR_F text_c = ClockTextColor(dark);
-    const D2D1_COLOR_F hover_c = MenuItemHoverFill(dark, false);
-    const D2D1_COLOR_F line_c = DockStrokeColor(dark);
-    target->CreateSolidColorBrush(D2D1::ColorF(text_c.r, text_c.g, text_c.b, 1.0f), text.GetAddressOf());
-    target->CreateSolidColorBrush(hover_c, hover.GetAddressOf());
-    target->CreateSolidColorBrush(D2D1::ColorF(line_c.r, line_c.g, line_c.b, line_c.a), line.GetAddressOf());
-    const int text_pad = DipToPx(kMenuTextPadDip, dpi);
-    const int check_w = DipToPx(kMenuCheckDip, dpi);
-    const int arrow_w = DipToPx(kMenuArrowDip, dpi);
-    for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
-      const DockMenuRow& row = rows_[static_cast<size_t>(i)];
-      const RECT rc = RowRect(i, dpi, client.right);
-      if (row.separator) {
-        if (!line) {
-          continue;
-        }
-        const float y = static_cast<float>(rc.top + (rc.bottom - rc.top) / 2) + 0.5f;
-        target->DrawLine(D2D1::Point2F(static_cast<float>(rc.left), y),
-                         D2D1::Point2F(static_cast<float>(rc.right), y), line.Get(), 1.0f);
-        continue;
-      }
-      if (i == hot && hover) {
-        target->FillRectangle(
-            D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top), static_cast<float>(rc.right),
-                        static_cast<float>(rc.bottom)),
-            hover.Get());
-      }
-      if (text) {
-        if (row.checked) {
-          DrawPopupText(target, dpi, L"\u2713",
-                        D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
-                                    static_cast<float>(rc.left + check_w), static_cast<float>(rc.bottom)),
-                        text.Get());
-        }
-        DrawPopupText(target, dpi, row.text,
-                      D2D1::RectF(static_cast<float>(rc.left + check_w), static_cast<float>(rc.top),
-                                  static_cast<float>(rc.right - arrow_w), static_cast<float>(rc.bottom)),
-                      text.Get());
-        if (row.submenu) {
-          DrawPopupText(target, dpi, L"\u203A",
-                        D2D1::RectF(static_cast<float>(rc.right - arrow_w), static_cast<float>(rc.top),
-                                    static_cast<float>(rc.right - text_pad / 4), static_cast<float>(rc.bottom)),
-                        text.Get());
-        }
-      }
-    }
+    RenderDockMenuRows(target, dpi, hot, owner_ != nullptr ? owner_->dark_ : true, rows_);
   }
 
   int HitTest(POINT client, UINT dpi) const override {
@@ -1079,22 +1170,7 @@ class DockMenuContent : public PopupContent {
   }
 
  private:
-  RECT RowRect(int index, UINT dpi, int width) const {
-    RECT result{};
-    if (index < 0 || index >= static_cast<int>(rows_.size())) {
-      return result;
-    }
-    const int pad = DipToPx(kMenuPadDip, dpi);
-    const int row_h = DipToPx(kMenuRowDip, dpi);
-    const int sep_h = DipToPx(kMenuSepDip, dpi);
-    int y = pad;
-    for (int i = 0; i < index; ++i) {
-      y += rows_[static_cast<size_t>(i)].separator ? sep_h : row_h;
-    }
-    const int h = rows_[static_cast<size_t>(index)].separator ? sep_h : row_h;
-    result = {pad, y, width - pad, y + h};
-    return result;
-  }
+  RECT RowRect(int index, UINT dpi, int width) const { return DockMenuRowRectOf(rows_, index, dpi, width); }
 
   Dock* owner_ = nullptr;
   DockApp app_{};
@@ -1127,68 +1203,12 @@ class DockSubmenuContent : public PopupContent {
 
   bool empty() const { return rows_.empty(); }
   int RowCount() const override { return static_cast<int>(rows_.size()); }
+  int CornerDip() const override { return kMenuCornerDip; }
 
-  SIZE Measure(UINT dpi) override {
-    const int pad = DipToPx(kMenuPadDip, dpi);
-    const int row_h = DipToPx(kMenuRowDip, dpi);
-    const int sep_h = DipToPx(kMenuSepDip, dpi);
-    const int text_pad = DipToPx(kMenuTextPadDip, dpi);
-    const int check_w = DipToPx(kMenuCheckDip, dpi);
-    const int arrow_w = DipToPx(kMenuArrowDip, dpi);
-    int text_w = 0;
-    for (const DockMenuRow& row : rows_) {
-      if (row.separator || row.text.empty()) {
-        continue;
-      }
-      text_w = (std::max)(text_w, static_cast<int>(PopupTextWidth(dpi, row.text) + 0.5f));
-    }
-    int width = text_w + pad * 2 + text_pad * 2 + check_w + arrow_w;
-    width = (std::max)(width, DipToPx(kMenuMinWidthDip, dpi));
-    width = (std::min)(width, DipToPx(kMenuMaxWidthDip, dpi));
-    int height = pad * 2;
-    for (const DockMenuRow& row : rows_) {
-      height += row.separator ? sep_h : row_h;
-    }
-    return SIZE{width, height};
-  }
+  SIZE Measure(UINT dpi) override { return MeasureDockMenuRows(rows_, dpi); }
 
   void Render(ID2D1RenderTarget* target, UINT dpi, int hot) override {
-    if (target == nullptr) {
-      return;
-    }
-    const D2D1_SIZE_F sz = target->GetSize();
-    const RECT client{0, 0, static_cast<LONG>(sz.width), static_cast<LONG>(sz.height)};
-    const bool dark = owner_ != nullptr ? owner_->dark_ : true;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> text;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover;
-    const D2D1_COLOR_F text_c = ClockTextColor(dark);
-    const D2D1_COLOR_F hover_c = MenuItemHoverFill(dark, false);
-    target->CreateSolidColorBrush(D2D1::ColorF(text_c.r, text_c.g, text_c.b, 1.0f), text.GetAddressOf());
-    target->CreateSolidColorBrush(hover_c, hover.GetAddressOf());
-    const int check_w = DipToPx(kMenuCheckDip, dpi);
-    const int arrow_w = DipToPx(kMenuArrowDip, dpi);
-    for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
-      const DockMenuRow& row = rows_[static_cast<size_t>(i)];
-      const RECT rc = RowRect(i, dpi, client.right);
-      if (i == hot && hover) {
-        target->FillRectangle(
-            D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top), static_cast<float>(rc.right),
-                        static_cast<float>(rc.bottom)),
-            hover.Get());
-      }
-      if (text) {
-        if (row.checked) {
-          DrawPopupText(target, dpi, L"\u2713",
-                        D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
-                                    static_cast<float>(rc.left + check_w), static_cast<float>(rc.bottom)),
-                        text.Get());
-        }
-        DrawPopupText(target, dpi, row.text,
-                      D2D1::RectF(static_cast<float>(rc.left + check_w), static_cast<float>(rc.top),
-                                  static_cast<float>(rc.right - arrow_w), static_cast<float>(rc.bottom)),
-                      text.Get());
-      }
-    }
+    RenderDockMenuRows(target, dpi, hot, owner_ != nullptr ? owner_->dark_ : true, rows_);
   }
 
   int HitTest(POINT client, UINT dpi) const override {
@@ -1225,22 +1245,7 @@ class DockSubmenuContent : public PopupContent {
   }
 
  private:
-  RECT RowRect(int index, UINT dpi, int width) const {
-    RECT result{};
-    if (index < 0 || index >= static_cast<int>(rows_.size())) {
-      return result;
-    }
-    const int pad = DipToPx(kMenuPadDip, dpi);
-    const int row_h = DipToPx(kMenuRowDip, dpi);
-    const int sep_h = DipToPx(kMenuSepDip, dpi);
-    int y = pad;
-    for (int i = 0; i < index; ++i) {
-      y += rows_[static_cast<size_t>(i)].separator ? sep_h : row_h;
-    }
-    const int h = rows_[static_cast<size_t>(index)].separator ? sep_h : row_h;
-    result = {pad, y, width - pad, y + h};
-    return result;
-  }
+  RECT RowRect(int index, UINT dpi, int width) const { return DockMenuRowRectOf(rows_, index, dpi, width); }
 
   Dock* owner_ = nullptr;
   DockApp app_{};
@@ -1266,6 +1271,7 @@ Dock::~Dock() {
   StopFullscreenWatch(hwnd_);
   submenu_.Destroy();
   popup_.Destroy();
+  label_.Destroy();
   if (hwnd_ != nullptr) {
     DestroyWindow(hwnd_);
     hwnd_ = nullptr;
@@ -1328,7 +1334,9 @@ bool Dock::Create(HINSTANCE instance, HWND bar_hwnd) {
 
   g_notify = hwnd_;
   ApplyBackdrop();
-  CreateTooltip();
+  if (!label_.Create(instance, hwnd_)) {
+    Log(L"dock", L"label create failed err=%lu", GetLastError());
+  }
   Rebuild();
   LayoutHot();
   ShowWindow(hot_hwnd_, SW_SHOWNA);
@@ -1362,24 +1370,6 @@ bool Dock::Create(HINSTANCE instance, HWND bar_hwnd) {
   RefreshFullscreen();
   Log(L"perf", L"display refresh=%dHz", DisplayRefreshHz());
   Log(L"dock", L"ready hwnd=%p items=%zu", hwnd_, items_.size());
-  return true;
-}
-
-bool Dock::CreateTooltip() {
-  tooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, 0, 0, 0,
-                             0, hwnd_, nullptr, GetModuleHandleW(nullptr), nullptr);
-  if (tooltip_ == nullptr) {
-    return false;
-  }
-  SendMessageW(tooltip_, TTM_SETMAXTIPWIDTH, 0, 320);
-  TOOLINFOW info{};
-  info.cbSize = sizeof(info);
-  info.uFlags = TTF_SUBCLASS | TTF_TRANSPARENT;
-  info.hwnd = hwnd_;
-  info.uId = 1;
-  GetClientRect(hwnd_, &info.rect);
-  info.lpszText = LPSTR_TEXTCALLBACKW;
-  SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&info));
   return true;
 }
 
@@ -1598,6 +1588,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         ResetIconCache();
         EnsureIcons();
         RenderLayered();
+        UpdateHoverLabel();
       }
       return 0;
     }
@@ -1621,6 +1612,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         hover_ = hit;
         if (!dragging_) {
           RenderLayered();
+          UpdateHoverLabel();
         }
       }
       return 0;
@@ -1632,6 +1624,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         if (shown_ && !dragging_) {
           RenderLayered();
         }
+        UpdateHoverLabel();
       }
       if (!PointerOverUi()) {
         StartHideTimer();
@@ -1726,23 +1719,6 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     }
     case WM_COMMAND:
       return 0;
-    case WM_NOTIFY: {
-      auto* header = reinterpret_cast<NMHDR*>(lparam);
-      if (header->code == TTN_GETDISPINFOW) {
-        auto* info = reinterpret_cast<NMTTDISPINFOW*>(lparam);
-        POINT pt{};
-        GetCursorPos(&pt);
-        ScreenToClient(hwnd_, &pt);
-        const int index = HitTest(pt);
-        if (index >= 0 && index < static_cast<int>(items_.size())) {
-          tooltip_text_ = items_[static_cast<size_t>(index)].display_name;
-          info->lpszText = tooltip_text_.data();
-        } else {
-          info->lpszText = const_cast<wchar_t*>(L"");
-        }
-      }
-      return 0;
-    }
     case WM_DESTROY:
       KillTimer(hwnd_, kHideTimerId);
       KillTimer(hwnd_, kPollTimerId);
@@ -1755,6 +1731,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       StopFullscreenWatch(hwnd_);
       submenu_.Destroy();
       popup_.Destroy();
+      label_.Destroy();
       if (g_notify == hwnd_) {
         g_notify = nullptr;
       }
@@ -2188,16 +2165,9 @@ void Dock::Layout() {
     SnapAnimX();
   }
 
-  if (tooltip_ != nullptr) {
-    TOOLINFOW ti{};
-    ti.cbSize = sizeof(ti);
-    ti.hwnd = hwnd_;
-    ti.uId = 1;
-    GetClientRect(hwnd_, &ti.rect);
-    SendMessageW(tooltip_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&ti));
-  }
   if (shown_) {
     RenderLayered();
+    UpdateHoverLabel();
   }
 }
 
@@ -2250,7 +2220,7 @@ void Dock::RenderLayered() {
 
   const UINT dpi = Dpi();
   const float radius =
-      corner::ClampPx(corner::ToPx(corner::kHeroDip, dpi), static_cast<float>(width), static_cast<float>(height));
+      corner::ClampPx(corner::ToPx(corner::kDockDip, dpi), static_cast<float>(width), static_cast<float>(height));
   const D2D1_RECT_F pill =
       D2D1::RectF(0.5f, 0.5f, static_cast<float>(width) - 0.5f, static_cast<float>(height) - 0.5f);
   const D2D1_ROUNDED_RECT rounded{pill, radius, radius};
@@ -2259,11 +2229,9 @@ void Dock::RenderLayered() {
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> fill;
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> stroke;
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> indicator;
-  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover_fill;
   rt->CreateSolidColorBrush(DockFillColor(dark_), fill.GetAddressOf());
   rt->CreateSolidColorBrush(DockStrokeColor(dark_), stroke.GetAddressOf());
   rt->CreateSolidColorBrush(DockIndicatorColor(dark_), indicator.GetAddressOf());
-  rt->CreateSolidColorBrush(MenuItemHoverFill(dark_, false), hover_fill.GetAddressOf());
   if (fill) {
     if (squircle != nullptr) {
       rt->FillGeometry(squircle, fill.Get());
@@ -2321,22 +2289,14 @@ void Dock::RenderLayered() {
     if (!dragging_ && static_cast<int>(i) == pressed_) {
       y += static_cast<float>(Dip(1));
     }
-    if (!dragging_ && hover_ == static_cast<int>(slot_i) && hover_fill) {
-      const float inset = static_cast<float>(Dip(kHoverInsetDip));
-      const float hover_h = static_cast<float>(slot.bottom - slot.top) - inset * 2.0f;
-      const float rr = corner::HoverPx(hover_h, dpi);
-      const D2D1_ROUNDED_RECT bg{
-          D2D1::RectF(static_cast<float>(slot.left) + inset, static_cast<float>(slot.top) + inset,
-                      static_cast<float>(slot.right) - inset, static_cast<float>(slot.bottom) - inset),
-          rr, rr};
-      rt->FillRoundedRectangle(bg, hover_fill.Get());
-    }
     draw_icon(i, x, y, 1.0f);
     if (items_[i].kind != DockItemKind::kSpotlight && items_[i].running && indicator) {
       const float dot_w = static_cast<float>(Dip(10));
       const float dot_h = static_cast<float>(Dip(3));
       const float dx = x + (static_cast<float>(icon_px) - dot_w) * 0.5f;
-      const float dy = static_cast<float>(height - Dip(10));
+      const float icon_bottom = static_cast<float>((height - icon_px) / 2 + icon_px);
+      const float pad_below = static_cast<float>(height) - icon_bottom;
+      const float dy = icon_bottom + (pad_below - dot_h) * 0.5f;
       const D2D1_ROUNDED_RECT dot{D2D1::RectF(dx, dy, dx + dot_w, dy + dot_h), corner::PillPx(dot_h),
                                  corner::PillPx(dot_h)};
       rt->FillRoundedRectangle(dot, indicator.Get());
@@ -2347,8 +2307,8 @@ void Dock::RenderLayered() {
     const RECT& left = slots_[static_cast<size_t>(pinned - 1)];
     const RECT& right = slots_[static_cast<size_t>(pinned)];
     const float mid = (static_cast<float>(left.right) + static_cast<float>(right.left)) * 0.5f;
-    const float top = static_cast<float>(Dip(18));
-    const float bottom = static_cast<float>(height - Dip(18));
+    const float top = static_cast<float>(Dip(kGroupSepInsetDip));
+    const float bottom = static_cast<float>(height - Dip(kGroupSepInsetDip));
     rt->DrawLine(D2D1::Point2F(mid, top), D2D1::Point2F(mid, bottom), stroke.Get(), 1.0f);
   }
 
@@ -2390,6 +2350,8 @@ void Dock::ShowPill() {
 void Dock::HidePill() {
   leave_armed_ = false;
   CancelHideTimer();
+  hover_ = -1;
+  label_.Hide();
   if (popup_.IsOpen()) {
     popup_.Close();
   }
@@ -2397,7 +2359,6 @@ void Dock::HidePill() {
     EndDrag(false);
   }
   pressed_ = -1;
-  hover_ = -1;
   if (!shown_) {
     UpdateIdleTimer();
     return;
@@ -2408,6 +2369,21 @@ void Dock::HidePill() {
     StopDragAnimTimer(true);
   }
   UpdateIdleTimer();
+}
+
+void Dock::UpdateHoverLabel() {
+  if (!shown_ || dragging_ || fullscreen_occluded_ || popup_.IsOpen() || hover_ < 0 ||
+      hover_ >= static_cast<int>(items_.size()) || hover_ >= static_cast<int>(slots_.size())) {
+    label_.Hide();
+    return;
+  }
+  RECT dock{};
+  GetWindowRect(hwnd_, &dock);
+  const int icon_px = Dip(kIconDip);
+  const float x = SlotIconX(static_cast<size_t>(hover_));
+  POINT center{static_cast<int>(x + static_cast<float>(icon_px) * 0.5f + 0.5f), 0};
+  ClientToScreen(hwnd_, &center);
+  label_.Show(items_[static_cast<size_t>(hover_)].display_name, center, dock.top, dark_);
 }
 
 void Dock::StartHideTimer() {
@@ -2510,6 +2486,9 @@ void Dock::RaiseOverlays() {
   if (submenu_.IsOpen() && submenu_.hwnd() != nullptr) {
     SetWindowPos(submenu_.hwnd(), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
   }
+  if (label_.IsShown() && label_.hwnd() != nullptr) {
+    SetWindowPos(label_.hwnd(), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  }
 }
 
 void Dock::SetOverlaysTopmost(bool topmost) {
@@ -2523,6 +2502,9 @@ void Dock::SetOverlaysTopmost(bool topmost) {
   }
   if (shown_ && hwnd_ != nullptr) {
     SetWindowPos(hwnd_, z, 0, 0, 0, 0, flags);
+  }
+  if (label_.hwnd() != nullptr) {
+    SetWindowPos(label_.hwnd(), z, 0, 0, 0, 0, flags);
   }
 }
 
@@ -2539,9 +2521,7 @@ void Dock::OpenDockMenu(POINT screen, int index) {
   CloseOptionsSubmenu(L"reopen");
   popup_.Close();
   CancelHideTimer();
-  if (tooltip_ != nullptr) {
-    SendMessageW(tooltip_, TTM_POP, 0, 0);
-  }
+  label_.Hide();
   if (!menu_content_) {
     menu_content_ = std::make_unique<DockMenuContent>();
   }
@@ -2568,7 +2548,11 @@ void Dock::OpenDockMenu(POINT screen, int index) {
 
 void Dock::AfterPopupTick(void* ctx) {
   if (ctx != nullptr) {
-    static_cast<Dock*>(ctx)->SyncOptionsSubmenu();
+    auto* self = static_cast<Dock*>(ctx);
+    self->SyncOptionsSubmenu();
+    if (!self->popup_.IsOpen()) {
+      self->UpdateHoverLabel();
+    }
   }
 }
 
@@ -2611,7 +2595,7 @@ void Dock::OpenOptionsSubmenu() {
   if (!menu_content_->RowScreenRect(opt, &row)) {
     return;
   }
-  const POINT anchor{row.right, row.top};
+  const POINT anchor{row.right, row.top - Dip(kMenuPadDip)};
   popup_.SetAllied(&submenu_);
   submenu_.SetDark(dark_);
   if (!submenu_.Open(submenu_content_.get(), anchor, PopupSurface::Anchor::RightOf, false)) {
@@ -2983,9 +2967,7 @@ void Dock::BeginDragIfNeeded(POINT client) {
   drag_index_ = pressed_;
   drop_index_ = pressed_;
   hover_ = -1;
-  if (tooltip_ != nullptr) {
-    SendMessageW(tooltip_, TTM_POP, 0, 0);
-  }
+  label_.Hide();
   StartDragAnimTimer();
 }
 

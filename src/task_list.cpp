@@ -16,12 +16,14 @@
 #include <shlwapi.h>
 #include <shobjidl.h>
 #include <propkey.h>
+#include <winver.h>
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cwchar>
+#include <cwctype>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -730,19 +732,171 @@ std::wstring AppsFolderDisplayName(const std::wstring& aumid) {
   return out;
 }
 
-std::wstring DisplayNameFor(const std::wstring& path, const std::wstring& title) {
-  if (!path.empty()) {
-    SHFILEINFOW info{};
-    if (SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info), SHGFI_DISPLAYNAME) != 0 &&
-        info.szDisplayName[0] != L'\0') {
-      return info.szDisplayName;
+void TrimSpaces(std::wstring& text) {
+  while (!text.empty() && iswspace(text.front())) {
+    text.erase(text.begin());
+  }
+  while (!text.empty() && iswspace(text.back())) {
+    text.pop_back();
+  }
+}
+
+bool HasBinaryExtension(const std::wstring& name) {
+  const size_t dot = name.find_last_of(L'.');
+  if (dot == std::wstring::npos || dot == 0 || dot + 1 >= name.size()) {
+    return false;
+  }
+  const std::wstring ext = Lower(name.substr(dot));
+  return ext == L".exe" || ext == L".com" || ext == L".bat" || ext == L".cmd" || ext == L".msc" ||
+         ext == L".lnk";
+}
+
+bool LooksLikeRawFileName(const std::wstring& name, const std::wstring& path) {
+  if (name.empty()) {
+    return true;
+  }
+  if (HasBinaryExtension(name)) {
+    return true;
+  }
+  if (path.empty()) {
+    return false;
+  }
+  const size_t slash = path.find_last_of(L"\\/");
+  const std::wstring file = slash == std::wstring::npos ? path : path.substr(slash + 1);
+  return EqualsIgnoreCase(name, file);
+}
+
+std::wstring ShellPropertyString(const std::wstring& path, REFPROPERTYKEY key) {
+  Microsoft::WRL::ComPtr<IShellItem2> item;
+  if (path.empty() || FAILED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item))) || !item) {
+    return {};
+  }
+  PWSTR value = nullptr;
+  if (FAILED(item->GetString(key, &value)) || value == nullptr) {
+    return {};
+  }
+  std::wstring out = value;
+  CoTaskMemFree(value);
+  TrimSpaces(out);
+  return out;
+}
+
+std::wstring ShellNormalName(const std::wstring& path) {
+  Microsoft::WRL::ComPtr<IShellItem> item;
+  if (path.empty() || FAILED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item))) || !item) {
+    return {};
+  }
+  PWSTR name = nullptr;
+  if (FAILED(item->GetDisplayName(SIGDN_NORMALDISPLAY, &name)) || name == nullptr) {
+    return {};
+  }
+  std::wstring out = name;
+  CoTaskMemFree(name);
+  TrimSpaces(out);
+  return out;
+}
+
+std::wstring VersionResourceString(const std::wstring& path, const wchar_t* field) {
+  if (path.empty() || field == nullptr) {
+    return {};
+  }
+  DWORD dummy = 0;
+  const DWORD size = GetFileVersionInfoSizeW(path.c_str(), &dummy);
+  if (size == 0) {
+    return {};
+  }
+  std::vector<std::uint8_t> buf(size);
+  if (GetFileVersionInfoW(path.c_str(), 0, size, buf.data()) == FALSE) {
+    return {};
+  }
+  struct Translation {
+    WORD language;
+    WORD codepage;
+  };
+  Translation* trans = nullptr;
+  UINT trans_bytes = 0;
+  std::vector<Translation> ids;
+  if (VerQueryValueW(buf.data(), L"\\VarFileInfo\\Translation", reinterpret_cast<void**>(&trans), &trans_bytes) !=
+          FALSE &&
+      trans != nullptr && trans_bytes >= sizeof(Translation)) {
+    const size_t n = trans_bytes / sizeof(Translation);
+    ids.assign(trans, trans + n);
+  }
+  const Translation extras[] = {{0x0409, 0x04B0}, {0x0412, 0x04B0}, {0x0409, 0x04E4}};
+  ids.insert(ids.end(), std::begin(extras), std::end(extras));
+  for (const Translation id : ids) {
+    wchar_t key[80]{};
+    swprintf_s(key, L"\\StringFileInfo\\%04x%04x\\%s", id.language, id.codepage, field);
+    wchar_t* value = nullptr;
+    UINT value_bytes = 0;
+    if (VerQueryValueW(buf.data(), key, reinterpret_cast<void**>(&value), &value_bytes) == FALSE || value == nullptr ||
+        value[0] == L'\0') {
+      continue;
     }
-    const std::wstring stem = FileStem(path);
-    if (!stem.empty() && !IsHostExe(path)) {
-      return stem;
+    std::wstring out = value;
+    TrimSpaces(out);
+    if (!out.empty()) {
+      return out;
     }
   }
-  return title;
+  return {};
+}
+
+std::wstring DisplayNameFor(const std::wstring& path, const std::wstring& title) {
+  static std::unordered_map<std::wstring, std::wstring> cache;
+  const std::wstring cache_key = Lower(path);
+  if (!cache_key.empty()) {
+    if (const auto it = cache.find(cache_key); it != cache.end()) {
+      return it->second;
+    }
+  }
+
+  auto accept = [&](std::wstring name) -> std::wstring {
+    TrimSpaces(name);
+    if (LooksLikeRawFileName(name, path)) {
+      return {};
+    }
+    return name;
+  };
+
+  std::wstring chosen;
+  if (!path.empty()) {
+    chosen = accept(ShellPropertyString(path, PKEY_FileDescription));
+    if (chosen.empty()) {
+      chosen = accept(VersionResourceString(path, L"FileDescription"));
+    }
+    if (chosen.empty()) {
+      chosen = accept(VersionResourceString(path, L"ProductName"));
+    }
+    if (chosen.empty()) {
+      chosen = accept(ShellNormalName(path));
+    }
+    if (chosen.empty()) {
+      SHFILEINFOW info{};
+      if (SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info), SHGFI_DISPLAYNAME) != 0) {
+        chosen = accept(info.szDisplayName);
+      }
+    }
+    if (chosen.empty()) {
+      const std::wstring stem = FileStem(path);
+      if (!stem.empty() && !IsHostExe(path) && !HasBinaryExtension(stem)) {
+        chosen = stem;
+      }
+    }
+  }
+  if (chosen.empty()) {
+    chosen = accept(title);
+  }
+  if (chosen.empty() && !path.empty()) {
+    chosen = FileStem(path);
+  }
+  if (chosen.empty()) {
+    chosen = title;
+  }
+  if (!cache_key.empty() && !chosen.empty()) {
+    cache.emplace(cache_key, chosen);
+  }
+  return chosen;
 }
 
 struct Group {

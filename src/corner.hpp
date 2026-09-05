@@ -20,11 +20,16 @@ inline constexpr int kControlDip = 4;
 inline constexpr int kOverlayDip = 8;
 inline constexpr int kHeroDip = 16;
 
+// 독 배경 전용. 맥 독의 실측 비율(패널 높이의 30%)에서 나온 값이다.
+// 계층 사다리와 무관하므로 hero 와 따로 둔다.
+inline constexpr int kDockDip = 20;
+
 // 동심 공식의 하한. 이보다 작으면 각진 것과 구별되지 않는다.
 inline constexpr int kMinInnerDip = 2;
 
-// 슈퍼타원 지수. 4 가 애플 아이콘에 가깝고 2 면 원호와 같아진다.
-inline constexpr float kSquircleExponent = 4.0f;
+// 슈퍼타원 지수. 맥 독 배경의 실측 프로파일은 원호에 가깝고, 지수 2.4 가
+// 그 곡선과 맞는다. 지수 4 의 강한 스쿼클은 앱 아이콘 마스크 쪽 어법이다.
+inline constexpr float kSquircleExponent = 2.4f;
 
 inline float ToPx(int dip, UINT dpi) {
   return static_cast<float>(MulDiv(dip, static_cast<int>(dpi), 96));
