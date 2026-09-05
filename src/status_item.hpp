@@ -33,6 +33,7 @@ enum class VectorIcon : uint8_t {
   kWifi,
   kSearch,
   kControlCenter,
+  kBluetooth,
 };
 
 inline constexpr uint32_t kVectorFlagCharging = 1u << 0;

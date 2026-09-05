@@ -136,6 +136,8 @@ std::string FormatSettings(const WidgetSettings& s, std::string_view extra_topba
   out += s.network ? "true" : "false";
   out += ", \"volume\": ";
   out += s.volume ? "true" : "false";
+  out += ", \"bluetooth\": ";
+  out += s.bluetooth ? "true" : "false";
   out += ", \"control_center\": ";
   out += s.control_center ? "true" : "false";
   out += ", \"widget_board_button\": ";
@@ -146,6 +148,8 @@ std::string FormatSettings(const WidgetSettings& s, std::string_view extra_topba
   out += s.tray_system_icons ? "true" : "false";
   out += ", \"tray_overflow_icons\": ";
   out += s.tray_overflow_icons ? "true" : "false";
+  out += ", \"saver_threshold_backup\": ";
+  out += std::to_string(s.saver_threshold_backup);
   out += ", \"tray_backend\": \"";
   out += json::Escape(s.tray_backend);
   out += "\", \"tray_hidden_keys\": [";
@@ -235,6 +239,7 @@ WidgetSettings LoadWidgetSettings() {
   s.network = json::GetBool(*widgets, "network").value_or(false) ||
               json::GetBool(*widgets, "wifi").value_or(false);
   s.volume = json::GetBool(*widgets, "volume").value_or(false);
+  s.bluetooth = json::GetBool(*widgets, "bluetooth").value_or(false);
   s.control_center = json::GetBool(*widgets, "control_center").value_or(false);
   if (const auto board = json::GetBool(*widgets, "widget_board_button")) {
     s.widget_board = *board;
@@ -244,6 +249,7 @@ WidgetSettings LoadWidgetSettings() {
   s.tray_mirror = json::GetBool(*widgets, "tray_mirror").value_or(true);
   s.tray_system_icons = json::GetBool(*widgets, "tray_system_icons").value_or(false);
   s.tray_overflow_icons = json::GetBool(*widgets, "tray_overflow_icons").value_or(true);
+  s.saver_threshold_backup = json::GetInt(*widgets, "saver_threshold_backup").value_or(-1);
   s.tray_backend = json::GetString(*widgets, "tray_backend").value_or("uia");
   if (s.tray_backend != "intercept") {
     s.tray_backend = "uia";
@@ -262,8 +268,9 @@ WidgetSettings LoadWidgetSettings() {
 
   bool order_changed = false;
   bool seen_network = false;
+  bool seen_bluetooth = false;
   std::vector<std::string> order;
-  order.reserve(s.bar_order.size());
+  order.reserve(s.bar_order.size() + 1);
   for (const std::string& id : s.bar_order) {
     std::string next = id;
     if (next == "bamti.widget/wifi") {
@@ -280,7 +287,31 @@ WidgetSettings LoadWidgetSettings() {
       }
       seen_network = true;
     }
+    if (next == "bamti.widget/bluetooth") {
+      if (seen_bluetooth) {
+        order_changed = true;
+        continue;
+      }
+      seen_bluetooth = true;
+    }
     order.push_back(std::move(next));
+  }
+  if (!seen_bluetooth) {
+    bool inserted = false;
+    std::vector<std::string> with_bt;
+    with_bt.reserve(order.size() + 1);
+    for (const std::string& id : order) {
+      with_bt.push_back(id);
+      if (id == "bamti.widget/network") {
+        with_bt.push_back("bamti.widget/bluetooth");
+        inserted = true;
+      }
+    }
+    if (!inserted) {
+      with_bt.push_back("bamti.widget/bluetooth");
+    }
+    order = std::move(with_bt);
+    order_changed = true;
   }
   s.bar_order = std::move(order);
 

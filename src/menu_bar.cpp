@@ -56,6 +56,34 @@ constexpr UINT kPeekMs = 10000;
 constexpr char kSpotlightItemId[] = "bamti.widget/spotlight";
 constexpr char kControlCenterItemId[] = "bamti.widget/control_center";
 constexpr char kNetworkItemId[] = "bamti.widget/network";
+constexpr char kVolumeItemId[] = "bamti.widget/volume";
+constexpr char kBluetoothItemId[] = "bamti.widget/bluetooth";
+constexpr char kBatteryItemId[] = "bamti.widget/battery";
+constexpr char kCpuItemId[] = "bamti.widget/cpu";
+constexpr UINT kWidgetBluetoothCmd = 23;
+
+struct WidgetPage {
+  const char* id;
+  ControlCenterPage page;
+  bool WidgetSettings::* enabled;
+};
+
+constexpr WidgetPage kWidgetPages[] = {
+    {kNetworkItemId, ControlCenterPage::kWifi, &WidgetSettings::network},
+    {kVolumeItemId, ControlCenterPage::kVolume, &WidgetSettings::volume},
+    {kBluetoothItemId, ControlCenterPage::kBluetooth, &WidgetSettings::bluetooth},
+    {kBatteryItemId, ControlCenterPage::kBattery, &WidgetSettings::battery},
+    {kCpuItemId, ControlCenterPage::kCpu, &WidgetSettings::cpu},
+};
+
+const WidgetPage* FindWidgetPage(const std::string& id) {
+  for (const WidgetPage& page : kWidgetPages) {
+    if (id == page.id) {
+      return &page;
+    }
+  }
+  return nullptr;
+}
 
 UINT g_taskbar_created = 0;
 
@@ -572,7 +600,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       // 휠을 받는 항목은 볼륨뿐이다. 다른 세그먼트는 scroll을 무시하지만
       // 이벤트를 아예 보내지 않아 로그와 디스패치를 줄인다.
-      if (hit->id != "bamti.widget/volume") {
+      if (hit->id != kVolumeItemId) {
         return 0;
       }
       StatusEvent ev;
@@ -623,8 +651,8 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           ToggleControlCenter();
           return 0;
         }
-        if (hit->id == kNetworkItemId) {
-          ToggleNetworkPanel(*hit);
+        if (FindWidgetPage(hit->id) != nullptr) {
+          ToggleWidgetPage(*hit);
           return 0;
         }
         status_popup_.Close();
@@ -740,7 +768,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         return 0;
       }
       if (cmd == kWidgetBatteryCmd || cmd == kWidgetCpuCmd || cmd == kWidgetNetworkCmd ||
-          cmd == kWidgetVolumeCmd || cmd == kWidgetBoardCmd ||
+          cmd == kWidgetVolumeCmd || cmd == kWidgetBluetoothCmd || cmd == kWidgetBoardCmd ||
           cmd == kWidgetControlCenterCmd) {
         WidgetSettings next = widgets_.settings();
         const WidgetSettings tray = tray_.settings();
@@ -757,6 +785,8 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           next.network = !next.network;
         } else if (cmd == kWidgetVolumeCmd) {
           next.volume = !next.volume;
+        } else if (cmd == kWidgetBluetoothCmd) {
+          next.bluetooth = !next.bluetooth;
         } else if (cmd == kWidgetControlCenterCmd) {
           next.control_center = !next.control_center;
         } else if (cmd == kWidgetBoardCmd) {
@@ -1679,11 +1709,16 @@ void MenuBar::ShowClockMenu() {
   }
 }
 
-void MenuBar::ToggleNetworkPanel(const StatusHit& hit) {
-  if (fullscreen_occluded_ || !widgets_.settings().network) {
+void MenuBar::ToggleWidgetPage(const StatusHit& hit) {
+  const WidgetPage* page = FindWidgetPage(hit.id);
+  if (page == nullptr) {
     return;
   }
-  if (cc_open_ && status_popup_.IsOpen() && cc_panel_ != nullptr && cc_panel_->ShowsNetwork()) {
+  const WidgetSettings s = widgets_.settings();
+  if (fullscreen_occluded_ || !(s.*(page->enabled))) {
+    return;
+  }
+  if (cc_open_ && status_popup_.IsOpen() && cc_panel_ != nullptr && cc_panel_->CurrentPage() == page->page) {
     status_popup_.Close();
     cc_open_ = false;
     return;
@@ -1692,8 +1727,10 @@ void MenuBar::ToggleNetworkPanel(const StatusHit& hit) {
 }
 
 void MenuBar::OpenStatusPanel(const StatusHit& hit) {
-  if (hit.id == kNetworkItemId && ShowControlCenter(hit.rect, ControlCenterPage::kWifi)) {
-    return;
+  if (const WidgetPage* page = FindWidgetPage(hit.id)) {
+    if (ShowControlCenter(hit.rect, page->page)) {
+      return;
+    }
   }
   if (status_panel_ == nullptr || hwnd_ == nullptr) {
     return;
@@ -1968,6 +2005,7 @@ void MenuBar::ShowContextMenu(POINT screen) {
   bar_menu_->Add(kWidgetBatteryCmd, L"배터리", s.battery);
   bar_menu_->Add(kWidgetCpuCmd, L"CPU", s.cpu);
   bar_menu_->Add(kWidgetNetworkCmd, L"네트워크", s.network);
+  bar_menu_->Add(kWidgetBluetoothCmd, L"블루투스", s.bluetooth);
   bar_menu_->Add(kWidgetVolumeCmd, L"볼륨", s.volume);
   bar_menu_->Add(kWidgetControlCenterCmd, L"제어 센터", s.control_center);
   const bool board_ok = IsWidgetBoardAvailable();
@@ -2030,8 +2068,15 @@ void MenuBar::ApplySettings(const WidgetSettings& next) {
   widgets_.SetSettings(merged);
   tray_.SetSettings(merged);
   if (cc_open_) {
-    const bool net_page = cc_panel_ != nullptr && cc_panel_->ShowsNetwork();
-    const bool keep = merged.control_center || (net_page && merged.network);
+    const ControlCenterPage cc_page =
+        cc_panel_ != nullptr ? cc_panel_->CurrentPage() : ControlCenterPage::kHome;
+    bool keep = merged.control_center;
+    for (const WidgetPage& page : kWidgetPages) {
+      if (cc_page == page.page && merged.*(page.enabled)) {
+        keep = true;
+        break;
+      }
+    }
     if (!keep) {
       status_popup_.Close();
       cc_open_ = false;

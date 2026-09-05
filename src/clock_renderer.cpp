@@ -86,6 +86,37 @@ void DrawEthernetIcon(ID2D1RenderTarget* rt, ID2D1Factory* factory, ID2D1SolidCo
   rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + 13.50f * s, cy), r, r), brush);
 }
 
+void DrawBluetoothIcon(ID2D1RenderTarget* rt, ID2D1Factory* factory, ID2D1SolidColorBrush* brush,
+                       ID2D1StrokeStyle* stroke, const D2D1_RECT_F& box) {
+  if (rt == nullptr || factory == nullptr || brush == nullptr || stroke == nullptr) {
+    return;
+  }
+  const float h = box.bottom - box.top;
+  if (h <= 0.0f) {
+    return;
+  }
+  const float s = h / 18.0f;
+  const float x = box.left;
+  const float y = box.top;
+  const float width = h * (1.7f / 18.0f);
+  Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
+  Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+  if (FAILED(factory->CreatePathGeometry(path.ReleaseAndGetAddressOf())) ||
+      FAILED(path->Open(sink.GetAddressOf()))) {
+    return;
+  }
+  sink->BeginFigure(D2D1::Point2F(x + 1.0f * s, y + 13.5f * s), D2D1_FIGURE_BEGIN_HOLLOW);
+  sink->AddLine(D2D1::Point2F(x + 11.0f * s, y + 4.5f * s));
+  sink->AddLine(D2D1::Point2F(x + 6.0f * s, y + 0.0f * s));
+  sink->AddLine(D2D1::Point2F(x + 6.0f * s, y + 18.0f * s));
+  sink->AddLine(D2D1::Point2F(x + 11.0f * s, y + 13.5f * s));
+  sink->AddLine(D2D1::Point2F(x + 1.0f * s, y + 4.5f * s));
+  sink->EndFigure(D2D1_FIGURE_END_OPEN);
+  if (SUCCEEDED(sink->Close())) {
+    rt->DrawGeometry(path.Get(), brush, width, stroke);
+  }
+}
+
 D2D1_COLOR_F StatusItemColor(bool dark, uint32_t accent) {
   if (accent != 0) {
     return D2D1::ColorF(accent);
@@ -563,6 +594,12 @@ void ClockRenderer::DrawVectorIcon(ID2D1SolidColorBrush* brush, const StatusIcon
       brush->SetColor(ClockTextColor(dark));
       DrawFluentOrFallback(brush, box, kCcFluent, L"\u2630");
       break;
+    case VectorIcon::kBluetooth:
+      brush->SetColor(value < 0.5f ? ScaleAlpha(ClockTextColor(dark), 0.45f) : ClockTextColor(dark));
+      if (EnsureStroke() && d2d_) {
+        DrawBluetoothIcon(rt_.Get(), d2d_.Get(), brush, round_stroke_.Get(), box);
+      }
+      break;
     default:
       break;
   }
@@ -712,6 +749,9 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
       } else if (seg.icon.vector == VectorIcon::kEthernet) {
         icon_w = kEthernetIconDip;
         icon_h = kEthernetIconHeightDip;
+      } else if (seg.icon.vector == VectorIcon::kBluetooth) {
+        icon_w = kBluetoothIconDip;
+        icon_h = kBluetoothIconHeightDip;
       }
       const float icon_top = (height_dip - icon_h) * 0.5f;
       DrawVectorIcon(brush.Get(), seg.icon, D2D1::RectF(x0, icon_top, x0 + icon_w, icon_top + icon_h), dark);

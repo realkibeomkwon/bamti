@@ -82,7 +82,7 @@ class MenuBar {
   void ToggleClockFlyout();
   bool ShowClockFlyout();
   void ShowClockMenu();
-  void ToggleNetworkPanel(const StatusHit& hit);
+  void ToggleWidgetPage(const StatusHit& hit);
   bool ShowControlCenter(const RECT& item_rect, ControlCenterPage page);
   void OpenStatusPanel(const StatusHit& hit);
   void OpenOverflow();

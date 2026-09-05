@@ -2,6 +2,7 @@
 
 #include "corner.hpp"
 #include "log.hpp"
+#include "panel_style.hpp"
 #include "slider_geom.hpp"
 #include "theme.hpp"
 
@@ -14,8 +15,8 @@
 namespace bamti {
 namespace {
 
-constexpr int kPanelPadDip = 12;
-constexpr int kPanelMinWidthDip = 280;
+constexpr int kPanelPadDip = panel::kInsetDip;
+constexpr int kPanelMinWidthDip = panel::kWidthDip;
 constexpr int kPanelMaxWidthDip = 360;
 constexpr int kPanelTitleDip = 22;
 constexpr int kPanelSubDip = 18;
@@ -86,6 +87,10 @@ void StatusPanelContent::Reset(StatusItem item, StatusPanelHost host) {
   host_ = std::move(host);
   drag_row_ = -1;
   // hits_는 Open 때 Measure가 채운다. 값만 바꿀 때는 호버/히트 영역을 유지한다.
+}
+
+int StatusPanelContent::CornerDip() const {
+  return corner::kHeroDip;
 }
 
 int StatusPanelContent::RowCount() const {

@@ -84,6 +84,9 @@
     <ClCompile Include="src\settings.cpp" />
     <ClCompile Include="src\widgets\builtin.cpp" />
     <ClCompile Include="src\widgets\volume.cpp" />
+    <ClCompile Include="src\audio_devices.cpp" />
+    <ClCompile Include="src\bt_devices.cpp" />
+    <ClCompile Include="src\power_saver.cpp" />
     <ClCompile Include="src\log.cpp" />
     <ClCompile Include="src\watchdog.cpp" />
     <ClCompile Include="src\menu_bar.cpp" />
@@ -97,6 +100,7 @@
     <ClCompile Include="src\dock_label.cpp" />
     <ClCompile Include="src\popup_surface.cpp" />
     <ClCompile Include="src\wifi_password.cpp" />
+    <ClCompile Include="src\panel_style.cpp" />
     <ClCompile Include="src\start_menu.cpp" />
     <ClCompile Include="src\spotlight.cpp" />
     <ClCompile Include="src\tray_backend_uia.cpp" />
@@ -109,6 +113,9 @@
     <ClInclude Include="src\settings.hpp" />
     <ClInclude Include="src\widgets\builtin.hpp" />
     <ClInclude Include="src\widgets\volume.hpp" />
+    <ClInclude Include="src\audio_devices.hpp" />
+    <ClInclude Include="src\bt_devices.hpp" />
+    <ClInclude Include="src\power_saver.hpp" />
     <ClInclude Include="src\log.hpp" />
     <ClInclude Include="src\watchdog.hpp" />
     <ClInclude Include="src\menu_bar.hpp" />
@@ -124,6 +131,7 @@
     <ClInclude Include="src\dock_label.hpp" />
     <ClInclude Include="src\popup_surface.hpp" />
     <ClInclude Include="src\wifi_password.hpp" />
+    <ClInclude Include="src\panel_style.hpp" />
     <ClInclude Include="src\start_menu.hpp" />
     <ClInclude Include="src\spotlight.hpp" />
     <ClInclude Include="src\tray_backend.hpp" />

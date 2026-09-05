@@ -1,5 +1,7 @@
 #pragma once
 
+#include "audio_devices.hpp"
+#include "bt_devices.hpp"
 #include "popup_surface.hpp"
 #include "status_source.hpp"
 
@@ -33,6 +35,22 @@ struct ControlCenterLive {
   std::wstring wifi_name = L"연결 안 됨";
   bool eth_on = false;
   std::wstring eth_name;
+  bool bt_present = false;
+  bool bt_on = false;
+  bool bt_can_toggle = false;
+  std::wstring bt_name;
+  bool battery_ok = false;
+  float battery_level = 0.0f;
+  bool battery_ac = false;
+  bool battery_charging = false;
+  std::wstring battery_remain_text;
+  bool battery_saver_on = false;
+  bool battery_saver_toggle_ok = true;
+  bool cpu_ok = false;
+  float cpu_usage = 0.0f;
+  float cpu_user = 0.0f;
+  float cpu_kernel = 0.0f;
+  unsigned cpu_nproc = 0;
 };
 
 struct ControlCenterHost {
@@ -44,7 +62,7 @@ struct ControlCenterHost {
   std::function<void(HWND)> set_allied;
 };
 
-enum class ControlCenterPage { kHome, kWifi };
+enum class ControlCenterPage { kHome, kWifi, kVolume, kBluetooth, kBattery, kCpu };
 
 enum class WifiKind { kOpen, kPersonal, kEnterprise, kUnknown };
 
@@ -61,7 +79,7 @@ class ControlCenterContent : public PopupContent {
   void Refresh();
   void Dismissed();
   void HandleWlanNotify(int kind, DWORD reason, const std::wstring& ssid);
-  bool ShowsNetwork() const;
+  ControlCenterPage CurrentPage() const;
   int CornerDip() const override;
 
   SIZE Measure(UINT dpi) override;
@@ -90,10 +108,16 @@ class ControlCenterContent : public PopupContent {
     kPageMore,
     kPageNetworkSettings,
     kPageWifiSettings,
+    kPageSoundSettings,
+    kPageDeviceSettings,
+    kPageBtSettings,
+    kPagePowerSettings,
+    kPageTaskManager,
+    kPageSaverSettings,
     kPageList = 200,
   };
 
-  enum class Page { kHome, kWifi, kBluetooth };
+  enum class Page { kHome, kWifi, kBluetooth, kVolume, kBattery, kCpu };
 
   struct Hit {
     RECT rc{};
@@ -115,6 +139,9 @@ class ControlCenterContent : public PopupContent {
     std::wstring name;
     BLUETOOTH_DEVICE_INFO info{};
     bool connected = false;
+    bool paired = false;
+    int battery = -1;
+    std::wstring address;
   };
 
   void QuerySlowState(bool force);
@@ -124,6 +151,11 @@ class ControlCenterContent : public PopupContent {
   void RefreshPageLists(bool force);
   void RenderListPage(ID2D1RenderTarget* target, UINT dpi, int hot_id, ID2D1SolidColorBrush* brush);
   void RenderNetworkPage(ID2D1RenderTarget* target, UINT dpi, int hot_id, ID2D1SolidColorBrush* brush);
+  void RenderVolumePage(ID2D1RenderTarget* target, UINT dpi, int hot_id, ID2D1SolidColorBrush* brush);
+  void RenderBluetoothPage(ID2D1RenderTarget* target, UINT dpi, int hot_id, ID2D1SolidColorBrush* brush);
+  void RenderBatteryPage(ID2D1RenderTarget* target, UINT dpi, int hot_id, ID2D1SolidColorBrush* brush);
+  void RenderCpuPage(ID2D1RenderTarget* target, UINT dpi, int hot_id, ID2D1SolidColorBrush* brush);
+  RECT VolumeSliderTrackRect(UINT dpi) const;
   RECT ConnectRowRect(UINT dpi, int row) const;
   RECT QuickTileRect(UINT dpi, int col, int row) const;
   RECT SliderTrackRect(UINT dpi, bool brightness) const;
@@ -173,12 +205,26 @@ class ControlCenterContent : public PopupContent {
   int wifi_known_n_ = 0;
   bool bt_on_ = false;
   bool bt_known_ = false;
+  bool bt_present_ = false;
+  bool bt_can_toggle_ = false;
+  bool battery_ok_ = false;
+  float battery_level_ = 0.0f;
+  bool battery_ac_ = false;
+  bool battery_charging_ = false;
+  std::wstring battery_remain_text_;
+  bool battery_saver_toggle_ok_ = true;
+  bool cpu_ok_ = false;
+  float cpu_usage_ = 0.0f;
+  float cpu_user_ = 0.0f;
+  float cpu_kernel_ = 0.0f;
+  unsigned cpu_nproc_ = 0;
   Page page_ = Page::kHome;
   bool show_back_ = true;
   GUID wifi_iface_{};
   bool wifi_iface_ok_ = false;
   std::vector<WifiNetwork> wifi_nets_;
   std::vector<BtDevice> bt_devices_;
+  std::vector<AudioEndpoint> audio_outs_;
   ULONGLONG list_due_ = 0;
   ULONGLONG wifi_scan_due_ = 0;
   ULONGLONG wifi_scan_wait_until_ = 0;

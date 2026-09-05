@@ -1,7 +1,10 @@
 #include "control_center.hpp"
 
+#include "audio_devices.hpp"
+#include "bt_devices.hpp"
 #include "corner.hpp"
 #include "log.hpp"
+#include "panel_style.hpp"
 #include "slider_geom.hpp"
 #include "status_item.hpp"
 #include "theme.hpp"
@@ -61,30 +64,20 @@ constexpr wchar_t kBackGlyph[] = L"\xE76B";
 constexpr wchar_t kLockGlyph[] = L"\xE72E";
 constexpr int kPageHeaderHDip = 48;
 constexpr int kPageRowHDip = 52;
-constexpr int kBtListMax = 6;
+constexpr int kBtListMax = 8;
+constexpr int kAudioListMax = 8;
+constexpr int kVolumeSliderRowHDip = 28;
+constexpr int kVolumeSliderIconDip = 14;
+constexpr int kVolumeSliderGapDip = 8;
+constexpr int kVolumeTrackHDip = 6;
+constexpr float kVolumeKnobDip = 18.0f;
+constexpr wchar_t kVolSmallGlyph[] = L"\xE992";
+constexpr wchar_t kVolLoudGlyph[] = L"\xE995";
 constexpr int kWifiKnownMax = 6;
 constexpr int kWifiOtherMax = 6;
 constexpr int kWifiListTotalMax = 10;
 constexpr int kPageFooterHDip = 32;
-constexpr int kNetPageWidthDip = 308;
-constexpr int kNetInsetDip = 14;
-constexpr int kNetTopPadDip = 9;
-constexpr int kNetHeaderHDip = 24;
-constexpr int kNetHeaderGapDip = 9;
-constexpr int kNetEthHDip = 16;
 constexpr int kNetEthGapDip = 8;
-constexpr int kNetDivHDip = 1;
-constexpr int kNetDivGapDip = 8;
-constexpr int kNetSectionHDip = 17;
-constexpr int kNetRowHDip = 32;
-constexpr int kNetSettingsHDip = 22;
-constexpr int kNetBottomPadDip = 10;
-constexpr int kNetToggleWDip = 54;
-constexpr int kNetToggleHDip = 24;
-constexpr int kNetBackWDip = 24;
-constexpr int kNetCircleDip = 26;
-constexpr float kNetKnobDip = 19.0f;
-constexpr float kNetKnobInsetDip = 2.5f;
 
 int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
@@ -179,28 +172,7 @@ WlanStatus QueryWlanStatus() {
 
 namespace {
 
-struct BtInfo {
-  bool radio = false;
-  bool connectable = false;
-};
-
-BtInfo QueryBluetooth() {
-  BtInfo info;
-  BLUETOOTH_FIND_RADIO_PARAMS params{};
-  params.dwSize = sizeof(params);
-  HANDLE radio = nullptr;
-  const HBLUETOOTH_RADIO_FIND find = BluetoothFindFirstRadio(&params, &radio);
-  if (find == nullptr) {
-    return info;
-  }
-  info.radio = radio != nullptr;
-  if (radio != nullptr) {
-    info.connectable = BluetoothIsConnectable(radio) != FALSE;
-    CloseHandle(radio);
-  }
-  BluetoothFindRadioClose(find);
-  return info;
-}
+constexpr int kGaugeHDip = 10;
 
 std::wstring SsidWide(const DOT11_SSID& ssid) {
   if (ssid.uSSIDLength == 0) {
@@ -296,7 +268,8 @@ void DrawGlyphInked(ID2D1RenderTarget* target, IDWriteFactory* dwrite, IDWriteTe
 }
 
 void DrawTrimmed(ID2D1RenderTarget* target, IDWriteFactory* dwrite, IDWriteTextFormat* format, ID2D1Brush* brush,
-                 const D2D1_RECT_F& box, const std::wstring& text) {
+                 const D2D1_RECT_F& box, const std::wstring& text,
+                 DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING) {
   if (target == nullptr || dwrite == nullptr || format == nullptr || brush == nullptr || text.empty()) {
     return;
   }
@@ -307,6 +280,7 @@ void DrawTrimmed(ID2D1RenderTarget* target, IDWriteFactory* dwrite, IDWriteTextF
                                       layout.GetAddressOf()))) {
     return;
   }
+  layout->SetTextAlignment(align);
   DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
   Microsoft::WRL::ComPtr<IDWriteInlineObject> ellipsis;
   if (SUCCEEDED(dwrite->CreateEllipsisTrimmingSign(format, ellipsis.GetAddressOf()))) {
@@ -341,7 +315,7 @@ bool MakeFormat(IDWriteFactory* dwrite, const wchar_t* family, DWRITE_FONT_WEIGH
 
 struct NetworkPageMetrics {
   int height = 0;
-  int header_y = kNetTopPadDip;
+  int header_y = panel::kTopPadDip;
   bool show_toggle = false;
   bool show_eth = false;
   int eth_y = 0;
@@ -365,50 +339,266 @@ NetworkPageMetrics MakeNetworkPage(bool eth_on, bool iface_ok, bool radio_on, in
   m.show_eth = eth_on;
   m.known_n = known_n > 0 ? known_n : 0;
   m.other_n = other_n > 0 ? other_n : 0;
-  int y = kNetTopPadDip;
-  m.header_y = y;
-  y += kNetHeaderHDip + kNetHeaderGapDip;
+  panel::Stack s;
+  m.header_y = s.Take(panel::kHeaderHDip);
+  s.Gap(panel::kHeaderGapDip);
   if (m.show_eth) {
-    m.eth_y = y;
-    y += kNetEthHDip + kNetEthGapDip;
+    m.eth_y = s.Take(panel::kNoteHDip);
+    s.Gap(kNetEthGapDip);
   }
-  m.div1_y = y;
-  y += kNetDivHDip + kNetDivGapDip;
+  m.div1_y = s.Take(panel::kDivHDip);
+  s.Gap(panel::kDivGapDip);
   if (!iface_ok) {
-    m.empty_y = y;
+    m.empty_y = s.Take(panel::kRowHDip);
     m.empty_text = L"무선 어댑터가 없습니다";
-    y += kNetRowHDip;
   } else if (!radio_on) {
-    m.empty_y = y;
+    m.empty_y = s.Take(panel::kRowHDip);
     m.empty_text = L"Wi-Fi가 꺼져 있습니다";
-    y += kNetRowHDip;
   } else if (m.known_n + m.other_n == 0) {
-    m.empty_y = y;
+    m.empty_y = s.Take(panel::kRowHDip);
     m.empty_text = L"사용 가능한 네트워크가 없습니다";
-    y += kNetRowHDip;
   } else {
     if (m.known_n > 0) {
-      m.known_header_y = y;
-      y += kNetSectionHDip;
-      m.known_list_y = y;
-      y += kNetRowHDip * m.known_n;
+      m.known_header_y = s.Take(panel::kSectionHDip);
+      m.known_list_y = s.Take(panel::kRowHDip * m.known_n);
     }
     if (m.other_n > 0) {
-      m.other_header_y = y;
-      y += kNetSectionHDip;
-      m.other_list_y = y;
-      y += kNetRowHDip * m.other_n;
+      m.other_header_y = s.Take(panel::kSectionHDip);
+      m.other_list_y = s.Take(panel::kRowHDip * m.other_n);
     }
   }
-  y += kNetDivGapDip;
-  m.div2_y = y;
-  y += kNetDivHDip + kNetDivGapDip;
-  m.net_settings_y = y;
-  y += kNetSettingsHDip;
-  m.wifi_settings_y = y;
-  y += kNetSettingsHDip + kNetBottomPadDip;
-  m.height = y;
+  s.Gap(panel::kDivGapDip);
+  m.div2_y = s.Take(panel::kDivHDip);
+  s.Gap(panel::kDivGapDip);
+  m.net_settings_y = s.Take(panel::kSettingsHDip);
+  m.wifi_settings_y = s.Take(panel::kSettingsHDip);
+  m.height = s.Finish();
   return m;
+}
+
+struct VolumePageMetrics {
+  int height = 0;
+  int header_y = panel::kTopPadDip;
+  int slider_y = 0;
+  int div1_y = 0;
+  int section_y = -1;
+  int list_y = -1;
+  int list_n = 0;
+  int empty_y = -1;
+  const wchar_t* empty_text = nullptr;
+  int div2_y = 0;
+  int device_settings_y = -1;
+  int sound_settings_y = 0;
+};
+
+VolumePageMetrics MakeVolumePage(int device_n, bool show_device_settings) {
+  VolumePageMetrics m;
+  m.list_n = device_n > 0 ? (std::min)(device_n, kAudioListMax) : 0;
+  panel::Stack s;
+  m.header_y = s.Take(panel::kHeaderHDip);
+  s.Gap(panel::kHeaderGapDip);
+  m.slider_y = s.Take(kVolumeSliderRowHDip);
+  s.Gap(panel::kDivGapDip);
+  m.div1_y = s.Take(panel::kDivHDip);
+  s.Gap(panel::kDivGapDip);
+  if (m.list_n == 0) {
+    m.empty_y = s.Take(panel::kRowHDip);
+    m.empty_text = L"출력 장치가 없습니다";
+  } else {
+    m.section_y = s.Take(panel::kSectionHDip);
+    m.list_y = s.Take(panel::kRowHDip * m.list_n);
+  }
+  s.Gap(panel::kDivGapDip);
+  m.div2_y = s.Take(panel::kDivHDip);
+  s.Gap(panel::kDivGapDip);
+  if (show_device_settings) {
+    m.device_settings_y = s.Take(panel::kSettingsHDip);
+  }
+  m.sound_settings_y = s.Take(panel::kSettingsHDip);
+  m.height = s.Finish();
+  return m;
+}
+
+void VolumeSliderTrackDip(int* left, int* right) {
+  const int content_l = panel::kInsetDip;
+  const int content_r = panel::kWidthDip - panel::kInsetDip;
+  if (left != nullptr) {
+    *left = content_l + kVolumeSliderIconDip + kVolumeSliderGapDip;
+  }
+  if (right != nullptr) {
+    *right = content_r - kVolumeSliderIconDip - kVolumeSliderGapDip;
+  }
+}
+
+bool DefaultAudioIsBluetooth(const std::vector<AudioEndpoint>& devices) {
+  for (const AudioEndpoint& d : devices) {
+    if (d.is_default && d.bluetooth) {
+      return true;
+    }
+  }
+  return false;
+}
+
+struct BluetoothPageMetrics {
+  int height = 0;
+  int header_y = panel::kTopPadDip;
+  int div1_y = 0;
+  int list_y = -1;
+  int list_n = 0;
+  int empty_y = -1;
+  const wchar_t* empty_text = nullptr;
+  int div2_y = 0;
+  int settings_y = 0;
+};
+
+BluetoothPageMetrics MakeBluetoothPage(bool present, bool on, int device_n) {
+  BluetoothPageMetrics m;
+  m.list_n = device_n > 0 ? (std::min)(device_n, kBtListMax) : 0;
+  panel::Stack s;
+  m.header_y = s.Take(panel::kHeaderHDip);
+  s.Gap(panel::kHeaderGapDip);
+  m.div1_y = s.Take(panel::kDivHDip);
+  s.Gap(panel::kDivGapDip);
+  if (!present) {
+    m.empty_y = s.Take(panel::kRowHDip);
+    m.empty_text = L"Bluetooth 어댑터가 없습니다";
+  } else if (!on) {
+    m.empty_y = s.Take(panel::kRowHDip);
+    m.empty_text = L"Bluetooth가 꺼져 있습니다";
+  } else if (m.list_n == 0) {
+    m.empty_y = s.Take(panel::kRowHDip);
+    m.empty_text = L"연결된 장치가 없습니다";
+  } else {
+    m.list_y = s.Take(panel::kRowHDip * m.list_n);
+  }
+  s.Gap(panel::kDivGapDip);
+  m.div2_y = s.Take(panel::kDivHDip);
+  s.Gap(panel::kDivGapDip);
+  m.settings_y = s.Take(panel::kSettingsHDip);
+  m.height = s.Finish();
+  return m;
+}
+
+struct BatteryPageMetrics {
+  int height = 0;
+  int header_y = panel::kTopPadDip;
+  int gauge_y = 0;
+  int remain_y = -1;
+  int div1_y = 0;
+  int saver_y = 0;
+  int power_y = 0;
+  int div2_y = 0;
+  int settings_y = 0;
+};
+
+BatteryPageMetrics MakeBatteryPage(bool show_remain) {
+  BatteryPageMetrics m;
+  panel::Stack s;
+  m.header_y = s.Take(panel::kHeaderHDip);
+  s.Gap(panel::kHeaderGapDip);
+  m.gauge_y = s.Take(kGaugeHDip);
+  if (show_remain) {
+    m.remain_y = s.Take(panel::kNoteHDip);
+  }
+  s.Gap(panel::kDivGapDip);
+  m.div1_y = s.Take(panel::kDivHDip);
+  s.Gap(panel::kDivGapDip);
+  m.saver_y = s.Take(panel::kRowHDip);
+  m.power_y = s.Take(panel::kRowHDip);
+  s.Gap(panel::kDivGapDip);
+  m.div2_y = s.Take(panel::kDivHDip);
+  s.Gap(panel::kDivGapDip);
+  m.settings_y = s.Take(panel::kSettingsHDip);
+  m.height = s.Finish();
+  return m;
+}
+
+struct CpuPageMetrics {
+  int height = 0;
+  int header_y = panel::kTopPadDip;
+  int gauge_y = 0;
+  int div1_y = 0;
+  int user_y = 0;
+  int kernel_y = 0;
+  int nproc_y = 0;
+  int div2_y = 0;
+  int settings_y = 0;
+};
+
+CpuPageMetrics MakeCpuPage() {
+  CpuPageMetrics m;
+  panel::Stack s;
+  m.header_y = s.Take(panel::kHeaderHDip);
+  s.Gap(panel::kHeaderGapDip);
+  m.gauge_y = s.Take(kGaugeHDip);
+  s.Gap(panel::kDivGapDip);
+  m.div1_y = s.Take(panel::kDivHDip);
+  s.Gap(panel::kDivGapDip);
+  m.user_y = s.Take(panel::kRowHDip);
+  m.kernel_y = s.Take(panel::kRowHDip);
+  m.nproc_y = s.Take(panel::kRowHDip);
+  s.Gap(panel::kDivGapDip);
+  m.div2_y = s.Take(panel::kDivHDip);
+  s.Gap(panel::kDivGapDip);
+  m.settings_y = s.Take(panel::kSettingsHDip);
+  m.height = s.Finish();
+  return m;
+}
+
+void DrawGaugeBar(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, int y_dip, UINT dpi, bool dark, float level,
+                  uint32_t fill_rgb) {
+  if (target == nullptr || brush == nullptr) {
+    return;
+  }
+  if (level < 0.0f) {
+    level = 0.0f;
+  }
+  if (level > 1.0f) {
+    level = 1.0f;
+  }
+  const float x = static_cast<float>(DipToPx(panel::kInsetDip, dpi));
+  const float y = static_cast<float>(DipToPx(y_dip, dpi));
+  const float w = static_cast<float>(DipToPx(panel::kWidthDip - panel::kInsetDip * 2, dpi));
+  const float h = static_cast<float>(DipToPx(kGaugeHDip, dpi));
+  const float r = corner::PillPx(h);
+  brush->SetColor(BadgeOffFill(dark));
+  target->FillRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(x, y, x + w, y + h), r, r}, brush);
+  if (level > 0.0f) {
+    brush->SetColor(D2D1::ColorF(fill_rgb));
+    target->FillRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(x, y, x + w * level, y + h), r, r}, brush);
+  }
+}
+
+void DrawKvRow(ID2D1RenderTarget* target, IDWriteFactory* dwrite, IDWriteTextFormat* fmt, ID2D1SolidColorBrush* brush,
+               int y_dip, UINT dpi, bool dark, const wchar_t* label, const std::wstring& value) {
+  if (target == nullptr || brush == nullptr || label == nullptr) {
+    return;
+  }
+  const int inset = DipToPx(panel::kInsetDip, dpi);
+  const int width = DipToPx(panel::kWidthDip, dpi);
+  const int top = DipToPx(y_dip, dpi);
+  const int bottom = top + DipToPx(panel::kRowHDip, dpi);
+  const D2D1_COLOR_F fg = ClockTextColor(dark);
+  const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
+  brush->SetColor(fg);
+  DrawTrimmed(target, dwrite, fmt, brush,
+              D2D1::RectF(static_cast<float>(inset), static_cast<float>(top),
+                          static_cast<float>(width - inset - DipToPx(56, dpi)), static_cast<float>(bottom)),
+              label);
+  brush->SetColor(muted);
+  DrawTrimmed(target, dwrite, fmt, brush,
+              D2D1::RectF(static_cast<float>(inset + DipToPx(80, dpi)), static_cast<float>(top),
+                          static_cast<float>(width - inset), static_cast<float>(bottom)),
+              value, DWRITE_TEXT_ALIGNMENT_TRAILING);
+}
+
+const AudioEndpoint* DefaultAudio(const std::vector<AudioEndpoint>& devices) {
+  for (const AudioEndpoint& d : devices) {
+    if (d.is_default) {
+      return &d;
+    }
+  }
+  return nullptr;
 }
 
 void WipeWide(std::wstring* text) {
@@ -1018,8 +1208,32 @@ void ControlCenterContent::Reset(ControlCenterHost host, ControlCenterPage page)
   StopWlanNotify();
   host_ = std::move(host);
   drag_id_ = -1;
-  page_ = page == ControlCenterPage::kWifi ? Page::kWifi : Page::kHome;
-  show_back_ = page != ControlCenterPage::kWifi;
+  switch (page) {
+    case ControlCenterPage::kWifi:
+      page_ = Page::kWifi;
+      show_back_ = false;
+      break;
+    case ControlCenterPage::kVolume:
+      page_ = Page::kVolume;
+      show_back_ = false;
+      break;
+    case ControlCenterPage::kBluetooth:
+      page_ = Page::kBluetooth;
+      show_back_ = false;
+      break;
+    case ControlCenterPage::kBattery:
+      page_ = Page::kBattery;
+      show_back_ = false;
+      break;
+    case ControlCenterPage::kCpu:
+      page_ = Page::kCpu;
+      show_back_ = false;
+      break;
+    default:
+      page_ = Page::kHome;
+      show_back_ = true;
+      break;
+  }
   slow_due_ = 0;
   list_due_ = 0;
   wifi_scan_due_ = 0;
@@ -1035,12 +1249,28 @@ void ControlCenterContent::Reset(ControlCenterHost host, ControlCenterPage page)
   }
 }
 
-bool ControlCenterContent::ShowsNetwork() const {
-  return page_ == Page::kWifi;
+ControlCenterPage ControlCenterContent::CurrentPage() const {
+  switch (page_) {
+    case Page::kWifi:
+      return ControlCenterPage::kWifi;
+    case Page::kVolume:
+      return ControlCenterPage::kVolume;
+    case Page::kBluetooth:
+      return ControlCenterPage::kBluetooth;
+    case Page::kBattery:
+      return ControlCenterPage::kBattery;
+    case Page::kCpu:
+      return ControlCenterPage::kCpu;
+    default:
+      return ControlCenterPage::kHome;
+  }
 }
 
 int ControlCenterContent::CornerDip() const {
-  return page_ == Page::kWifi ? corner::kHeroDip : corner::kOverlayDip;
+  return (page_ == Page::kWifi || page_ == Page::kVolume || page_ == Page::kBluetooth || page_ == Page::kBattery ||
+          page_ == Page::kCpu)
+             ? corner::kHeroDip
+             : corner::kOverlayDip;
 }
 
 void ControlCenterContent::Refresh() {
@@ -1057,21 +1287,6 @@ void ControlCenterContent::QuerySlowState(bool force) {
     return;
   }
   slow_due_ = now + kSlowPeriodMs;
-
-  static bool logged_bt = false;
-  const BtInfo bt = QueryBluetooth();
-  bt_on_ = bt.radio;
-  bt_known_ = true;
-  if (!logged_bt) {
-    logged_bt = true;
-    Log(L"cc", L"bluetooth radio=%d connectable=%d on=%d", bt.radio ? 1 : 0, bt.connectable ? 1 : 0,
-        bt_on_ ? 1 : 0);
-  }
-
-  SYSTEM_POWER_STATUS power{};
-  if (GetSystemPowerStatus(&power) != FALSE) {
-    saver_on_ = (power.SystemStatusFlag & 1) != 0;
-  }
 }
 
 void ControlCenterContent::ApplyLive() {
@@ -1092,6 +1307,22 @@ void ControlCenterContent::ApplyLive() {
   wifi_name_ = live.wifi_name.empty() ? std::wstring(L"연결 안 됨") : live.wifi_name;
   eth_on_ = live.eth_on;
   eth_name_ = live.eth_name;
+  bt_present_ = live.bt_present;
+  bt_on_ = live.bt_on;
+  bt_can_toggle_ = live.bt_can_toggle;
+  bt_known_ = true;
+  battery_ok_ = live.battery_ok;
+  battery_level_ = live.battery_level;
+  battery_ac_ = live.battery_ac;
+  battery_charging_ = live.battery_charging;
+  battery_remain_text_ = live.battery_remain_text;
+  saver_on_ = live.battery_saver_on;
+  battery_saver_toggle_ok_ = live.battery_saver_toggle_ok;
+  cpu_ok_ = live.cpu_ok;
+  cpu_usage_ = live.cpu_usage;
+  cpu_user_ = live.cpu_user;
+  cpu_kernel_ = live.cpu_kernel;
+  cpu_nproc_ = live.cpu_nproc;
   if (page_ == Page::kHome) {
     wifi_radio_on_ = wifi_on_;
   }
@@ -1107,6 +1338,14 @@ int ControlCenterContent::ListCount() const {
 void ControlCenterContent::RefreshPageLists(bool force) {
   const ULONGLONG now = GetTickCount64();
   if (!force && now < list_due_) {
+    return;
+  }
+  if (page_ == Page::kVolume) {
+    audio_outs_ = EnumAudioOutputs();
+    if (audio_outs_.size() > static_cast<size_t>(kAudioListMax)) {
+      audio_outs_.resize(static_cast<size_t>(kAudioListMax));
+    }
+    list_due_ = now + kSlowPeriodMs;
     return;
   }
   if (page_ == Page::kWifi) {
@@ -1280,52 +1519,24 @@ void ControlCenterContent::RefreshPageLists(bool force) {
     return;
   }
   bt_devices_.clear();
-  BLUETOOTH_FIND_RADIO_PARAMS radio_params{};
-  radio_params.dwSize = sizeof(radio_params);
-  HANDLE radio = nullptr;
-  const HBLUETOOTH_RADIO_FIND radio_find = BluetoothFindFirstRadio(&radio_params, &radio);
-  if (radio_find == nullptr) {
-    bt_on_ = false;
-    return;
-  }
-  bt_on_ = radio != nullptr;
-  BLUETOOTH_DEVICE_SEARCH_PARAMS search{};
-  search.dwSize = sizeof(search);
-  search.fReturnAuthenticated = TRUE;
-  search.fReturnRemembered = TRUE;
-  search.fReturnUnknown = FALSE;
-  search.fReturnConnected = TRUE;
-  search.fIssueInquiry = FALSE;
-  search.hRadio = radio;
-  BLUETOOTH_DEVICE_INFO info{};
-  info.dwSize = sizeof(info);
-  const HBLUETOOTH_DEVICE_FIND find = BluetoothFindFirstDevice(&search, &info);
-  if (find != nullptr) {
-    do {
-      BtDevice row;
-      row.info = info;
-      row.name = info.szName;
-      row.connected = info.fConnected != FALSE;
-      if (!row.name.empty()) {
-        bt_devices_.push_back(std::move(row));
-      }
-      info = {};
-      info.dwSize = sizeof(info);
-    } while (BluetoothFindNextDevice(find, &info));
-    BluetoothFindDeviceClose(find);
-  }
-  if (radio != nullptr) {
-    CloseHandle(radio);
-  }
-  BluetoothFindRadioClose(radio_find);
-  std::stable_partition(bt_devices_.begin(), bt_devices_.end(), [](const BtDevice& d) { return d.connected; });
-  if (bt_devices_.size() > static_cast<size_t>(kBtListMax)) {
-    bt_devices_.resize(static_cast<size_t>(kBtListMax));
+  const std::vector<BtDeviceInfo> listed = EnumBtDevices();
+  for (const BtDeviceInfo& d : listed) {
+    BtDevice row;
+    row.name = d.name;
+    row.info = d.raw;
+    row.connected = d.connected;
+    row.paired = d.paired;
+    row.battery = d.battery;
+    row.address = d.address;
+    bt_devices_.push_back(std::move(row));
   }
 }
 
 int ControlCenterContent::WidthDip() const {
-  return page_ == Page::kWifi ? kNetPageWidthDip : kCcWidthDip;
+  return (page_ == Page::kWifi || page_ == Page::kVolume || page_ == Page::kBluetooth || page_ == Page::kBattery ||
+          page_ == Page::kCpu)
+             ? panel::kWidthDip
+             : kCcWidthDip;
 }
 
 int ControlCenterContent::HeightDip() const {
@@ -1333,9 +1544,17 @@ int ControlCenterContent::HeightDip() const {
     const int other_n = (std::max)(0, static_cast<int>(wifi_nets_.size()) - wifi_known_n_);
     return MakeNetworkPage(eth_on_, wifi_iface_ok_, wifi_radio_on_, wifi_known_n_, other_n).height;
   }
+  if (page_ == Page::kVolume) {
+    return MakeVolumePage(static_cast<int>(audio_outs_.size()), DefaultAudioIsBluetooth(audio_outs_)).height;
+  }
   if (page_ == Page::kBluetooth) {
-    const int n = (std::max)(ListCount(), 1);
-    return kPanelPadDip + kPageHeaderHDip + 8 + n * kPageRowHDip + kPageFooterHDip + kPanelPadDip;
+    return MakeBluetoothPage(bt_present_, bt_on_, static_cast<int>(bt_devices_.size())).height;
+  }
+  if (page_ == Page::kBattery) {
+    return MakeBatteryPage(!battery_ac_ && !battery_remain_text_.empty()).height;
+  }
+  if (page_ == Page::kCpu) {
+    return MakeCpuPage().height;
   }
   int h = kPanelPadDip + kConnectHDip + kSectionGapDip + kQuickHDip + kSectionGapDip;
   if (brightness_ok_) {
@@ -1437,50 +1656,109 @@ void ControlCenterContent::BuildHits(UINT dpi) {
   if (page_ == Page::kWifi) {
     const int other_n = (std::max)(0, static_cast<int>(wifi_nets_.size()) - wifi_known_n_);
     const NetworkPageMetrics m = MakeNetworkPage(eth_on_, wifi_iface_ok_, wifi_radio_on_, wifi_known_n_, other_n);
-    const int width = DipToPx(kNetPageWidthDip, dpi);
-    const int inset = DipToPx(kNetInsetDip, dpi);
+    const int width = DipToPx(panel::kWidthDip, dpi);
+    const int inset = DipToPx(panel::kInsetDip, dpi);
     if (show_back_) {
-      add(kPageBack, RECT{inset, DipToPx(m.header_y, dpi), inset + DipToPx(kNetBackWDip, dpi),
-                          DipToPx(m.header_y + kNetHeaderHDip, dpi)});
+      add(kPageBack, RECT{inset, DipToPx(m.header_y, dpi), inset + DipToPx(panel::kBackWDip, dpi),
+                          DipToPx(m.header_y + panel::kHeaderHDip, dpi)});
     }
     if (m.show_toggle) {
-      add(kPageToggle, RECT{width - inset - DipToPx(kNetToggleWDip, dpi), DipToPx(m.header_y, dpi), width - inset,
-                            DipToPx(m.header_y + kNetToggleHDip, dpi)});
+      add(kPageToggle, RECT{width - inset - DipToPx(panel::kToggleWDip, dpi), DipToPx(m.header_y, dpi), width - inset,
+                            DipToPx(m.header_y + panel::kToggleHDip, dpi)});
     }
     auto add_rows = [&](int y0, int n, int extra0) {
       for (int i = 0; i < n; ++i) {
-        const int top = DipToPx(y0 + i * kNetRowHDip, dpi);
+        const int top = DipToPx(y0 + i * panel::kRowHDip, dpi);
         add(kPageList + extra0 + i,
-            RECT{inset, top, width - inset, top + DipToPx(kNetRowHDip, dpi)}, extra0 + i);
+            RECT{inset, top, width - inset, top + DipToPx(panel::kRowHDip, dpi)}, extra0 + i);
       }
     };
     add_rows(m.known_list_y, m.known_n, 0);
     add_rows(m.other_list_y, m.other_n, m.known_n);
     add(kPageNetworkSettings,
         RECT{inset, DipToPx(m.net_settings_y, dpi), width - inset,
-             DipToPx(m.net_settings_y + kNetSettingsHDip, dpi)});
+             DipToPx(m.net_settings_y + panel::kSettingsHDip, dpi)});
     add(kPageWifiSettings,
         RECT{inset, DipToPx(m.wifi_settings_y, dpi), width - inset,
-             DipToPx(m.wifi_settings_y + kNetSettingsHDip, dpi)});
+             DipToPx(m.wifi_settings_y + panel::kSettingsHDip, dpi)});
+    return;
+  }
+  if (page_ == Page::kVolume) {
+    const VolumePageMetrics m =
+        MakeVolumePage(static_cast<int>(audio_outs_.size()), DefaultAudioIsBluetooth(audio_outs_));
+    const int width = DipToPx(panel::kWidthDip, dpi);
+    const int inset = DipToPx(panel::kInsetDip, dpi);
+    if (show_back_) {
+      add(kPageBack, RECT{inset, DipToPx(m.header_y, dpi), inset + DipToPx(panel::kBackWDip, dpi),
+                          DipToPx(m.header_y + panel::kHeaderHDip, dpi)});
+    }
+    add(kVolume, RECT{inset, DipToPx(m.slider_y, dpi), width - inset,
+                      DipToPx(m.slider_y + kVolumeSliderRowHDip, dpi)});
+    for (int i = 0; i < m.list_n; ++i) {
+      const int top = DipToPx(m.list_y + i * panel::kRowHDip, dpi);
+      add(kPageList + i, RECT{inset, top, width - inset, top + DipToPx(panel::kRowHDip, dpi)}, i);
+    }
+    if (m.device_settings_y >= 0) {
+      add(kPageDeviceSettings,
+          RECT{inset, DipToPx(m.device_settings_y, dpi), width - inset,
+               DipToPx(m.device_settings_y + panel::kSettingsHDip, dpi)});
+    }
+    add(kPageSoundSettings,
+        RECT{inset, DipToPx(m.sound_settings_y, dpi), width - inset,
+             DipToPx(m.sound_settings_y + panel::kSettingsHDip, dpi)});
     return;
   }
   if (page_ == Page::kBluetooth) {
-    const int pad = DipToPx(kPanelPadDip, dpi);
-    const int width = DipToPx(kCcWidthDip, dpi);
+    const BluetoothPageMetrics m =
+        MakeBluetoothPage(bt_present_, bt_on_, static_cast<int>(bt_devices_.size()));
+    const int width = DipToPx(panel::kWidthDip, dpi);
+    const int inset = DipToPx(panel::kInsetDip, dpi);
     if (show_back_) {
-      add(kPageBack, RECT{pad, pad, pad + DipToPx(32, dpi), pad + DipToPx(kPageHeaderHDip, dpi)});
+      add(kPageBack, RECT{inset, DipToPx(m.header_y, dpi), inset + DipToPx(panel::kBackWDip, dpi),
+                          DipToPx(m.header_y + panel::kHeaderHDip, dpi)});
     }
-    add(kPageToggle, RECT{width - pad - DipToPx(44, dpi), pad + DipToPx(12, dpi), width - pad,
-                          pad + DipToPx(12 + 24, dpi)});
-    const int list_top = pad + DipToPx(kPageHeaderHDip + 8, dpi);
-    const int row_h = DipToPx(kPageRowHDip, dpi);
-    const int n = ListCount();
-    for (int i = 0; i < n; ++i) {
-      const RECT row{pad, list_top + i * row_h, width - pad, list_top + (i + 1) * row_h};
-      add(kPageList + i, row, i);
+    if (bt_present_) {
+      add(kPageToggle, RECT{width - inset - DipToPx(panel::kToggleWDip, dpi), DipToPx(m.header_y, dpi),
+                            width - inset, DipToPx(m.header_y + panel::kToggleHDip, dpi)});
     }
-    add(kPageMore, RECT{pad, DipToPx(HeightDip() - kPanelPadDip - kPageFooterHDip, dpi), width - pad,
-                        DipToPx(HeightDip() - kPanelPadDip, dpi)});
+    for (int i = 0; i < m.list_n; ++i) {
+      const int top = DipToPx(m.list_y + i * panel::kRowHDip, dpi);
+      add(kPageList + i, RECT{inset, top, width - inset, top + DipToPx(panel::kRowHDip, dpi)}, i);
+    }
+    add(kPageBtSettings,
+        RECT{inset, DipToPx(m.settings_y, dpi), width - inset,
+             DipToPx(m.settings_y + panel::kSettingsHDip, dpi)});
+    return;
+  }
+  if (page_ == Page::kBattery) {
+    const BatteryPageMetrics m = MakeBatteryPage(!battery_ac_ && !battery_remain_text_.empty());
+    const int width = DipToPx(panel::kWidthDip, dpi);
+    const int inset = DipToPx(panel::kInsetDip, dpi);
+    if (show_back_) {
+      add(kPageBack, RECT{inset, DipToPx(m.header_y, dpi), inset + DipToPx(panel::kBackWDip, dpi),
+                          DipToPx(m.header_y + panel::kHeaderHDip, dpi)});
+    }
+    if (battery_saver_toggle_ok_) {
+      add(kPageToggle, RECT{width - inset - DipToPx(panel::kToggleWDip, dpi), DipToPx(m.saver_y, dpi), width - inset,
+                            DipToPx(m.saver_y + panel::kToggleHDip, dpi)});
+    } else {
+      add(kPageSaverSettings, RECT{inset, DipToPx(m.saver_y, dpi), width - inset,
+                                   DipToPx(m.saver_y + panel::kRowHDip, dpi)});
+    }
+    add(kPagePowerSettings, RECT{inset, DipToPx(m.settings_y, dpi), width - inset,
+                                 DipToPx(m.settings_y + panel::kSettingsHDip, dpi)});
+    return;
+  }
+  if (page_ == Page::kCpu) {
+    const CpuPageMetrics m = MakeCpuPage();
+    const int width = DipToPx(panel::kWidthDip, dpi);
+    const int inset = DipToPx(panel::kInsetDip, dpi);
+    if (show_back_) {
+      add(kPageBack, RECT{inset, DipToPx(m.header_y, dpi), inset + DipToPx(panel::kBackWDip, dpi),
+                          DipToPx(m.header_y + panel::kHeaderHDip, dpi)});
+    }
+    add(kPageTaskManager, RECT{inset, DipToPx(m.settings_y, dpi), width - inset,
+                               DipToPx(m.settings_y + panel::kSettingsHDip, dpi)});
     return;
   }
   add(kWifi, ConnectRowRect(dpi, 0));
@@ -1533,6 +1811,30 @@ void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_i
     RenderNetworkPage(target, dpi, hot_id, brush.Get());
     QueryPerformanceCounter(&t1);
     Log(L"cc", L"render %.2fms rows=%d page=1", QpcMs(t0, t1), static_cast<int>(hits_.size()));
+    return;
+  }
+  if (page_ == Page::kVolume) {
+    RenderVolumePage(target, dpi, hot_id, brush.Get());
+    QueryPerformanceCounter(&t1);
+    Log(L"cc", L"render %.2fms rows=%d page=3", QpcMs(t0, t1), static_cast<int>(hits_.size()));
+    return;
+  }
+  if (page_ == Page::kBluetooth) {
+    RenderBluetoothPage(target, dpi, hot_id, brush.Get());
+    QueryPerformanceCounter(&t1);
+    Log(L"cc", L"render %.2fms rows=%d page=2", QpcMs(t0, t1), static_cast<int>(hits_.size()));
+    return;
+  }
+  if (page_ == Page::kBattery) {
+    RenderBatteryPage(target, dpi, hot_id, brush.Get());
+    QueryPerformanceCounter(&t1);
+    Log(L"cc", L"render %.2fms rows=%d page=4", QpcMs(t0, t1), static_cast<int>(hits_.size()));
+    return;
+  }
+  if (page_ == Page::kCpu) {
+    RenderCpuPage(target, dpi, hot_id, brush.Get());
+    QueryPerformanceCounter(&t1);
+    Log(L"cc", L"render %.2fms rows=%d page=5", QpcMs(t0, t1), static_cast<int>(hits_.size()));
     return;
   }
   if (page_ != Page::kHome) {
@@ -1696,32 +1998,18 @@ void ControlCenterContent::RenderNetworkPage(ID2D1RenderTarget* target, UINT dpi
   const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
   const int other_n = (std::max)(0, static_cast<int>(wifi_nets_.size()) - wifi_known_n_);
   const NetworkPageMetrics m = MakeNetworkPage(eth_on_, wifi_iface_ok_, wifi_radio_on_, wifi_known_n_, other_n);
-  const int width = DipToPx(kNetPageWidthDip, dpi);
-  const int inset = DipToPx(kNetInsetDip, dpi);
-  auto fill_hover = [&](const RECT& rc) {
-    brush->SetColor(MenuItemHoverFill(dark, false));
-    const float hover_r = corner::HoverPx(static_cast<float>(rc.bottom - rc.top), dpi);
-    const D2D1_ROUNDED_RECT rr{D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
-                                           static_cast<float>(rc.right), static_cast<float>(rc.bottom)),
-                               hover_r, hover_r};
-    target->FillRoundedRectangle(rr, brush);
-  };
-  auto draw_div = [&](int y_dip) {
-    const float y = DipToPxF(static_cast<float>(y_dip), dpi);
-    const float h = DipToPxF(static_cast<float>(kNetDivHDip), dpi);
-    brush->SetColor(ScaleAlpha(fg, 0.10f));
-    target->FillRectangle(D2D1::RectF(static_cast<float>(inset), y, static_cast<float>(width - inset), y + h), brush);
-  };
+  const int width = DipToPx(panel::kWidthDip, dpi);
+  const int inset = DipToPx(panel::kInsetDip, dpi);
   auto text_rect = [&](int y, int h, int left, int right) {
     return D2D1::RectF(static_cast<float>(left), static_cast<float>(DipToPx(y, dpi)), static_cast<float>(right),
                        static_cast<float>(DipToPx(y + h, dpi)));
   };
 
   if (show_back_) {
-    const RECT back{inset, DipToPx(m.header_y, dpi), inset + DipToPx(kNetBackWDip, dpi),
-                    DipToPx(m.header_y + kNetHeaderHDip, dpi)};
+    const RECT back{inset, DipToPx(m.header_y, dpi), inset + DipToPx(panel::kBackWDip, dpi),
+                    DipToPx(m.header_y + panel::kHeaderHDip, dpi)};
     if (hot_id == kPageBack) {
-      fill_hover(back);
+      panel::FillHover(target, brush, back, dpi, dark);
     }
     brush->SetColor(fg);
     if (dwrite_ && fluent17_) {
@@ -1732,40 +2020,18 @@ void ControlCenterContent::RenderNetworkPage(ID2D1RenderTarget* target, UINT dpi
     }
   }
 
-  const float title_l = static_cast<float>(inset + (show_back_ ? DipToPx(kNetBackWDip + 4, dpi) : 0));
-  const float title_r = static_cast<float>(width - inset - (m.show_toggle ? DipToPx(kNetToggleWDip + 8, dpi) : 0));
+  const float title_l = static_cast<float>(inset + (show_back_ ? DipToPx(panel::kBackWDip + 4, dpi) : 0));
+  const float title_r = static_cast<float>(width - inset - (m.show_toggle ? DipToPx(panel::kToggleWDip + 8, dpi) : 0));
   brush->SetColor(fg);
   DrawTrimmed(target, dwrite_.Get(), semibold14_ ? semibold14_.Get() : semibold13_.Get(), brush,
               D2D1::RectF(title_l, static_cast<float>(DipToPx(m.header_y, dpi)), title_r,
-                          static_cast<float>(DipToPx(m.header_y + kNetHeaderHDip, dpi))),
+                          static_cast<float>(DipToPx(m.header_y + panel::kHeaderHDip, dpi))),
               L"Wi-Fi");
 
   if (m.show_toggle) {
-    const RECT toggle{width - inset - DipToPx(kNetToggleWDip, dpi), DipToPx(m.header_y, dpi), width - inset,
-                      DipToPx(m.header_y + kNetToggleHDip, dpi)};
-    const float th = static_cast<float>(toggle.bottom - toggle.top);
-    const float toggle_pill = corner::PillPx(th);
-    D2D1_COLOR_F track = wifi_radio_on_ ? AccentFillColor(dark) : BadgeOffFill(dark);
-    D2D1_COLOR_F knob_color = AccentOnColor(dark);
-    if (!wifi_hw_radio_on_) {
-      track = ScaleAlpha(track, 0.40f);
-      knob_color = ScaleAlpha(knob_color, 0.40f);
-    }
-    brush->SetColor(track);
-    target->FillRoundedRectangle(
-        D2D1_ROUNDED_RECT{D2D1::RectF(static_cast<float>(toggle.left), static_cast<float>(toggle.top),
-                                      static_cast<float>(toggle.right), static_cast<float>(toggle.bottom)),
-                          toggle_pill, toggle_pill},
-        brush);
-    const float knob = DipToPxF(kNetKnobDip, dpi);
-    const float knob_inset = DipToPxF(kNetKnobInsetDip, dpi);
-    const float knob_x = wifi_radio_on_ ? static_cast<float>(toggle.right) - knob_inset - knob
-                                        : static_cast<float>(toggle.left) + knob_inset;
-    brush->SetColor(knob_color);
-    target->FillEllipse(
-        D2D1::Ellipse(D2D1::Point2F(knob_x + knob * 0.5f, static_cast<float>(toggle.top) + th * 0.5f), knob * 0.5f,
-                      knob * 0.5f),
-        brush);
+    const RECT toggle{width - inset - DipToPx(panel::kToggleWDip, dpi), DipToPx(m.header_y, dpi), width - inset,
+                      DipToPx(m.header_y + panel::kToggleHDip, dpi)};
+    panel::DrawToggle(target, brush, toggle, dpi, wifi_radio_on_, wifi_hw_radio_on_, dark);
   }
 
   if (m.show_eth) {
@@ -1773,25 +2039,22 @@ void ControlCenterContent::RenderNetworkPage(ID2D1RenderTarget* target, UINT dpi
     eth += eth_name_.empty() ? std::wstring(L"연결됨") : eth_name_;
     brush->SetColor(muted);
     DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush,
-                text_rect(m.eth_y, kNetEthHDip, inset, width - inset), eth);
+                text_rect(m.eth_y, panel::kNoteHDip, inset, width - inset), eth);
   }
 
-  draw_div(m.div1_y);
+  panel::DrawDivider(target, brush, m.div1_y, dpi, dark);
 
   if (m.empty_text != nullptr) {
     brush->SetColor(muted);
     DrawTrimmed(target, dwrite_.Get(), regular14_ ? regular14_.Get() : regular12_.Get(), brush,
-                text_rect(m.empty_y, kNetRowHDip, inset, width - inset), m.empty_text);
+                text_rect(m.empty_y, panel::kRowHDip, inset, width - inset), m.empty_text);
   }
 
   auto draw_section = [&](int header_y, const wchar_t* title, int list_y, int n, int extra0) {
     if (header_y >= 0) {
-      brush->SetColor(muted);
-      DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush,
-                  text_rect(header_y, kNetSectionHDip, inset, width - inset), title);
+      panel::DrawSectionHeader(target, dwrite_.Get(), regular12_.Get(), brush, header_y, dpi, dark, title);
     }
-    const float circle = DipToPxF(static_cast<float>(kNetCircleDip), dpi);
-    const float glyph = circle * 0.55f;
+    const float circle = DipToPxF(static_cast<float>(panel::kCircleDip), dpi);
     const float lock_w = DipToPxF(9.0f, dpi);
     const float lock_h = DipToPxF(12.5f, dpi);
     const float lock_gap = DipToPxF(2.0f, dpi);
@@ -1801,22 +2064,16 @@ void ControlCenterContent::RenderNetworkPage(ID2D1RenderTarget* target, UINT dpi
         continue;
       }
       const WifiNetwork& net = wifi_nets_[static_cast<size_t>(idx)];
-      const RECT row{inset, DipToPx(list_y + i * kNetRowHDip, dpi), width - inset,
-                     DipToPx(list_y + (i + 1) * kNetRowHDip, dpi)};
+      const RECT row{inset, DipToPx(list_y + i * panel::kRowHDip, dpi), width - inset,
+                     DipToPx(list_y + (i + 1) * panel::kRowHDip, dpi)};
       if (hot_id == kPageList + idx) {
-        fill_hover(row);
+        panel::FillHover(target, brush, row, dpi, dark);
       }
       const float cy = static_cast<float>(row.top + row.bottom) * 0.5f;
       const float cx = static_cast<float>(row.left) + circle * 0.5f;
-      brush->SetColor(net.connected ? AccentFillColor(dark) : BadgeOffFill(dark));
-      target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), circle * 0.5f, circle * 0.5f), brush);
-      brush->SetColor(net.connected ? AccentOnColor(dark) : fg);
-      if (dwrite_ && fluent14_) {
-        DrawGlyphInked(target, dwrite_.Get(), fluent14_.Get(), brush,
-                       D2D1::RectF(cx - glyph * 0.5f, cy - glyph * 0.5f, cx + glyph * 0.5f, cy + glyph * 0.5f),
-                       kWifiGlyph);
-      }
-      const float text_l = static_cast<float>(DipToPx(49, dpi));
+      panel::DrawRowCircle(target, dwrite_.Get(), fluent14_.Get(), brush, cx, cy, dpi, dark, net.connected,
+                           kWifiGlyph);
+      const float text_l = static_cast<float>(DipToPx(panel::kTextLeftDip, dpi));
       float text_r = static_cast<float>(row.right);
       if (net.secure) {
         const float lock_r = static_cast<float>(row.right) - lock_gap;
@@ -1836,21 +2093,399 @@ void ControlCenterContent::RenderNetworkPage(ID2D1RenderTarget* target, UINT dpi
   draw_section(m.known_header_y, L"알려진 네트워크", m.known_list_y, m.known_n, 0);
   draw_section(m.other_header_y, L"다른 네트워크", m.other_list_y, m.other_n, m.known_n);
 
-  draw_div(m.div2_y);
+  panel::DrawDivider(target, brush, m.div2_y, dpi, dark);
 
-  auto draw_settings = [&](int y, int id, const wchar_t* label) {
-    const RECT row{inset, DipToPx(y, dpi), width - inset, DipToPx(y + kNetSettingsHDip, dpi)};
-    if (hot_id == id) {
-      fill_hover(row);
+  IDWriteTextFormat* settings_fmt = regular13_ ? regular13_.Get() : regular12_.Get();
+  panel::DrawSettingsRow(target, dwrite_.Get(), settings_fmt, brush, m.net_settings_y, dpi, dark,
+                         hot_id == kPageNetworkSettings, L"네트워크 설정\u2026");
+  panel::DrawSettingsRow(target, dwrite_.Get(), settings_fmt, brush, m.wifi_settings_y, dpi, dark,
+                         hot_id == kPageWifiSettings, L"Wi-Fi 설정\u2026");
+}
+
+RECT ControlCenterContent::VolumeSliderTrackRect(UINT dpi) const {
+  const VolumePageMetrics m =
+      MakeVolumePage(static_cast<int>(audio_outs_.size()), DefaultAudioIsBluetooth(audio_outs_));
+  int track_l = 0;
+  int track_r = 0;
+  VolumeSliderTrackDip(&track_l, &track_r);
+  const int y = DipToPx(m.slider_y, dpi) +
+                (DipToPx(kVolumeSliderRowHDip, dpi) - DipToPx(kVolumeTrackHDip, dpi)) / 2;
+  return RECT{DipToPx(track_l, dpi), y, DipToPx(track_r, dpi), y + DipToPx(kVolumeTrackHDip, dpi)};
+}
+
+void ControlCenterContent::RenderVolumePage(ID2D1RenderTarget* target, UINT dpi, int hot_id,
+                                            ID2D1SolidColorBrush* brush) {
+  if (target == nullptr || brush == nullptr) {
+    return;
+  }
+  const bool dark = host_.dark;
+  const D2D1_COLOR_F fg = ClockTextColor(dark);
+  const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
+  const VolumePageMetrics m =
+      MakeVolumePage(static_cast<int>(audio_outs_.size()), DefaultAudioIsBluetooth(audio_outs_));
+  const int width = DipToPx(panel::kWidthDip, dpi);
+  const int inset = DipToPx(panel::kInsetDip, dpi);
+
+  if (show_back_) {
+    const RECT back{inset, DipToPx(m.header_y, dpi), inset + DipToPx(panel::kBackWDip, dpi),
+                    DipToPx(m.header_y + panel::kHeaderHDip, dpi)};
+    if (hot_id == kPageBack) {
+      panel::FillHover(target, brush, back, dpi, dark);
     }
     brush->SetColor(fg);
-    DrawTrimmed(target, dwrite_.Get(), regular13_ ? regular13_.Get() : regular12_.Get(), brush,
-                D2D1::RectF(static_cast<float>(row.left), static_cast<float>(row.top),
-                            static_cast<float>(row.right), static_cast<float>(row.bottom)),
-                label);
-  };
-  draw_settings(m.net_settings_y, kPageNetworkSettings, L"네트워크 설정\u2026");
-  draw_settings(m.wifi_settings_y, kPageWifiSettings, L"Wi-Fi 설정\u2026");
+    if (dwrite_ && fluent17_) {
+      DrawGlyph(target, dwrite_.Get(), fluent17_.Get(), brush,
+                D2D1::RectF(static_cast<float>(back.left), static_cast<float>(back.top),
+                            static_cast<float>(back.right), static_cast<float>(back.bottom)),
+                kBackGlyph);
+    }
+  }
+
+  const float title_l = static_cast<float>(inset + (show_back_ ? DipToPx(panel::kBackWDip + 4, dpi) : 0));
+  brush->SetColor(fg);
+  DrawTrimmed(target, dwrite_.Get(), semibold14_ ? semibold14_.Get() : semibold13_.Get(), brush,
+              D2D1::RectF(title_l, static_cast<float>(DipToPx(m.header_y, dpi)),
+                          static_cast<float>(width - inset),
+                          static_cast<float>(DipToPx(m.header_y + panel::kHeaderHDip, dpi))),
+              L"사운드");
+
+  const RECT slider_row{inset, DipToPx(m.slider_y, dpi), width - inset,
+                        DipToPx(m.slider_y + kVolumeSliderRowHDip, dpi)};
+  const float icon = DipToPxF(static_cast<float>(kVolumeSliderIconDip), dpi);
+  const float row_cy = static_cast<float>(slider_row.top + slider_row.bottom) * 0.5f;
+  const D2D1_RECT_F left_icon{static_cast<float>(slider_row.left), row_cy - icon * 0.5f,
+                              static_cast<float>(slider_row.left) + icon, row_cy + icon * 0.5f};
+  const D2D1_RECT_F right_icon{static_cast<float>(slider_row.right) - icon, row_cy - icon * 0.5f,
+                               static_cast<float>(slider_row.right), row_cy + icon * 0.5f};
+  brush->SetColor(fg);
+  if (dwrite_ && fluent14_) {
+    DrawGlyphInked(target, dwrite_.Get(), fluent14_.Get(), brush, left_icon, kVolSmallGlyph);
+    DrawGlyphInked(target, dwrite_.Get(), fluent14_.Get(), brush, right_icon, kVolLoudGlyph);
+  }
+
+  const RECT track = VolumeSliderTrackRect(dpi);
+  const float track_l = static_cast<float>(track.left);
+  const float track_r = static_cast<float>(track.right);
+  const float track_t = static_cast<float>(track.top);
+  const float track_b = static_cast<float>(track.bottom);
+  const float track_h = track_b - track_t;
+  const float pill = corner::PillPx(track_h);
+  const float knob = DipToPxF(kVolumeKnobDip, dpi);
+  const float knob_r = knob * 0.5f;
+  const float lo = track_l + knob_r;
+  const float hi = track_r - knob_r;
+  const float v = ClampUnit(volume_);
+  const float knob_x = lo + (hi - lo) * v;
+  D2D1_COLOR_F fill = AccentFillColor(dark);
+  D2D1_COLOR_F knob_color = AccentOnColor(dark);
+  if (muted_) {
+    fill = ScaleAlpha(fill, 0.40f);
+    knob_color = ScaleAlpha(knob_color, 0.40f);
+  }
+  brush->SetColor(BadgeOffFill(dark));
+  target->FillRoundedRectangle(
+      D2D1_ROUNDED_RECT{D2D1::RectF(track_l, track_t, track_r, track_b), pill, pill}, brush);
+  brush->SetColor(fill);
+  target->FillRoundedRectangle(
+      D2D1_ROUNDED_RECT{D2D1::RectF(track_l, track_t, knob_x, track_b), pill, pill}, brush);
+  brush->SetColor(knob_color);
+  target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knob_x, row_cy), knob_r, knob_r), brush);
+
+  panel::DrawDivider(target, brush, m.div1_y, dpi, dark);
+
+  if (m.empty_text != nullptr) {
+    brush->SetColor(muted);
+    DrawTrimmed(target, dwrite_.Get(), regular14_ ? regular14_.Get() : regular12_.Get(), brush,
+                D2D1::RectF(static_cast<float>(inset), static_cast<float>(DipToPx(m.empty_y, dpi)),
+                            static_cast<float>(width - inset),
+                            static_cast<float>(DipToPx(m.empty_y + panel::kRowHDip, dpi))),
+                m.empty_text);
+  } else if (m.section_y >= 0) {
+    panel::DrawSectionHeader(target, dwrite_.Get(), regular12_.Get(), brush, m.section_y, dpi, dark, L"출력");
+    const float circle = DipToPxF(static_cast<float>(panel::kCircleDip), dpi);
+    for (int i = 0; i < m.list_n; ++i) {
+      if (i < 0 || i >= static_cast<int>(audio_outs_.size())) {
+        continue;
+      }
+      const AudioEndpoint& dev = audio_outs_[static_cast<size_t>(i)];
+      const RECT row{inset, DipToPx(m.list_y + i * panel::kRowHDip, dpi), width - inset,
+                     DipToPx(m.list_y + (i + 1) * panel::kRowHDip, dpi)};
+      if (hot_id == kPageList + i) {
+        panel::FillHover(target, brush, row, dpi, dark);
+      }
+      const float cy = static_cast<float>(row.top + row.bottom) * 0.5f;
+      const float cx = static_cast<float>(row.left) + circle * 0.5f;
+      panel::DrawRowCircle(target, dwrite_.Get(), fluent14_.Get(), brush, cx, cy, dpi, dark, dev.is_default,
+                           AudioFormGlyph(dev.form));
+      brush->SetColor(fg);
+      DrawTrimmed(target, dwrite_.Get(), regular14_ ? regular14_.Get() : regular12_.Get(), brush,
+                  D2D1::RectF(static_cast<float>(DipToPx(panel::kTextLeftDip, dpi)), static_cast<float>(row.top),
+                              static_cast<float>(row.right), static_cast<float>(row.bottom)),
+                  dev.name);
+    }
+  }
+
+  panel::DrawDivider(target, brush, m.div2_y, dpi, dark);
+
+  IDWriteTextFormat* settings_fmt = regular13_ ? regular13_.Get() : regular12_.Get();
+  if (m.device_settings_y >= 0) {
+    const AudioEndpoint* def = DefaultAudio(audio_outs_);
+    std::wstring label = def != nullptr ? def->name : std::wstring();
+    label += L" 설정\u2026";
+    panel::DrawSettingsRow(target, dwrite_.Get(), settings_fmt, brush, m.device_settings_y, dpi, dark,
+                           hot_id == kPageDeviceSettings, label.c_str());
+  }
+  panel::DrawSettingsRow(target, dwrite_.Get(), settings_fmt, brush, m.sound_settings_y, dpi, dark,
+                         hot_id == kPageSoundSettings, L"사운드 설정\u2026");
+}
+
+void ControlCenterContent::RenderBluetoothPage(ID2D1RenderTarget* target, UINT dpi, int hot_id,
+                                               ID2D1SolidColorBrush* brush) {
+  if (target == nullptr || brush == nullptr) {
+    return;
+  }
+  const bool dark = host_.dark;
+  const D2D1_COLOR_F fg = ClockTextColor(dark);
+  const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
+  const BluetoothPageMetrics m =
+      MakeBluetoothPage(bt_present_, bt_on_, static_cast<int>(bt_devices_.size()));
+  const int width = DipToPx(panel::kWidthDip, dpi);
+  const int inset = DipToPx(panel::kInsetDip, dpi);
+
+  if (show_back_) {
+    const RECT back{inset, DipToPx(m.header_y, dpi), inset + DipToPx(panel::kBackWDip, dpi),
+                    DipToPx(m.header_y + panel::kHeaderHDip, dpi)};
+    if (hot_id == kPageBack) {
+      panel::FillHover(target, brush, back, dpi, dark);
+    }
+    brush->SetColor(fg);
+    if (dwrite_ && fluent17_) {
+      DrawGlyph(target, dwrite_.Get(), fluent17_.Get(), brush,
+                D2D1::RectF(static_cast<float>(back.left), static_cast<float>(back.top),
+                            static_cast<float>(back.right), static_cast<float>(back.bottom)),
+                kBackGlyph);
+    }
+  }
+
+  const float title_l = static_cast<float>(inset + (show_back_ ? DipToPx(panel::kBackWDip + 4, dpi) : 0));
+  const float title_r = static_cast<float>(width - inset - (bt_present_ ? DipToPx(panel::kToggleWDip + 8, dpi) : 0));
+  brush->SetColor(fg);
+  DrawTrimmed(target, dwrite_.Get(), semibold14_ ? semibold14_.Get() : semibold13_.Get(), brush,
+              D2D1::RectF(title_l, static_cast<float>(DipToPx(m.header_y, dpi)), title_r,
+                          static_cast<float>(DipToPx(m.header_y + panel::kHeaderHDip, dpi))),
+              L"Bluetooth");
+
+  if (bt_present_) {
+    const RECT toggle{width - inset - DipToPx(panel::kToggleWDip, dpi), DipToPx(m.header_y, dpi), width - inset,
+                      DipToPx(m.header_y + panel::kToggleHDip, dpi)};
+    panel::DrawToggle(target, brush, toggle, dpi, bt_on_, bt_can_toggle_, dark);
+  }
+
+  panel::DrawDivider(target, brush, m.div1_y, dpi, dark);
+
+  if (m.empty_text != nullptr) {
+    brush->SetColor(muted);
+    DrawTrimmed(target, dwrite_.Get(), regular14_ ? regular14_.Get() : regular12_.Get(), brush,
+                D2D1::RectF(static_cast<float>(inset), static_cast<float>(DipToPx(m.empty_y, dpi)),
+                            static_cast<float>(width - inset),
+                            static_cast<float>(DipToPx(m.empty_y + panel::kRowHDip, dpi))),
+                m.empty_text);
+  } else {
+    const float circle = DipToPxF(static_cast<float>(panel::kCircleDip), dpi);
+    for (int i = 0; i < m.list_n; ++i) {
+      if (i < 0 || i >= static_cast<int>(bt_devices_.size())) {
+        continue;
+      }
+      const BtDevice& dev = bt_devices_[static_cast<size_t>(i)];
+      const RECT row{inset, DipToPx(m.list_y + i * panel::kRowHDip, dpi), width - inset,
+                     DipToPx(m.list_y + (i + 1) * panel::kRowHDip, dpi)};
+      if (hot_id == kPageList + i) {
+        panel::FillHover(target, brush, row, dpi, dark);
+      }
+      const float cy = static_cast<float>(row.top + row.bottom) * 0.5f;
+      const float cx = static_cast<float>(row.left) + circle * 0.5f;
+      panel::DrawRowCircle(target, dwrite_.Get(), fluent14_.Get(), brush, cx, cy, dpi, dark, dev.connected,
+                           BtClassGlyph(dev.info.ulClassofDevice));
+      float text_r = static_cast<float>(row.right);
+      if (dev.battery >= 0) {
+        wchar_t pct[16]{};
+        swprintf_s(pct, L"%d%%", dev.battery);
+        const float bat_w = DipToPxF(36.0f, dpi);
+        brush->SetColor(muted);
+        DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush,
+                    D2D1::RectF(static_cast<float>(row.right) - bat_w, static_cast<float>(row.top),
+                                static_cast<float>(row.right), static_cast<float>(row.bottom)),
+                    pct);
+        text_r -= bat_w + DipToPxF(8.0f, dpi);
+      }
+      brush->SetColor(dev.connected ? fg : muted);
+      DrawTrimmed(target, dwrite_.Get(), regular14_ ? regular14_.Get() : regular12_.Get(), brush,
+                  D2D1::RectF(static_cast<float>(DipToPx(panel::kTextLeftDip, dpi)), static_cast<float>(row.top),
+                              text_r, static_cast<float>(row.bottom)),
+                  dev.name);
+    }
+  }
+
+  panel::DrawDivider(target, brush, m.div2_y, dpi, dark);
+  panel::DrawSettingsRow(target, dwrite_.Get(), regular13_ ? regular13_.Get() : regular12_.Get(), brush,
+                         m.settings_y, dpi, dark, hot_id == kPageBtSettings, L"Bluetooth 설정\u2026");
+}
+
+void ControlCenterContent::RenderBatteryPage(ID2D1RenderTarget* target, UINT dpi, int hot_id,
+                                             ID2D1SolidColorBrush* brush) {
+  if (target == nullptr || brush == nullptr) {
+    return;
+  }
+  const bool dark = host_.dark;
+  const D2D1_COLOR_F fg = ClockTextColor(dark);
+  const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
+  const bool show_remain = !battery_ac_ && !battery_remain_text_.empty();
+  const BatteryPageMetrics m = MakeBatteryPage(show_remain);
+  const int width = DipToPx(panel::kWidthDip, dpi);
+  const int inset = DipToPx(panel::kInsetDip, dpi);
+  IDWriteTextFormat* title_fmt = semibold14_ ? semibold14_.Get() : semibold13_.Get();
+  IDWriteTextFormat* body_fmt = regular14_ ? regular14_.Get() : regular12_.Get();
+
+  if (show_back_) {
+    const RECT back{inset, DipToPx(m.header_y, dpi), inset + DipToPx(panel::kBackWDip, dpi),
+                    DipToPx(m.header_y + panel::kHeaderHDip, dpi)};
+    if (hot_id == kPageBack) {
+      panel::FillHover(target, brush, back, dpi, dark);
+    }
+    brush->SetColor(fg);
+    if (dwrite_ && fluent17_) {
+      DrawGlyph(target, dwrite_.Get(), fluent17_.Get(), brush,
+                D2D1::RectF(static_cast<float>(back.left), static_cast<float>(back.top),
+                            static_cast<float>(back.right), static_cast<float>(back.bottom)),
+                kBackGlyph);
+    }
+  }
+
+  const float title_l = static_cast<float>(inset + (show_back_ ? DipToPx(panel::kBackWDip + 4, dpi) : 0));
+  const float pct_w = DipToPxF(48.0f, dpi);
+  brush->SetColor(fg);
+  DrawTrimmed(target, dwrite_.Get(), title_fmt, brush,
+              D2D1::RectF(title_l, static_cast<float>(DipToPx(m.header_y, dpi)),
+                          static_cast<float>(width - inset) - pct_w,
+                          static_cast<float>(DipToPx(m.header_y + panel::kHeaderHDip, dpi))),
+              L"배터리");
+  wchar_t pct[16]{};
+  swprintf_s(pct, L"%d%%", static_cast<int>(battery_level_ * 100.0f + 0.5f));
+  DrawTrimmed(target, dwrite_.Get(), title_fmt, brush,
+              D2D1::RectF(static_cast<float>(width - inset) - pct_w, static_cast<float>(DipToPx(m.header_y, dpi)),
+                          static_cast<float>(width - inset),
+                          static_cast<float>(DipToPx(m.header_y + panel::kHeaderHDip, dpi))),
+              pct, DWRITE_TEXT_ALIGNMENT_TRAILING);
+
+  DrawGaugeBar(target, brush, m.gauge_y, dpi, dark, battery_level_,
+               BatteryFillRgb(dark, battery_level_, battery_ac_));
+  if (show_remain) {
+    brush->SetColor(muted);
+    DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush,
+                D2D1::RectF(static_cast<float>(inset), static_cast<float>(DipToPx(m.remain_y, dpi)),
+                            static_cast<float>(width - inset),
+                            static_cast<float>(DipToPx(m.remain_y + panel::kNoteHDip, dpi))),
+                battery_remain_text_);
+  }
+
+  panel::DrawDivider(target, brush, m.div1_y, dpi, dark);
+
+  const RECT saver{inset, DipToPx(m.saver_y, dpi), width - inset, DipToPx(m.saver_y + panel::kRowHDip, dpi)};
+  if (hot_id == kPageToggle || hot_id == kPageSaverSettings) {
+    panel::FillHover(target, brush, saver, dpi, dark);
+  }
+  brush->SetColor(fg);
+  DrawTrimmed(target, dwrite_.Get(), body_fmt, brush,
+              D2D1::RectF(static_cast<float>(inset), static_cast<float>(saver.top),
+                          static_cast<float>(width - inset - DipToPx(panel::kToggleWDip + 8, dpi)),
+                          static_cast<float>(saver.bottom)),
+              L"절전 모드");
+  if (battery_saver_toggle_ok_) {
+    const RECT toggle{width - inset - DipToPx(panel::kToggleWDip, dpi),
+                      DipToPx(m.saver_y, dpi) + (DipToPx(panel::kRowHDip, dpi) - DipToPx(panel::kToggleHDip, dpi)) / 2,
+                      width - inset,
+                      DipToPx(m.saver_y, dpi) + (DipToPx(panel::kRowHDip, dpi) - DipToPx(panel::kToggleHDip, dpi)) / 2 +
+                          DipToPx(panel::kToggleHDip, dpi)};
+    panel::DrawToggle(target, brush, toggle, dpi, saver_on_, !battery_ac_, dark);
+  } else {
+    brush->SetColor(muted);
+    DrawTrimmed(target, dwrite_.Get(), body_fmt, brush,
+                D2D1::RectF(static_cast<float>(inset + DipToPx(80, dpi)), static_cast<float>(saver.top),
+                            static_cast<float>(width - inset), static_cast<float>(saver.bottom)),
+                saver_on_ ? L"켜짐" : L"꺼짐", DWRITE_TEXT_ALIGNMENT_TRAILING);
+  }
+
+  const wchar_t* power = L"알 수 없음";
+  if (battery_ok_) {
+    power = battery_ac_ ? L"연결됨" : L"배터리 사용 중";
+  }
+  DrawKvRow(target, dwrite_.Get(), body_fmt, brush, m.power_y, dpi, dark, L"전원", power);
+
+  panel::DrawDivider(target, brush, m.div2_y, dpi, dark);
+  panel::DrawSettingsRow(target, dwrite_.Get(), regular13_ ? regular13_.Get() : regular12_.Get(), brush,
+                         m.settings_y, dpi, dark, hot_id == kPagePowerSettings, L"전원 설정\u2026");
+}
+
+void ControlCenterContent::RenderCpuPage(ID2D1RenderTarget* target, UINT dpi, int hot_id,
+                                         ID2D1SolidColorBrush* brush) {
+  if (target == nullptr || brush == nullptr) {
+    return;
+  }
+  const bool dark = host_.dark;
+  const D2D1_COLOR_F fg = ClockTextColor(dark);
+  const CpuPageMetrics m = MakeCpuPage();
+  const int width = DipToPx(panel::kWidthDip, dpi);
+  const int inset = DipToPx(panel::kInsetDip, dpi);
+  IDWriteTextFormat* title_fmt = semibold14_ ? semibold14_.Get() : semibold13_.Get();
+  IDWriteTextFormat* body_fmt = regular14_ ? regular14_.Get() : regular12_.Get();
+
+  if (show_back_) {
+    const RECT back{inset, DipToPx(m.header_y, dpi), inset + DipToPx(panel::kBackWDip, dpi),
+                    DipToPx(m.header_y + panel::kHeaderHDip, dpi)};
+    if (hot_id == kPageBack) {
+      panel::FillHover(target, brush, back, dpi, dark);
+    }
+    brush->SetColor(fg);
+    if (dwrite_ && fluent17_) {
+      DrawGlyph(target, dwrite_.Get(), fluent17_.Get(), brush,
+                D2D1::RectF(static_cast<float>(back.left), static_cast<float>(back.top),
+                            static_cast<float>(back.right), static_cast<float>(back.bottom)),
+                kBackGlyph);
+    }
+  }
+
+  const float title_l = static_cast<float>(inset + (show_back_ ? DipToPx(panel::kBackWDip + 4, dpi) : 0));
+  const float pct_w = DipToPxF(48.0f, dpi);
+  brush->SetColor(fg);
+  DrawTrimmed(target, dwrite_.Get(), title_fmt, brush,
+              D2D1::RectF(title_l, static_cast<float>(DipToPx(m.header_y, dpi)),
+                          static_cast<float>(width - inset) - pct_w,
+                          static_cast<float>(DipToPx(m.header_y + panel::kHeaderHDip, dpi))),
+              L"CPU");
+  wchar_t pct[16]{};
+  swprintf_s(pct, L"%d%%", static_cast<int>(cpu_usage_ * 100.0f + 0.5f));
+  DrawTrimmed(target, dwrite_.Get(), title_fmt, brush,
+              D2D1::RectF(static_cast<float>(width - inset) - pct_w, static_cast<float>(DipToPx(m.header_y, dpi)),
+                          static_cast<float>(width - inset),
+                          static_cast<float>(DipToPx(m.header_y + panel::kHeaderHDip, dpi))),
+              pct, DWRITE_TEXT_ALIGNMENT_TRAILING);
+
+  DrawGaugeBar(target, brush, m.gauge_y, dpi, dark, cpu_usage_, CpuFillRgb(dark, cpu_usage_));
+  panel::DrawDivider(target, brush, m.div1_y, dpi, dark);
+
+  wchar_t user[16]{};
+  wchar_t kernel[16]{};
+  wchar_t nproc[16]{};
+  swprintf_s(user, L"%d%%", static_cast<int>(cpu_user_ * 100.0f + 0.5f));
+  swprintf_s(kernel, L"%d%%", static_cast<int>(cpu_kernel_ * 100.0f + 0.5f));
+  swprintf_s(nproc, L"%u", cpu_nproc_);
+  DrawKvRow(target, dwrite_.Get(), body_fmt, brush, m.user_y, dpi, dark, L"사용자", user);
+  DrawKvRow(target, dwrite_.Get(), body_fmt, brush, m.kernel_y, dpi, dark, L"커널", kernel);
+  DrawKvRow(target, dwrite_.Get(), body_fmt, brush, m.nproc_y, dpi, dark, L"논리 프로세서", nproc);
+
+  panel::DrawDivider(target, brush, m.div2_y, dpi, dark);
+  panel::DrawSettingsRow(target, dwrite_.Get(), regular13_ ? regular13_.Get() : regular12_.Get(), brush,
+                         m.settings_y, dpi, dark, hot_id == kPageTaskManager, L"작업 관리자\u2026");
 }
 
 void ControlCenterContent::RenderListPage(ID2D1RenderTarget* target, UINT dpi, int hot_id,
@@ -2029,25 +2664,36 @@ void ControlCenterContent::Invoke(int index) {
         }
         SetWifiRadio(!wifi_radio_on_);
       } else if (page_ == Page::kBluetooth) {
-        BLUETOOTH_FIND_RADIO_PARAMS params{};
-        params.dwSize = sizeof(params);
-        HANDLE radio = nullptr;
-        const HBLUETOOTH_RADIO_FIND find = BluetoothFindFirstRadio(&params, &radio);
-        if (find != nullptr) {
-          const BOOL next = bt_on_ ? FALSE : TRUE;
-          if (radio != nullptr) {
-            BluetoothEnableDiscovery(radio, next);
-            BluetoothEnableIncomingConnections(radio, next);
-            CloseHandle(radio);
-          }
-          BluetoothFindRadioClose(find);
-          bt_on_ = next != FALSE;
+        if (!bt_can_toggle_) {
+          OpenSettingsPage(L"ms-settings:bluetooth");
+          break;
+        }
+        if (host_.dispatch) {
+          StatusEvent ev;
+          ev.id = "bamti.widget/bluetooth";
+          ev.event = "toggle";
+          ev.row_id = "radio";
+          ev.on = !bt_on_;
+          host_.dispatch(ev);
         }
         list_due_ = 0;
         RefreshPageLists(true);
+      } else if (page_ == Page::kBattery) {
+        if (battery_ac_ || !battery_saver_toggle_ok_) {
+          break;
+        }
+        if (host_.dispatch) {
+          StatusEvent ev;
+          ev.id = "bamti.widget/battery";
+          ev.event = "toggle";
+          ev.row_id = "saver";
+          ev.on = !saver_on_;
+          host_.dispatch(ev);
+        }
       }
       break;
     case kPageMore:
+    case kPageBtSettings:
       OpenSettingsPage(L"ms-settings:bluetooth");
       break;
     case kPageNetworkSettings:
@@ -2055,6 +2701,33 @@ void ControlCenterContent::Invoke(int index) {
       break;
     case kPageWifiSettings:
       OpenSettingsPage(L"ms-settings:network-wifi");
+      break;
+    case kPageSoundSettings:
+      OpenSettingsPage(L"ms-settings:sound");
+      break;
+    case kPageDeviceSettings:
+      OpenSettingsPage(L"ms-settings:bluetooth");
+      break;
+    case kPagePowerSettings:
+      if (host_.dispatch) {
+        StatusEvent ev;
+        ev.id = "bamti.widget/battery";
+        ev.event = "invoke";
+        ev.row_id = "power_settings";
+        host_.dispatch(ev);
+      }
+      break;
+    case kPageTaskManager:
+      if (host_.dispatch) {
+        StatusEvent ev;
+        ev.id = "bamti.widget/cpu";
+        ev.event = "invoke";
+        ev.row_id = "task_manager";
+        host_.dispatch(ev);
+      }
+      break;
+    case kPageSaverSettings:
+      OpenSettingsPage(L"ms-settings:batterysaver");
       break;
     case kAirplane:
       OpenSettingsPage(L"ms-settings:network-airplanemode");
@@ -2096,23 +2769,36 @@ void ControlCenterContent::Invoke(int index) {
               FallbackWifi(net, WifiKindName(net.kind));
             }
           }
+        } else if (page_ == Page::kVolume && i >= 0 && i < static_cast<int>(audio_outs_.size())) {
+          const AudioEndpoint& dev = audio_outs_[static_cast<size_t>(i)];
+          if (!dev.is_default && SetDefaultAudioOutput(dev.id)) {
+            audio_outs_ = EnumAudioOutputs();
+            if (audio_outs_.size() > static_cast<size_t>(kAudioListMax)) {
+              audio_outs_.resize(static_cast<size_t>(kAudioListMax));
+            }
+            PresentHost();
+          }
         } else if (page_ == Page::kBluetooth && i >= 0 && i < static_cast<int>(bt_devices_.size())) {
           BtDevice& dev = bt_devices_[static_cast<size_t>(i)];
-          BLUETOOTH_FIND_RADIO_PARAMS params{};
-          params.dwSize = sizeof(params);
-          HANDLE radio = nullptr;
-          const HBLUETOOTH_RADIO_FIND find = BluetoothFindFirstRadio(&params, &radio);
-          if (find != nullptr) {
-            if (radio != nullptr) {
-              const DWORD err = BluetoothAuthenticateDeviceEx(nullptr, radio, &dev.info, nullptr,
-                                                              MITMProtectionNotRequired);
-              Log(L"cc", L"bt auth %s err=%lu", dev.name.c_str(), static_cast<unsigned long>(err));
-              CloseHandle(radio);
+          if (dev.paired) {
+            OpenSettingsPage(L"ms-settings:bluetooth");
+          } else {
+            BLUETOOTH_FIND_RADIO_PARAMS params{};
+            params.dwSize = sizeof(params);
+            HANDLE radio = nullptr;
+            const HBLUETOOTH_RADIO_FIND find = BluetoothFindFirstRadio(&params, &radio);
+            if (find != nullptr) {
+              if (radio != nullptr) {
+                const DWORD err = BluetoothAuthenticateDeviceEx(nullptr, radio, &dev.info, nullptr,
+                                                                MITMProtectionNotRequired);
+                Log(L"cc", L"bt auth %s err=%lu", dev.name.c_str(), static_cast<unsigned long>(err));
+                CloseHandle(radio);
+              }
+              BluetoothFindRadioClose(find);
             }
-            BluetoothFindRadioClose(find);
+            list_due_ = 0;
+            RefreshPageLists(true);
           }
-          list_due_ = 0;
-          RefreshPageLists(true);
         }
       }
       break;
@@ -2150,11 +2836,20 @@ void ControlCenterContent::DragTo(int index, POINT client, UINT dpi) {
   if (hit.id != kVolume && hit.id != kBrightness) {
     return;
   }
-  const RECT track = SliderTrackRect(dpi, hit.id == kBrightness);
-  const float left = static_cast<float>(track.left);
-  const float right = static_cast<float>(track.right);
-  const float thickness = static_cast<float>(track.bottom - track.top);
-  const SliderGeometry geom = SliderGeomThick(left, right, thickness);
+  RECT track = SliderTrackRect(dpi, hit.id == kBrightness);
+  SliderGeometry geom{};
+  if (page_ == Page::kVolume && hit.id == kVolume) {
+    track = VolumeSliderTrackRect(dpi);
+    const float left = static_cast<float>(track.left);
+    const float right = static_cast<float>(track.right);
+    const float knob_r = DipToPxF(kVolumeKnobDip, dpi) * 0.5f;
+    geom = SliderGeometry{left + knob_r, right - knob_r, knob_r};
+  } else {
+    const float left = static_cast<float>(track.left);
+    const float right = static_cast<float>(track.right);
+    const float thickness = static_cast<float>(track.bottom - track.top);
+    geom = SliderGeomThick(left, right, thickness);
+  }
   float v = geom.hi > geom.lo ? (static_cast<float>(client.x) - geom.lo) / (geom.hi - geom.lo) : 0.0f;
   v = ClampUnit(v);
   v = std::round(v / 0.02f) * 0.02f;

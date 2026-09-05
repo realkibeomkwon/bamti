@@ -59,6 +59,7 @@ class BuiltinWidgets : public StatusSource {
   void SampleVolume();
   void SampleBrightness();
   void SampleNetwork();
+  void SampleBluetooth();
   void PublishBoard();
   void Publish(StatusItem item);
   void DropItem(const char* id);
@@ -83,6 +84,8 @@ class BuiltinWidgets : public StatusSource {
   std::optional<float> pending_level_;
   std::optional<bool> pending_mute_;
   std::optional<float> pending_brightness_;
+  std::optional<bool> pending_bt_on_;
+  std::optional<bool> pending_saver_on_;
   std::unique_ptr<VolumeControl> volume_;
   bool logged_notify_latency_ = false;
   ULONGLONG battery_due_ = 0;
@@ -91,6 +94,7 @@ class BuiltinWidgets : public StatusSource {
   ULONGLONG volume_refresh_due_ = 0;
   ULONGLONG brightness_due_ = 0;
   ULONGLONG network_due_ = 0;
+  ULONGLONG bluetooth_due_ = 0;
   BrightnessBackend brightness_backend_ = BrightnessBackend::kNone;
   bool brightness_probed_ = false;
   bool last_volume_ok_ = false;
@@ -102,6 +106,21 @@ class BuiltinWidgets : public StatusSource {
   std::wstring last_wifi_name_ = L"연결 안 됨";
   bool last_eth_on_ = false;
   std::wstring last_eth_name_;
+  bool last_bt_present_ = false;
+  bool last_bt_on_ = false;
+  bool last_bt_can_toggle_ = false;
+  std::wstring last_bt_name_;
+  bool last_battery_ok_ = false;
+  float last_battery_level_ = 0.0f;
+  bool last_battery_ac_ = false;
+  bool last_battery_charging_ = false;
+  std::wstring last_battery_remain_;
+  bool last_battery_saver_on_ = false;
+  bool last_cpu_ok_ = false;
+  float last_cpu_usage_ = 0.0f;
+  float last_cpu_user_ = 0.0f;
+  float last_cpu_kernel_ = 0.0f;
+  unsigned last_cpu_nproc_ = 0;
   bool cpu_has_baseline_ = false;
   uint64_t cpu_idle_ = 0;
   uint64_t cpu_kernel_ = 0;
@@ -110,6 +129,7 @@ class BuiltinWidgets : public StatusSource {
   std::wstring fp_cpu_;
   std::wstring fp_volume_;
   std::wstring fp_network_;
+  std::wstring fp_bluetooth_;
   std::wstring fp_board_;
   bool logged_no_battery_ = false;
   bool logged_no_volume_ = false;

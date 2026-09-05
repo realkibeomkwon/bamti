@@ -13,6 +13,9 @@ add_executable(bamti WIN32
   src/settings.cpp
   src/widgets/builtin.cpp
   src/widgets/volume.cpp
+  src/audio_devices.cpp
+  src/bt_devices.cpp
+  src/power_saver.cpp
   src/log.cpp
   src/watchdog.cpp
   src/menu_bar.cpp
@@ -26,6 +29,7 @@ add_executable(bamti WIN32
   src/status_registry.cpp
   src/status_panel.cpp
   src/control_center.cpp
+  src/panel_style.cpp
   src/wifi_password.cpp
   src/widgets/brightness.cpp
   src/widgets/brightness_wmi.cpp
@@ -103,6 +107,8 @@ target_link_libraries(bamti PRIVATE
   wtsapi32
   wlanapi
   bthprops
+  setupapi
+  runtimeobject
   dxva2
   wbemuuid
   taskschd

@@ -1,6 +1,8 @@
 #include "widgets/builtin.hpp"
 
+#include "bt_devices.hpp"
 #include "log.hpp"
+#include "power_saver.hpp"
 #include "status_item.hpp"
 #include "theme.hpp"
 #include "widgets/brightness.hpp"
@@ -27,11 +29,13 @@ constexpr char kBatteryId[] = "bamti.widget/battery";
 constexpr char kCpuId[] = "bamti.widget/cpu";
 constexpr char kVolumeId[] = "bamti.widget/volume";
 constexpr char kNetworkId[] = "bamti.widget/network";
+constexpr char kBluetoothId[] = "bamti.widget/bluetooth";
 constexpr char kBoardId[] = "bamti.widget/board";
 
 constexpr int kBatteryPriority = 40;
 constexpr int kVolumePriority = 35;
 constexpr int kNetworkPriority = 36;
+constexpr int kBluetoothPriority = 37;
 constexpr int kCpuPriority = 30;
 constexpr int kBoardPriority = 10;
 
@@ -40,6 +44,7 @@ constexpr ULONGLONG kCpuPeriodMs = 5000;
 constexpr ULONGLONG kVolumePeriodMs = 1000;
 constexpr ULONGLONG kBrightnessPeriodMs = 2000;
 constexpr ULONGLONG kVolumeRefreshMs = 20000;
+constexpr ULONGLONG kBluetoothPeriodMs = 5000;
 constexpr ULONGLONG kFirstSampleMs = 1000;
 
 // Segoe Fluent Icons가 없을 때 DrawVectorIcon이 되돌리는 문자.
@@ -379,13 +384,30 @@ bool BuiltinWidgets::Start(StatusSink* sink) {
   const int da_log = da ? *da : -1;
   const bool available = package && (!da || *da != 0);
   Log(L"widget", L"board available=%d package=%d taskbar_da=%d", available ? 1 : 0, package ? 1 : 0, da_log);
-  std::lock_guard lock(mu_);
-  sink_ = sink;
-  // 메시지 루프 전의 1KB 미만 읽기라 UI 응답성 문제가 없고, 백그라운드로 넘기면 위젯 생성 경합만 생긴다.
-  settings_ = LoadWidgetSettings();
-  reset_pending_ = true;
-  if (settings_.Any()) {
-    StartWorkerLocked();
+  bool submit_save = false;
+  {
+    std::lock_guard lock(mu_);
+    sink_ = sink;
+    // 메시지 루프 전의 1KB 미만 읽기라 UI 응답성 문제가 없고, 백그라운드로 넘기면 위젯 생성 경합만 생긴다.
+    settings_ = LoadWidgetSettings();
+    if (RestoreAbandonedSaver(&settings_)) {
+      pending_save_ = settings_;
+      ++save_gen_;
+      if (!save_busy_) {
+        save_busy_ = true;
+        submit_save = true;
+        if (save_idle_event_ != nullptr) {
+          ResetEvent(save_idle_event_);
+        }
+      }
+    }
+    reset_pending_ = true;
+    if (settings_.Any()) {
+      StartWorkerLocked();
+    }
+  }
+  if (submit_save) {
+    SubmitSave();
   }
   return true;
 }
@@ -452,6 +474,22 @@ ControlCenterLive BuiltinWidgets::LiveForControlCenter() const {
   live.wifi_name = last_wifi_name_;
   live.eth_on = last_eth_on_;
   live.eth_name = last_eth_name_;
+  live.bt_present = last_bt_present_;
+  live.bt_on = last_bt_on_;
+  live.bt_can_toggle = last_bt_can_toggle_;
+  live.bt_name = last_bt_name_;
+  live.battery_ok = last_battery_ok_;
+  live.battery_level = last_battery_level_;
+  live.battery_ac = last_battery_ac_;
+  live.battery_charging = last_battery_charging_;
+  live.battery_remain_text = last_battery_remain_;
+  live.battery_saver_on = last_battery_saver_on_;
+  live.battery_saver_toggle_ok = BatterySaverToggleAvailable();
+  live.cpu_ok = last_cpu_ok_;
+  live.cpu_usage = last_cpu_usage_;
+  live.cpu_user = last_cpu_user_;
+  live.cpu_kernel = last_cpu_kernel_;
+  live.cpu_nproc = last_cpu_nproc_;
   return live;
 }
 
@@ -459,7 +497,7 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
   bool stop_worker = false;
   bool submit_save = false;
   StatusSink* sink = nullptr;
-  const char* drop[6]{};
+  const char* drop[8]{};
   size_t drop_n = 0;
   {
     std::lock_guard lock(mu_);
@@ -484,6 +522,7 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
     note_drop(prev.battery, next.battery, kBatteryId, &fp_battery_);
     note_drop(prev.cpu, next.cpu, kCpuId, &fp_cpu_);
     note_drop(prev.network, next.network, kNetworkId, &fp_network_);
+    note_drop(prev.bluetooth, next.bluetooth, kBluetoothId, &fp_bluetooth_);
     note_drop(prev.volume, next.volume, kVolumeId, &fp_volume_);
     note_drop(prev.widget_board, next.widget_board, kBoardId, &fp_board_);
     const ULONGLONG now = GetTickCount64();
@@ -498,6 +537,9 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
     if (!prev.network && next.network) {
       network_due_ = now;
     }
+    if (!prev.bluetooth && next.bluetooth) {
+      bluetooth_due_ = now;
+    }
     if (!prev.volume && next.volume) {
       volume_due_ = now;
       volume_refresh_due_ = 0;
@@ -507,6 +549,8 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
       volume_due_ = now;
       brightness_due_ = now;
       network_due_ = now;
+      bluetooth_due_ = now;
+      battery_due_ = now;
     }
     if (next.Any()) {
       StartWorkerLocked();
@@ -582,6 +626,14 @@ void BuiltinWidgets::OnEvent(const StatusEvent& ev) {
   } else if (ev.event == "toggle" && ev.id == kVolumeId && ev.row_id == "volume_mute") {
     std::lock_guard lock(mu_);
     pending_mute_ = ev.on;
+    wake = true;
+  } else if (ev.event == "toggle" && ev.id == kBluetoothId && ev.row_id == "radio") {
+    std::lock_guard lock(mu_);
+    pending_bt_on_ = ev.on;
+    wake = true;
+  } else if (ev.event == "toggle" && ev.id == kBatteryId && ev.row_id == "saver") {
+    std::lock_guard lock(mu_);
+    pending_saver_on_ = ev.on;
     wake = true;
   } else if (ev.event == "click" && ev.id == kBoardId && ev.button == "left") {
     action = PendingAction::kWidgetBoard;
@@ -671,17 +723,18 @@ void BuiltinWidgets::ResetBaselines() {
   battery_due_ = now;
   volume_due_ = now;
   network_due_ = now;
+  bluetooth_due_ = now;
 }
 
 bool BuiltinWidgets::HasSampleDeadlineLocked() const {
   return settings_.battery || settings_.cpu || settings_.network || settings_.volume ||
-         settings_.control_center;
+         settings_.bluetooth || settings_.control_center;
 }
 
 ULONGLONG BuiltinWidgets::NextDeadlineLocked(ULONGLONG now) const {
   (void)now;
   ULONGLONG due = MAXULONGLONG;
-  if (settings_.battery && battery_due_ < due) {
+  if ((settings_.battery || settings_.control_center) && battery_due_ < due) {
     due = battery_due_;
   }
   if (settings_.cpu && cpu_due_ < due) {
@@ -695,6 +748,9 @@ ULONGLONG BuiltinWidgets::NextDeadlineLocked(ULONGLONG now) const {
   }
   if ((settings_.network || settings_.control_center) && network_due_ < due) {
     due = network_due_;
+  }
+  if ((settings_.bluetooth || settings_.control_center) && bluetooth_due_ < due) {
+    due = bluetooth_due_;
   }
   return due;
 }
@@ -714,6 +770,8 @@ void BuiltinWidgets::Publish(StatusItem item) {
       slot = &fp_volume_;
     } else if (item.id == kNetworkId) {
       slot = &fp_network_;
+    } else if (item.id == kBluetoothId) {
+      slot = &fp_bluetooth_;
     } else if (item.id == kBoardId) {
       slot = &fp_board_;
     }
@@ -748,6 +806,8 @@ void BuiltinWidgets::DropItem(const char* id) {
       fp_volume_.clear();
     } else if (std::strcmp(id, kNetworkId) == 0) {
       fp_network_.clear();
+    } else if (std::strcmp(id, kBluetoothId) == 0) {
+      fp_bluetooth_.clear();
     } else if (std::strcmp(id, kBoardId) == 0) {
       fp_board_.clear();
     }
@@ -806,10 +866,26 @@ void BuiltinWidgets::SampleBattery() {
   SYSTEM_POWER_STATUS status{};
   const BOOL ok = GetSystemPowerStatus(&status);
   const ULONGLONG now = GetTickCount64();
+  const bool no_battery =
+      !ok || (status.BatteryFlag & BATTERY_FLAG_NO_BATTERY) != 0 || status.BatteryLifePercent == 255;
+  const int pct = no_battery ? 0 : static_cast<int>(status.BatteryLifePercent);
+  const bool ac = status.ACLineStatus == 1;
+  const bool charging = (status.BatteryFlag & BATTERY_FLAG_CHARGING) != 0;
+  const float level = static_cast<float>(pct) / 100.0f;
+  const bool saver_on = (status.SystemStatusFlag & 1) != 0;
+  const std::wstring remain = (!no_battery && !ac) ? RemainText(status.BatteryLifeTime) : std::wstring{};
+  bool publish = false;
   {
     std::lock_guard lock(mu_);
     battery_due_ = now + kBatteryPeriodMs;
-    if (!settings_.battery || !active_ || sink_ == nullptr) {
+    last_battery_ok_ = !no_battery;
+    last_battery_level_ = level;
+    last_battery_ac_ = ac;
+    last_battery_charging_ = charging;
+    last_battery_remain_ = remain;
+    last_battery_saver_on_ = saver_on;
+    publish = settings_.battery && active_ && sink_ != nullptr;
+    if (!publish) {
       return;
     }
   }
@@ -829,11 +905,6 @@ void BuiltinWidgets::SampleBattery() {
     return;
   }
 
-  const int pct = static_cast<int>(status.BatteryLifePercent);
-  const bool ac = status.ACLineStatus == 1;
-  const bool charging = (status.BatteryFlag & BATTERY_FLAG_CHARGING) != 0;
-  const float level = static_cast<float>(pct) / 100.0f;
-
   StatusItem item;
   item.id = kBatteryId;
   item.priority = kBatteryPriority;
@@ -846,7 +917,6 @@ void BuiltinWidgets::SampleBattery() {
   } else if (ac) {
     tip += L" · 연결됨";
   } else {
-    const std::wstring remain = RemainText(status.BatteryLifeTime);
     if (!remain.empty()) {
       tip += L" · ";
       tip += remain;
@@ -928,7 +998,14 @@ void BuiltinWidgets::SampleCpu() {
     if (usage > 1.0) {
       usage = 1.0;
     }
-    publish = true;
+    last_cpu_ok_ = true;
+    last_cpu_usage_ = static_cast<float>(usage);
+    last_cpu_user_ = static_cast<float>(user_share);
+    last_cpu_kernel_ = static_cast<float>(kernel_share);
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+    last_cpu_nproc_ = info.dwNumberOfProcessors;
+    publish = settings_.cpu && active_ && sink_ != nullptr;
   }
   if (!publish) {
     return;
@@ -1178,22 +1255,76 @@ void BuiltinWidgets::SampleNetwork() {
   Publish(std::move(item));
 }
 
+void BuiltinWidgets::SampleBluetooth() {
+  bool enabled = false;
+  bool publish = false;
+  {
+    std::lock_guard lock(mu_);
+    bluetooth_due_ = GetTickCount64() + kBluetoothPeriodMs;
+    enabled = (settings_.bluetooth || settings_.control_center) && active_;
+    publish = settings_.bluetooth && sink_ != nullptr;
+  }
+  if (!enabled) {
+    return;
+  }
+  const BtRadioState radio = QueryBtRadio();
+  std::wstring connected_name;
+  if (radio.present && radio.on) {
+    const std::vector<BtDeviceInfo> devices = EnumBtDevices();
+    for (const BtDeviceInfo& d : devices) {
+      if (d.connected) {
+        connected_name = d.name;
+        break;
+      }
+    }
+  }
+  {
+    std::lock_guard lock(mu_);
+    last_bt_present_ = radio.present;
+    last_bt_on_ = radio.on;
+    last_bt_can_toggle_ = radio.can_toggle;
+    last_bt_name_ = connected_name;
+  }
+  if (!radio.present) {
+    DropItem(kBluetoothId);
+    return;
+  }
+  if (!publish) {
+    return;
+  }
+  StatusItem item;
+  item.id = kBluetoothId;
+  item.priority = kBluetoothPriority;
+  SetVectorIcon(&item, VectorIcon::kBluetooth, radio.on ? 1.0f : 0.0f, 0);
+  item.state = radio.on ? StatusState::kOn : StatusState::kOff;
+  std::wstring tip = L"Bluetooth · ";
+  if (!connected_name.empty()) {
+    tip += connected_name;
+  } else {
+    tip += radio.on ? L"켜짐" : L"꺼짐";
+  }
+  item.tooltip = Truncate(std::move(tip), kStatusPanelTextMaxChars);
+  Publish(std::move(item));
+}
+
 void BuiltinWidgets::SampleDue(ULONGLONG now) {
   bool bat = false;
   bool cpu = false;
   bool volume = false;
   bool brightness = false;
   bool network = false;
+  bool bluetooth = false;
   {
     std::lock_guard lock(mu_);
     if (!active_) {
       return;
     }
-    bat = settings_.battery && battery_due_ <= now;
+    bat = (settings_.battery || settings_.control_center) && battery_due_ <= now;
     cpu = settings_.cpu && cpu_due_ <= now;
     volume = (settings_.volume || settings_.control_center) && volume_due_ <= now;
     brightness = settings_.control_center && brightness_due_ <= now;
     network = (settings_.network || settings_.control_center) && network_due_ <= now;
+    bluetooth = (settings_.bluetooth || settings_.control_center) && bluetooth_due_ <= now;
   }
   if (bat) {
     SampleBattery();
@@ -1209,6 +1340,9 @@ void BuiltinWidgets::SampleDue(ULONGLONG now) {
   }
   if (network) {
     SampleNetwork();
+  }
+  if (bluetooth) {
+    SampleBluetooth();
   }
 }
 
@@ -1226,6 +1360,8 @@ void BuiltinWidgets::WorkerLoop() {
     std::optional<float> level;
     std::optional<bool> mute;
     std::optional<float> bright;
+    std::optional<bool> bt_on;
+    std::optional<bool> saver_on;
     bool do_reset = false;
     bool do_power = false;
     WidgetSettings s{};
@@ -1241,6 +1377,8 @@ void BuiltinWidgets::WorkerLoop() {
       level.swap(pending_level_);
       mute.swap(pending_mute_);
       bright.swap(pending_brightness_);
+      bt_on.swap(pending_bt_on_);
+      saver_on.swap(pending_saver_on_);
       do_reset = reset_pending_;
       reset_pending_ = false;
       do_power = power_pending_;
@@ -1277,6 +1415,39 @@ void BuiltinWidgets::WorkerLoop() {
     if (mute) {
       volume_->SetMute(*mute);
       volume_changed = true;
+    }
+    if (bt_on) {
+      SetBtRadio(*bt_on);
+      bluetooth_due_ = 0;
+    }
+    if (saver_on) {
+      WidgetSettings snap;
+      {
+        std::lock_guard lock(mu_);
+        snap = settings_;
+      }
+      const auto persist = [this, &snap]() {
+        bool submit_save = false;
+        {
+          std::lock_guard lock(mu_);
+          settings_.saver_threshold_backup = snap.saver_threshold_backup;
+          pending_save_ = settings_;
+          ++save_gen_;
+          if (!save_busy_) {
+            save_busy_ = true;
+            submit_save = true;
+            if (save_idle_event_ != nullptr) {
+              ResetEvent(save_idle_event_);
+            }
+          }
+        }
+        if (submit_save) {
+          SubmitSave();
+        }
+      };
+      SetBatterySaver(*saver_on, &snap, persist);
+      persist();
+      battery_due_ = 0;
     }
     if (bright) {
       const unsigned pct = static_cast<unsigned>(ClampUnit(*bright) * 100.0f + 0.5f);

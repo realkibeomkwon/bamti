@@ -21,6 +21,7 @@ class StatusPanelContent : public PopupContent {
  public:
   void Reset(StatusItem item, StatusPanelHost host);
 
+  int CornerDip() const override;
   int RowCount() const override;
   SIZE Measure(UINT dpi) override;
   void Render(ID2D1RenderTarget* target, UINT dpi, int hot_index) override;
