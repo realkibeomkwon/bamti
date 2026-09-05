@@ -147,6 +147,11 @@ void VolumeControl::Release() {
   device_.clear();
 }
 
+void VolumeControl::Invalidate() {
+  Release();
+  logged_cost_ = false;
+}
+
 bool VolumeControl::Ensure() {
   if (enumerator_ && volume_) {
     logged_fail_ = false;

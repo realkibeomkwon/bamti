@@ -1738,13 +1738,8 @@ void ControlCenterContent::BuildHits(UINT dpi) {
       add(kPageBack, RECT{inset, DipToPx(m.header_y, dpi), inset + DipToPx(panel::kBackWDip, dpi),
                           DipToPx(m.header_y + panel::kHeaderHDip, dpi)});
     }
-    if (battery_saver_toggle_ok_) {
-      add(kPageToggle, RECT{width - inset - DipToPx(panel::kToggleWDip, dpi), DipToPx(m.saver_y, dpi), width - inset,
-                            DipToPx(m.saver_y + panel::kToggleHDip, dpi)});
-    } else {
-      add(kPageSaverSettings, RECT{inset, DipToPx(m.saver_y, dpi), width - inset,
-                                   DipToPx(m.saver_y + panel::kRowHDip, dpi)});
-    }
+    add(kPageToggle, RECT{width - inset - DipToPx(panel::kToggleWDip, dpi), DipToPx(m.saver_y, dpi), width - inset,
+                          DipToPx(m.saver_y + panel::kToggleHDip, dpi)});
     add(kPagePowerSettings, RECT{inset, DipToPx(m.settings_y, dpi), width - inset,
                                  DipToPx(m.settings_y + panel::kSettingsHDip, dpi)});
     return;
@@ -2400,20 +2395,12 @@ void ControlCenterContent::RenderBatteryPage(ID2D1RenderTarget* target, UINT dpi
                           static_cast<float>(width - inset - DipToPx(panel::kToggleWDip + 8, dpi)),
                           static_cast<float>(saver.bottom)),
               L"절전 모드");
-  if (battery_saver_toggle_ok_) {
-    const RECT toggle{width - inset - DipToPx(panel::kToggleWDip, dpi),
-                      DipToPx(m.saver_y, dpi) + (DipToPx(panel::kRowHDip, dpi) - DipToPx(panel::kToggleHDip, dpi)) / 2,
-                      width - inset,
-                      DipToPx(m.saver_y, dpi) + (DipToPx(panel::kRowHDip, dpi) - DipToPx(panel::kToggleHDip, dpi)) / 2 +
-                          DipToPx(panel::kToggleHDip, dpi)};
-    panel::DrawToggle(target, brush, toggle, dpi, saver_on_, !battery_ac_, dark);
-  } else {
-    brush->SetColor(muted);
-    DrawTrimmed(target, dwrite_.Get(), body_fmt, brush,
-                D2D1::RectF(static_cast<float>(inset + DipToPx(80, dpi)), static_cast<float>(saver.top),
-                            static_cast<float>(width - inset), static_cast<float>(saver.bottom)),
-                saver_on_ ? L"켜짐" : L"꺼짐", DWRITE_TEXT_ALIGNMENT_TRAILING);
-  }
+  const RECT toggle{width - inset - DipToPx(panel::kToggleWDip, dpi),
+                    DipToPx(m.saver_y, dpi) + (DipToPx(panel::kRowHDip, dpi) - DipToPx(panel::kToggleHDip, dpi)) / 2,
+                    width - inset,
+                    DipToPx(m.saver_y, dpi) + (DipToPx(panel::kRowHDip, dpi) - DipToPx(panel::kToggleHDip, dpi)) / 2 +
+                        DipToPx(panel::kToggleHDip, dpi)};
+  panel::DrawToggle(target, brush, toggle, dpi, saver_on_, battery_saver_toggle_ok_ && !battery_ac_, dark);
 
   const wchar_t* power = L"알 수 없음";
   if (battery_ok_) {
@@ -2679,7 +2666,11 @@ void ControlCenterContent::Invoke(int index) {
         list_due_ = 0;
         RefreshPageLists(true);
       } else if (page_ == Page::kBattery) {
-        if (battery_ac_ || !battery_saver_toggle_ok_) {
+        if (!battery_saver_toggle_ok_) {
+          OpenSettingsPage(L"ms-settings:batterysaver");
+          break;
+        }
+        if (battery_ac_) {
           break;
         }
         if (host_.dispatch) {
@@ -2775,6 +2766,13 @@ void ControlCenterContent::Invoke(int index) {
             audio_outs_ = EnumAudioOutputs();
             if (audio_outs_.size() > static_cast<size_t>(kAudioListMax)) {
               audio_outs_.resize(static_cast<size_t>(kAudioListMax));
+            }
+            if (host_.dispatch) {
+              StatusEvent ev;
+              ev.id = "bamti.widget/volume";
+              ev.event = "change";
+              ev.row_id = "volume_device";
+              host_.dispatch(ev);
             }
             PresentHost();
           }

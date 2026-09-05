@@ -14,9 +14,12 @@ namespace {
 
 constexpr DWORD kDefaultThreshold = 20;
 constexpr DWORD kSaverOnThreshold = 100;
-constexpr DWORD kFlagWaitMs = 400;
+constexpr DWORD kFlagPollMs = 200;
+constexpr DWORD kFlagWaitMaxMs = 3000;
+constexpr int kToggleFailLimit = 3;
 
 std::atomic<bool> g_toggle_ok{true};
+std::atomic<int> g_fail_count{0};
 
 void LogGuidsOnce() {
   static bool logged = false;
@@ -45,6 +48,53 @@ void MarkFailed(const wchar_t* why, DWORD err) {
   }
   Log(L"power", L"saver toggle abandoned (%s) err=%lu; falling back to ms-settings:batterysaver",
       why != nullptr ? why : L"unknown", static_cast<unsigned long>(err));
+}
+
+void NoteSuccess() {
+  g_fail_count.store(0);
+}
+
+void NoteFailure(const wchar_t* why, DWORD err) {
+  const int n = g_fail_count.fetch_add(1) + 1;
+  Log(L"power", L"saver toggle failed (%s) err=%lu streak=%d", why != nullptr ? why : L"unknown",
+      static_cast<unsigned long>(err), n);
+  if (n >= kToggleFailLimit) {
+    MarkFailed(why, err);
+  }
+}
+
+bool SaverFlagOn();
+
+void LogFlagMiss(DWORD waited_ms, DWORD threshold) {
+  SYSTEM_POWER_STATUS status{};
+  int pct = -1;
+  int ac = -1;
+  if (GetSystemPowerStatus(&status) != FALSE) {
+    pct = static_cast<int>(status.BatteryLifePercent);
+    ac = static_cast<int>(status.ACLineStatus);
+  }
+  Log(L"power", L"saver flag did not follow within %lu ms (pct=%d ac=%d threshold=%lu)",
+      static_cast<unsigned long>(waited_ms), pct, ac, static_cast<unsigned long>(threshold));
+}
+
+bool WaitSaverFlag(bool want_on, DWORD* waited_ms) {
+  const ULONGLONG start = GetTickCount64();
+  for (;;) {
+    if (SaverFlagOn() == want_on) {
+      if (waited_ms != nullptr) {
+        *waited_ms = static_cast<DWORD>(GetTickCount64() - start);
+      }
+      return true;
+    }
+    const ULONGLONG elapsed = GetTickCount64() - start;
+    if (elapsed >= kFlagWaitMaxMs) {
+      if (waited_ms != nullptr) {
+        *waited_ms = static_cast<DWORD>(elapsed);
+      }
+      return false;
+    }
+    Sleep(kFlagPollMs);
+  }
 }
 
 bool ActiveScheme(GUID** scheme) {
@@ -157,7 +207,7 @@ bool SetBatterySaver(bool on, WidgetSettings* settings, const std::function<void
 
   DWORD current = kDefaultThreshold;
   if (!ReadThreshold(&current)) {
-    MarkFailed(L"read", GetLastError());
+    NoteFailure(L"read", GetLastError());
     return false;
   }
 
@@ -169,39 +219,43 @@ bool SetBatterySaver(bool on, WidgetSettings* settings, const std::function<void
       }
     }
     if (!WriteThreshold(kSaverOnThreshold)) {
-      MarkFailed(L"write on", GetLastError());
+      NoteFailure(L"write on", GetLastError());
       return false;
     }
     if (OnBattery()) {
-      Sleep(kFlagWaitMs);
-      if (!SaverFlagOn()) {
+      DWORD waited = 0;
+      if (!WaitSaverFlag(true, &waited)) {
+        LogFlagMiss(waited, kSaverOnThreshold);
         const DWORD revert =
             settings->saver_threshold_backup >= 0 ? static_cast<DWORD>(settings->saver_threshold_backup)
                                                   : kDefaultThreshold;
         if (WriteThreshold(revert)) {
           settings->saver_threshold_backup = -1;
         }
-        MarkFailed(L"SystemStatusFlag did not follow", 0);
+        NoteFailure(L"SystemStatusFlag did not follow", 0);
         return false;
       }
     }
+    NoteSuccess();
     return true;
   }
 
   const DWORD next =
       settings->saver_threshold_backup >= 0 ? static_cast<DWORD>(settings->saver_threshold_backup) : kDefaultThreshold;
   if (!WriteThreshold(next)) {
-    MarkFailed(L"write off", GetLastError());
+    NoteFailure(L"write off", GetLastError());
     return false;
   }
   settings->saver_threshold_backup = -1;
   if (OnBattery()) {
-    Sleep(kFlagWaitMs);
-    if (SaverFlagOn()) {
-      MarkFailed(L"SystemStatusFlag stayed on", 0);
+    DWORD waited = 0;
+    if (!WaitSaverFlag(false, &waited)) {
+      LogFlagMiss(waited, next);
+      NoteFailure(L"SystemStatusFlag stayed on", 0);
       return false;
     }
   }
+  NoteSuccess();
   return true;
 }
 

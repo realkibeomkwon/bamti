@@ -32,6 +32,7 @@ class VolumeControl {
   bool SetLevel(float level);
   bool SetMute(bool muted);
   void Release();
+  void Invalidate();
 
  private:
   bool Ensure();

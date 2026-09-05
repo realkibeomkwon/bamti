@@ -86,6 +86,7 @@ class BuiltinWidgets : public StatusSource {
   std::optional<float> pending_brightness_;
   std::optional<bool> pending_bt_on_;
   std::optional<bool> pending_saver_on_;
+  bool pending_volume_device_ = false;
   std::unique_ptr<VolumeControl> volume_;
   bool logged_notify_latency_ = false;
   ULONGLONG battery_due_ = 0;

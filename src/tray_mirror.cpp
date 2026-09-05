@@ -6,6 +6,7 @@
 #include <objbase.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
@@ -54,6 +55,36 @@ bool GuidEmpty(const GUID& g) {
     }
   }
   return true;
+}
+
+std::wstring GuidText(const GUID& g) {
+  wchar_t buf[64]{};
+  if (StringFromGUID2(g, buf, 64) <= 0) {
+    return L"{}";
+  }
+  return buf;
+}
+
+constexpr wchar_t kBluetoothTrayTip[] = L"Bluetooth 장치";
+constexpr wchar_t kExplorerExe[] = L"explorer.exe";
+
+bool IsSystemBluetoothIcon(const TrayIconInfo& icon) {
+  if (icon.tip != kBluetoothTrayTip) {
+    return false;
+  }
+  if (icon.owner_exe.empty()) {
+    return true;
+  }
+  return _wcsicmp(icon.owner_exe.c_str(), kExplorerExe) == 0;
+}
+
+void LogHideBluetoothOnce(const TrayIconInfo& icon) {
+  static std::atomic<bool> logged{false};
+  if (logged.exchange(true)) {
+    return;
+  }
+  const std::wstring guid = GuidEmpty(icon.guid_item) ? std::wstring(L"{}") : GuidText(icon.guid_item);
+  Log(L"tray", L"hiding system bluetooth icon (widget on) guid=%s", guid.c_str());
 }
 
 struct KnownIcon {
@@ -625,6 +656,10 @@ bool TrayMirror::Include(const TrayIconInfo& icon, int overflow_order, const Wid
     return false;
   }
   if (KeyHidden(icon.key, settings.tray_hidden_keys)) {
+    return false;
+  }
+  if (settings.bluetooth && IsSystemBluetoothIcon(icon)) {
+    LogHideBluetoothOnce(icon);
     return false;
   }
   if (icon.from_overflow) {

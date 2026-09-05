@@ -171,6 +171,14 @@ bool GuidEmpty(const GUID& g) {
   return true;
 }
 
+std::wstring GuidText(const GUID& g) {
+  wchar_t buf[64]{};
+  if (StringFromGUID2(g, buf, 64) <= 0) {
+    return L"{}";
+  }
+  return buf;
+}
+
 bool KnownNotifySize(uint32_t n) {
   if (n == static_cast<uint32_t>(NOTIFYICONDATAW_V1_SIZE) || n == static_cast<uint32_t>(NOTIFYICONDATAW_V2_SIZE) ||
       n == static_cast<uint32_t>(NOTIFYICONDATAW_V3_SIZE) || n == static_cast<uint32_t>(sizeof(NOTIFYICONDATAW))) {
@@ -804,9 +812,9 @@ class TrayBackendIntercept final : public TrayBackend {
     }
     const std::wstring exe = OwnerExeName(owner);
     const std::wstring safe = SanitizeTipForLog(tip);
-    Log(L"tray", L"intercept item tip=\"%s\" exe=%s hwnd=0x%llX uid=%u guid=%d version=%u", safe.c_str(), exe.c_str(),
-        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(owner)), data.uid, GuidEmpty(data.guid_item) ? 0 : 1,
-        version);
+    const std::wstring guid = GuidEmpty(data.guid_item) ? std::wstring(L"0") : GuidText(data.guid_item);
+    Log(L"tray", L"intercept item tip=\"%s\" exe=%s hwnd=0x%llX uid=%u guid=%s version=%u", safe.c_str(), exe.c_str(),
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(owner)), data.uid, guid.c_str(), version);
   }
 
   void ForwardOrQueue(HWND spy, UINT msg, WPARAM wp, LPARAM lp) {

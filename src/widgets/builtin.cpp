@@ -44,6 +44,7 @@ constexpr ULONGLONG kCpuPeriodMs = 5000;
 constexpr ULONGLONG kVolumePeriodMs = 1000;
 constexpr ULONGLONG kBrightnessPeriodMs = 2000;
 constexpr ULONGLONG kVolumeRefreshMs = 20000;
+constexpr DWORD kVolumeDeviceSettleMs = 200;
 constexpr ULONGLONG kBluetoothPeriodMs = 5000;
 constexpr ULONGLONG kFirstSampleMs = 1000;
 
@@ -622,6 +623,10 @@ void BuiltinWidgets::OnEvent(const StatusEvent& ev) {
   } else if (ev.event == "slide" && ev.id == "bamti.control_center" && ev.row_id == "brightness") {
     std::lock_guard lock(mu_);
     pending_brightness_ = ClampUnit(ev.value);
+    wake = true;
+  } else if (ev.id == kVolumeId && ev.row_id == "volume_device") {
+    std::lock_guard lock(mu_);
+    pending_volume_device_ = true;
     wake = true;
   } else if (ev.event == "toggle" && ev.id == kVolumeId && ev.row_id == "volume_mute") {
     std::lock_guard lock(mu_);
@@ -1362,6 +1367,7 @@ void BuiltinWidgets::WorkerLoop() {
     std::optional<float> bright;
     std::optional<bool> bt_on;
     std::optional<bool> saver_on;
+    bool volume_device = false;
     bool do_reset = false;
     bool do_power = false;
     WidgetSettings s{};
@@ -1379,6 +1385,8 @@ void BuiltinWidgets::WorkerLoop() {
       bright.swap(pending_brightness_);
       bt_on.swap(pending_bt_on_);
       saver_on.swap(pending_saver_on_);
+      volume_device = pending_volume_device_;
+      pending_volume_device_ = false;
       do_reset = reset_pending_;
       reset_pending_ = false;
       do_power = power_pending_;
@@ -1406,6 +1414,16 @@ void BuiltinWidgets::WorkerLoop() {
 
     for (const PendingAction action : acts) {
       Execute(action);
+    }
+    if (volume_device) {
+      volume_->Invalidate();
+      Sleep(kVolumeDeviceSettleMs);
+      const ULONGLONG now = GetTickCount64();
+      {
+        std::lock_guard lock(mu_);
+        volume_refresh_due_ = now;
+        volume_due_ = 0;
+      }
     }
     bool volume_changed = false;
     if (level) {
