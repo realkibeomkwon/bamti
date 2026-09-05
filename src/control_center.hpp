@@ -42,6 +42,9 @@ struct ControlCenterLive {
   std::wstring bt_name;
   bool bt_scanning = false;
   uint64_t bt_scan_rev = 0;
+  std::wstring bt_connecting;
+  uint64_t bt_list_rev = 0;
+  uint64_t bt_connect_fail_rev = 0;
   bool battery_ok = false;
   float battery_level = 0.0f;
   bool battery_ac = false;
@@ -62,6 +65,7 @@ struct ControlCenterHost {
   std::function<void(const StatusEvent&)> dispatch;
   std::function<ControlCenterLive()> live;
   std::function<std::vector<BtDeviceInfo>()> bt_scan_result;
+  std::function<void(std::wstring address, bool connect)> bt_connect;
   std::function<void()> present;
   std::function<void(HWND)> set_allied;
 };
@@ -214,6 +218,10 @@ class ControlCenterContent : public PopupContent {
   bool bt_can_toggle_ = false;
   bool bt_scanning_ = false;
   uint64_t bt_scan_rev_ = 0;
+  std::wstring bt_connecting_addr_;
+  uint64_t bt_list_rev_ = 0;
+  uint64_t bt_connect_fail_rev_ = 0;
+  bool bt_fail_armed_ = false;
   bool battery_ok_ = false;
   float battery_level_ = 0.0f;
   bool battery_ac_ = false;

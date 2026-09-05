@@ -36,6 +36,7 @@ class BuiltinWidgets : public StatusSource {
   void NotePowerEvent(bool resumed);
   ControlCenterLive LiveForControlCenter() const;
   std::vector<BtDeviceInfo> BtScanResult() const;
+  void RequestBtConnect(std::wstring address, bool connect);
 
  private:
   enum class PendingAction {
@@ -93,6 +94,14 @@ class BuiltinWidgets : public StatusSource {
   uint64_t bt_scan_rev_ = 0;
   std::vector<BtDeviceInfo> bt_scan_result_;
   bool bt_scan_discard_ = false;
+  struct BtConnectReq {
+    std::wstring address;
+    bool connect = false;
+  };
+  std::vector<BtConnectReq> bt_connect_reqs_;
+  std::wstring bt_connecting_addr_;
+  uint64_t bt_list_rev_ = 0;
+  uint64_t bt_connect_fail_rev_ = 0;
   std::unique_ptr<VolumeControl> volume_;
   bool logged_notify_latency_ = false;
   ULONGLONG battery_due_ = 0;

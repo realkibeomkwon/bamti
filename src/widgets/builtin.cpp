@@ -481,6 +481,9 @@ ControlCenterLive BuiltinWidgets::LiveForControlCenter() const {
   live.bt_name = last_bt_name_;
   live.bt_scanning = bt_scanning_;
   live.bt_scan_rev = bt_scan_rev_;
+  live.bt_connecting = bt_connecting_addr_;
+  live.bt_list_rev = bt_list_rev_;
+  live.bt_connect_fail_rev = bt_connect_fail_rev_;
   live.battery_ok = last_battery_ok_;
   live.battery_level = last_battery_level_;
   live.battery_ac = last_battery_ac_;
@@ -499,6 +502,32 @@ ControlCenterLive BuiltinWidgets::LiveForControlCenter() const {
 std::vector<BtDeviceInfo> BuiltinWidgets::BtScanResult() const {
   std::lock_guard lock(mu_);
   return bt_scan_result_;
+}
+
+void BuiltinWidgets::RequestBtConnect(std::wstring address, bool connect) {
+  if (address.empty()) {
+    return;
+  }
+  bool wake = false;
+  {
+    std::lock_guard lock(mu_);
+    if (bt_connecting_addr_ == address) {
+      return;
+    }
+    for (const BtConnectReq& req : bt_connect_reqs_) {
+      if (req.address == address) {
+        return;
+      }
+    }
+    if (bt_connecting_addr_.empty()) {
+      bt_connecting_addr_ = address;
+    }
+    bt_connect_reqs_.push_back(BtConnectReq{std::move(address), connect});
+    wake = true;
+  }
+  if (wake && wake_event_ != nullptr) {
+    SetEvent(wake_event_);
+  }
 }
 
 void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
@@ -1463,6 +1492,45 @@ void BuiltinWidgets::WorkerLoop() {
     if (bt_on) {
       SetBtRadio(*bt_on);
       bluetooth_due_ = 0;
+    }
+    for (;;) {
+      BtConnectReq req;
+      {
+        std::lock_guard lock(mu_);
+        if (bt_connect_reqs_.empty()) {
+          break;
+        }
+        req = std::move(bt_connect_reqs_.front());
+        bt_connect_reqs_.erase(bt_connect_reqs_.begin());
+        bt_connecting_addr_ = req.address;
+      }
+      const std::vector<BtDeviceInfo> listed = EnumBtDevices();
+      const BtDeviceInfo* found = nullptr;
+      for (const BtDeviceInfo& d : listed) {
+        if (d.address == req.address) {
+          found = &d;
+          break;
+        }
+      }
+      bool ok = false;
+      if (found != nullptr) {
+        ok = SetBtDeviceConnected(found->raw, req.connect);
+      } else {
+        Log(L"bt", L"set service state missing connect=%d", req.connect ? 1 : 0);
+      }
+      {
+        std::lock_guard lock(mu_);
+        ++bt_list_rev_;
+        if (!ok) {
+          ++bt_connect_fail_rev_;
+        }
+        if (bt_connect_reqs_.empty()) {
+          bt_connecting_addr_.clear();
+        } else {
+          bt_connecting_addr_ = bt_connect_reqs_.front().address;
+        }
+        bluetooth_due_ = 0;
+      }
     }
     bool do_bt_scan = false;
     {

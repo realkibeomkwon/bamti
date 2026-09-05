@@ -1237,6 +1237,8 @@ void ControlCenterContent::Dismissed() {
   bt_found_.clear();
   bt_scan_rev_ = 0;
   bt_scanning_ = false;
+  bt_connecting_addr_.clear();
+  bt_fail_armed_ = false;
   if (host_.dispatch) {
     StatusEvent ev;
     ev.id = "bamti.widget/bluetooth";
@@ -1283,6 +1285,7 @@ void ControlCenterContent::Reset(ControlCenterHost host, ControlCenterPage page)
   wifi_scan_due_ = 0;
   wifi_scan_wait_until_ = 0;
   connecting_ssid_.clear();
+  bt_fail_armed_ = false;
   QuerySlowState(true);
   ApplyLive();
   if (page_ != Page::kHome) {
@@ -1355,6 +1358,22 @@ void ControlCenterContent::ApplyLive() {
   bt_on_ = live.bt_on;
   bt_can_toggle_ = live.bt_can_toggle;
   bt_scanning_ = live.bt_scanning;
+  bt_connecting_addr_ = live.bt_connecting;
+  if (live.bt_list_rev != bt_list_rev_) {
+    const bool refresh = bt_list_rev_ != 0;
+    bt_list_rev_ = live.bt_list_rev;
+    if (refresh && page_ == Page::kBluetooth) {
+      list_due_ = 0;
+      RefreshPageLists(true);
+    }
+  }
+  if (live.bt_connect_fail_rev != bt_connect_fail_rev_) {
+    if (bt_fail_armed_) {
+      OpenSettingsPage(L"ms-settings:bluetooth");
+    }
+    bt_connect_fail_rev_ = live.bt_connect_fail_rev;
+  }
+  bt_fail_armed_ = true;
   if (live.bt_scan_rev != bt_scan_rev_) {
     bt_found_.clear();
     if (host_.bt_scan_result) {
@@ -2382,7 +2401,16 @@ void ControlCenterContent::RenderBluetoothPage(ID2D1RenderTarget* target, UINT d
       panel::DrawRowCircle(target, dwrite_.Get(), fluent14_.Get(), brush, cx, cy, dpi, dark, dev.connected,
                            BtClassGlyph(dev.info.ulClassofDevice));
       float text_r = static_cast<float>(row.right);
-      if (dev.battery >= 0) {
+      const bool busy = !bt_connecting_addr_.empty() && bt_connecting_addr_ == dev.address;
+      if (busy) {
+        const float status_w = DipToPxF(92.0f, dpi);
+        brush->SetColor(muted);
+        DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush,
+                    D2D1::RectF(static_cast<float>(row.right) - status_w, static_cast<float>(row.top),
+                                static_cast<float>(row.right), static_cast<float>(row.bottom)),
+                    dev.connected ? L"연결 끊는 중\u2026" : L"연결 중\u2026");
+        text_r -= status_w + DipToPxF(8.0f, dpi);
+      } else if (dev.battery >= 0) {
         wchar_t pct[16]{};
         swprintf_s(pct, L"%d%%", dev.battery);
         const float bat_w = DipToPxF(36.0f, dpi);
@@ -2918,7 +2946,15 @@ void ControlCenterContent::Invoke(int index) {
         } else if (page_ == Page::kBluetooth && i >= 0 && i < static_cast<int>(bt_devices_.size())) {
           BtDevice& dev = bt_devices_[static_cast<size_t>(i)];
           if (dev.paired) {
-            OpenSettingsPage(L"ms-settings:bluetooth");
+            if (!bt_connecting_addr_.empty() && bt_connecting_addr_ == dev.address) {
+              break;
+            }
+            if (host_.bt_connect) {
+              bt_connecting_addr_ = dev.address;
+              host_.bt_connect(dev.address, !dev.connected);
+            } else {
+              OpenSettingsPage(L"ms-settings:bluetooth");
+            }
           } else {
             BLUETOOTH_FIND_RADIO_PARAMS params{};
             params.dwSize = sizeof(params);

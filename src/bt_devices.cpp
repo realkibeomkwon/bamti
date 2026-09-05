@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cwchar>
+#include <vector>
 
 namespace bamti {
 namespace {
@@ -488,6 +489,75 @@ std::vector<BtDeviceInfo> ScanBtDevices() {
   QueryPerformanceCounter(&t1);
   Log(L"bt", L"scan took %.0f ms n=%d", QpcMs(t0, t1), static_cast<int>(out.size()));
   return out;
+}
+
+bool SetBtDeviceConnected(const BLUETOOTH_DEVICE_INFO& info, bool connect) {
+  LARGE_INTEGER t0{};
+  LARGE_INTEGER t1{};
+  QueryPerformanceCounter(&t0);
+
+  const wchar_t* name = info.szName[0] != L'\0' ? info.szName : L"";
+  auto finish = [&](int ok_n, int total_n, bool ok) {
+    QueryPerformanceCounter(&t1);
+    Log(L"bt", L"set service state %s connect=%d ok=%d/%d took %.0f ms", name, connect ? 1 : 0, ok_n, total_n,
+        QpcMs(t0, t1));
+    return ok;
+  };
+
+  BLUETOOTH_FIND_RADIO_PARAMS radio_params{};
+  radio_params.dwSize = sizeof(radio_params);
+  HANDLE radio = nullptr;
+  const HBLUETOOTH_RADIO_FIND radio_find = BluetoothFindFirstRadio(&radio_params, &radio);
+  if (radio_find == nullptr) {
+    return finish(0, 0, false);
+  }
+
+  BLUETOOTH_DEVICE_INFO di = info;
+  if (di.dwSize == 0) {
+    di.dwSize = sizeof(di);
+  }
+
+  DWORD n = 0;
+  DWORD err = BluetoothEnumerateInstalledServices(radio, &di, &n, nullptr);
+  if ((err != ERROR_SUCCESS && err != ERROR_MORE_DATA) || n == 0) {
+    if (radio != nullptr) {
+      CloseHandle(radio);
+    }
+    BluetoothFindRadioClose(radio_find);
+    return finish(0, 0, false);
+  }
+
+  constexpr DWORD kBtServiceMax = 32;
+  if (n > kBtServiceMax) {
+    n = kBtServiceMax;
+  }
+  std::vector<GUID> guids(n);
+  DWORD inout = n;
+  err = BluetoothEnumerateInstalledServices(radio, &di, &inout, guids.data());
+  if (err != ERROR_SUCCESS && err != ERROR_MORE_DATA) {
+    if (radio != nullptr) {
+      CloseHandle(radio);
+    }
+    BluetoothFindRadioClose(radio_find);
+    return finish(0, static_cast<int>(n), false);
+  }
+  if (inout < n) {
+    n = inout;
+  }
+
+  const DWORD flag = connect ? BLUETOOTH_SERVICE_ENABLE : BLUETOOTH_SERVICE_DISABLE;
+  int ok_n = 0;
+  for (DWORD i = 0; i < n; ++i) {
+    if (BluetoothSetServiceState(radio, &di, &guids[i], flag) == ERROR_SUCCESS) {
+      ++ok_n;
+    }
+  }
+
+  if (radio != nullptr) {
+    CloseHandle(radio);
+  }
+  BluetoothFindRadioClose(radio_find);
+  return finish(ok_n, static_cast<int>(n), ok_n > 0);
 }
 
 }  // namespace bamti
