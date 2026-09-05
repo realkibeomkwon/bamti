@@ -1,4 +1,4 @@
-# TASK-CC-HOME-POLISH — 제어센터 홈을 다른 시스템 패널과 같은 규격으로 맞추고, 빠른 설정 타일을 즉시 적용으로 바꾼다
+# TASK-CC-HOME-POLISH — 제어센터 홈을 다른 시스템 패널과 같은 규격으로 맞추고, 빠른 설정 타일을 정리해 즉시 적용으로 바꾼다
 
 이 문서는 2026-09-05 시점의 작업 지시서이며, 현재 코드의 설명이 아니라 당시의 기록이다.
 
@@ -6,12 +6,15 @@
 
 제어센터 홈(`Page::kHome`)은 `src/control_center.cpp`가 그리는데, 드릴다운 패널(Wi-Fi, 사운드, 블루투스, 배터리, CPU)과 치수·색·글꼴 규칙이 따로 논다. 홈은 `kCcWidthDip = 340`과 자체 상수를 쓰고, 패널은 `src/panel_style.hpp`의 `panel::kWidthDip = 308`과 공용 그리기 함수를 쓴다. 그래서 홈에서 Wi-Fi를 누르면 팝업 폭이 340에서 308로 줄어들고, 같은 성격의 요소가 서로 다른 크기로 보인다.
 
-요청은 네 가지다.
+요청은 다섯 가지다.
 
 1. Wi-Fi 행과 Bluetooth 행이 붙어 있으니 사이에 여백을 넣는다.
-2. 비행기 모드, 절전 모드, 야간 모드 타일이 Windows 설정 앱을 열기만 하는데, 눌렀을 때 바로 적용되게 한다.
-3. 디스플레이와 사운드 슬라이더를 사운드 패널의 슬라이더와 같은 모양으로 바꾼다.
-4. 홈 전체의 디자인 규격을 다른 시스템 패널에 맞춘다.
+2. **비행기 모드 타일과 접근성 타일을 없앤다.** 빠른 설정에는 절전 모드와 야간 모드만 남긴다.
+3. 남은 절전 모드와 야간 모드 타일이 Windows 설정 앱을 열기만 하는데, 눌렀을 때 바로 적용되게 한다.
+4. 디스플레이와 사운드 슬라이더를 사운드 패널의 슬라이더와 같은 모양으로 바꾼다.
+5. 홈 전체의 디자인 규격을 다른 시스템 패널에 맞춘다.
+
+2번은 3번의 범위를 줄여 준다. 비행기 모드는 `asInvoker` 권한으로는 OS의 비행기 모드 플래그를 뒤집을 수 없어서 "모든 무선을 끄는 타일"이라는 어정쩡한 물건이 될 수밖에 없었고, 접근성은 켜고 끄는 단일 스위치가 아니라 설정 묶음이라 즉시 적용이라는 개념 자체가 성립하지 않았다. 둘 다 없애면 남는 두 타일은 모두 진짜 토글이 된다.
 
 ---
 
@@ -77,9 +80,46 @@ RECT ControlCenterContent::ConnectRowRect(UINT dpi, int row) const {
 
 `Render`에서는 두 행을 한 장으로 칠하지 말고 반복문 안에서 행마다 `fill_round(row.rc, CardFillColor(dark))`를 먼저 부른 뒤, 호버일 때 그 위에 `MenuItemHoverFill`을 덧칠한다. 빠른 설정 타일이 이미 그렇게 그리고 있으니 같은 순서를 따르면 된다.
 
-`kConnectHDip`이 114가 되면 `kQuickHDip`(114)과 값이 같아진다. 연결 구역과 빠른 설정 구역이 같은 격자를 쓰게 되는 것이므로 우연이 아니라 의도된 결과다.
+연결 구역과 빠른 설정 구역이 같은 격자(행 52dip, 간격 10dip)를 쓰게 된다. 1.3절에서 빠른 설정이 한 행으로 줄어들면 두 구역의 높이는 달라지지만 격자는 그대로 맞는다.
 
-### 1.3 슬라이더를 사운드 패널과 같은 모양으로 바꾼다
+### 1.3 빠른 설정 타일을 절전 모드와 야간 모드 둘만 남긴다
+
+지금은 2행 2열이다.
+
+```cpp
+const Quick quick[] = {
+    {kAirplane, 0, 0, kPlaneGlyph, L"비행기 모드", false},
+    {kSaver, 1, 0, kSaverGlyph, L"절전 모드", saver_on_},
+    {kNight, 0, 1, kNightGlyph, L"야간 모드", false},
+    {kAccess, 1, 1, kAccessGlyph, L"접근성", false},
+};
+```
+
+이것을 1행 2열로 줄인다.
+
+```cpp
+const Quick quick[] = {
+    {kSaver, 0, 0, kSaverGlyph, L"절전 모드", saver_on_},
+    {kNight, 1, 0, kNightGlyph, L"야간 모드", night_on_},
+};
+```
+
+같이 지울 것.
+
+- `HitId` 열거형에서 `kAirplane`과 `kAccess`를 뺀다. `kWifi`부터 시작하는 암묵적 연번이니 뒤의 값이 밀리는데, 이 값들은 저장되거나 프로세스 밖으로 나가지 않으므로 밀려도 문제가 없다.
+- `BuildHits`에서 `add(kAirplane, ...)`와 `add(kAccess, ...)` 두 줄을 지우고, 남은 두 줄을 `QuickTileRect(dpi, 0, 0)`과 `QuickTileRect(dpi, 1, 0)`으로 고친다.
+- `Invoke`에서 `case kAirplane`과 `case kAccess`를 지운다.
+- 이제 아무도 쓰지 않는 `kPlaneGlyph`(E709)와 `kAccessGlyph`(E776) 상수를 지운다. 남겨 두면 `/W4`에서 경고가 난다.
+
+구역 높이를 한 행짜리로 줄인다.
+
+```cpp
+constexpr int kQuickHDip = 114;   // → 52  (= kQuickTileHDip)
+```
+
+`kQuickTileWDip`은 1.1절에서 정한 135를 그대로 쓴다. 한 행에 두 장이 나란히 놓이는 구조는 바뀌지 않는다.
+
+### 1.4 슬라이더를 사운드 패널과 같은 모양으로 바꾼다
 
 사운드 패널(`RenderVolumePage`)의 슬라이더 규격은 다음과 같다.
 
@@ -166,7 +206,7 @@ const SliderGeometry geom{static_cast<float>(track.left) + knob_r, static_cast<f
 
 `SliderGeomThick`을 부르던 자리가 사라지는데, `src/slider_geom.hpp`의 다른 사용처를 확인하고 아무도 안 쓰면 그때 지운다. 이번 작업에서 함부로 지우지 않는다.
 
-### 1.4 글꼴과 색을 패널 쪽에 맞춘다
+### 1.5 글꼴과 색을 패널 쪽에 맞춘다
 
 홈에만 있는 눈금을 패널이 쓰는 눈금으로 옮긴다.
 
@@ -175,7 +215,7 @@ const SliderGeometry geom{static_cast<float>(track.left) + knob_r, static_cast<f
 | 연결 행 제목(Wi-Fi, Bluetooth) | `semibold13_` | `semibold14_` | 패널 제목이 `semibold14_`다 |
 | 연결 행 부제(SSID, 켜짐/꺼짐) | `regular11_` | `regular12_` | 패널 섹션 헤더가 `regular12_`다 |
 | 빠른 설정 타일 이름 | `regular12_` | `regular14_` | 패널 목록 행이 `regular14_`다 |
-| 슬라이더 카드 제목 | `regular11_` | `regular12_` | 1.3절 참고 |
+| 슬라이더 카드 제목 | `regular11_` | `regular12_` | 1.4절 참고 |
 | 슬라이더 트랙 배경 | `ScaleAlpha(fg, 0.12f)` | `BadgeOffFill(dark)` | 패널의 트랙과 토글이 모두 이 색이다 |
 
 배지 원의 지름과 텍스트 시작 위치도 정리한다.
@@ -185,31 +225,33 @@ const SliderGeometry geom{static_cast<float>(track.left) + knob_r, static_cast<f
 
 호버 채움의 모서리 반지름은 지금대로 `corner::kOverlayDip`을 쓴다. 패널은 `corner::HoverPx`를 쓰지만, 홈의 호버는 카드 전체를 덮으므로 카드 모서리를 그대로 따라야 자연스럽다. 이것은 통일 대상이 아니다.
 
-### 1.5 홈 높이
+### 1.6 홈 높이
 
 `HeightDip()`의 홈 분기가 위 변경을 반영하도록 고친다. 상수만 바뀌므로 식 자체는 그대로 두면 되지만, 계산 결과를 확인해 둔다.
 
 ```
-14 + 114 + 10 + 114 + 10 + (60 + 10) + 60 + 10 + 28 + 14 = 444   (디스플레이 슬라이더가 있을 때)
-14 + 114 + 10 + 114 + 10 +            60 + 10 + 28 + 14 = 374   (없을 때)
+14 + 114 + 10 + 52 + 10 + (60 + 10) + 60 + 10 + 28 + 14 = 382   (디스플레이 슬라이더가 있을 때)
+14 + 114 + 10 + 52 + 10 +            60 + 10 + 28 + 14 = 312   (없을 때)
 ```
+
+타일 두 장이 빠지면서 홈이 62dip 짧아진다.
 
 ---
 
-## 2부 — 빠른 설정 타일을 즉시 적용으로 바꾼다
+## 2부 — 남은 두 타일을 즉시 적용으로 바꾼다
 
 지금은 네 타일이 모두 설정 앱을 열기만 한다.
 
 ```cpp
-case kAirplane: OpenSettingsPage(L"ms-settings:network-airplanemode"); break;
-case kSaver:    OpenSettingsPage(L"ms-settings:batterysaver");         break;
-case kNight:    OpenSettingsPage(L"ms-settings:night-light");          break;
-case kAccess:   OpenSettingsPage(L"ms-settings:easeofaccess");         break;
+case kAirplane: OpenSettingsPage(L"ms-settings:network-airplanemode"); break;   // 1.3절에서 지운다
+case kSaver:    OpenSettingsPage(L"ms-settings:batterysaver");         break;   // 2.1절
+case kNight:    OpenSettingsPage(L"ms-settings:night-light");          break;   // 2.2절
+case kAccess:   OpenSettingsPage(L"ms-settings:easeofaccess");         break;   // 1.3절에서 지운다
 ```
 
-**접근성(`kAccess`)은 그대로 둔다.** 켜고 끄는 단일 스위치가 아니라 여러 기능이 모인 설정 묶음이므로, 즉시 적용이라는 개념이 성립하지 않는다. 이번 요청의 대상도 앞의 세 개다.
+1.3절에서 비행기 모드와 접근성을 지우고 나면 절전 모드와 야간 모드만 남는다. 이 둘을 즉시 적용으로 바꾼다.
 
-세 타일 모두 **UI 스레드에서 무선이나 전원 API를 직접 부르면 안 된다.** 이 API들은 1초 넘게 막힐 수 있고, 그동안 팝업이 멈춘다. 블루투스 라디오 토글이 이미 `StatusEvent`를 위젯 워커 스레드로 넘기는 방식을 쓰고 있으니 같은 길을 따른다.
+절전 모드는 **UI 스레드에서 전원 API를 직접 부르면 안 된다.** `SetBatterySaver`는 전원 정책을 다시 적용하고 플래그가 따라올 때까지 최대 3초를 기다리므로, 그동안 팝업이 멈춘다. 블루투스 라디오 토글이 이미 `StatusEvent`를 위젯 워커 스레드로 넘기는 방식을 쓰고 있으니 같은 길을 따른다. 야간 모드는 레지스트리 읽고 쓰기뿐이라 UI 스레드에서 처리해도 된다.
 
 ### 2.1 절전 모드 — 이미 있는 경로를 잇기만 하면 된다
 
@@ -243,85 +285,7 @@ case kSaver:
 
 `saver_on_`을 미리 뒤집는 것은 낙관적 반영이다. 다음 폴링에서 `ApplyLive`가 실제 상태로 덮으므로, 실패하면 몇백 밀리초 뒤에 원래대로 돌아온다. 이것이 눌러도 아무 반응이 없는 것보다 낫다.
 
-### 2.2 비행기 모드 — WinRT 라디오를 전부 끈다
-
-**먼저 한계를 밝힌다.** Windows의 진짜 비행기 모드 플래그는 `HKLM\SYSTEM\CurrentControlSet\Control\RadioManagement\SystemRadioState`에 있는데, bamti는 `asInvoker`로 돌아서(`src/bamti.manifest`) HKLM에 쓸 수 없다. 그 플래그를 뒤집는 공개 API도 없다. 그래서 이 작업이 만드는 것은 **모든 무선을 한 번에 끄고 켜는 타일**이지, OS의 비행기 모드 스위치가 아니다. Windows 설정 앱의 비행기 모드 표시는 켜지지 않을 수 있다.
-
-사용자에게는 결과가 사실상 같다. Wi-Fi와 블루투스가 함께 꺼지기 때문이다. 이 한계를 받아들이고 진행하되, 라벨을 "비행기 모드"로 그대로 둘지는 구현 후 화면을 보고 판단한다.
-
-`src/bt_devices.cpp`에 WinRT `Windows.Devices.Radios` 배선이 이미 전부 갖춰져 있다. `RadioStatics`, `RequestRadioAccess`, `GetRadiosView`, `WaitAsyncInfo`가 익명 네임스페이스에 있고, `SetBtRadio`가 `RadioKind_Bluetooth`만 골라 상태를 바꾼다. 여기에 종류를 가리지 않는 형제 함수를 더한다.
-
-라디오 관련 코드를 `src/radios.cpp`로 따로 빼는 편이 이름에는 더 맞지만, 그러려면 WinRT 헬퍼 여러 개를 옮겨야 해서 이번 요청의 범위를 넘는다. **`bt_devices.cpp`에 함께 두고, 분리는 나중 정리 과제로 남긴다.**
-
-`src/bt_devices.hpp`에 선언을 더한다.
-
-```cpp
-struct RadioAllState {
-  bool known = false;    // 라디오 목록을 읽을 수 있었는가
-  bool any_on = false;   // 하나라도 켜져 있는가
-  bool can_toggle = false;
-};
-
-// 종류를 가리지 않고 모든 무선 라디오를 훑는다.
-RadioAllState QueryAllRadios();
-// on이 거짓이면 켜져 있던 라디오를 모두 끄고 그 종류를 기억한다.
-// on이 참이면 기억해 둔 것을 켜고, 기억이 없으면 전부 켠다.
-// 몇 초가 걸릴 수 있으므로 UI 스레드에서 부르면 안 된다.
-bool SetAllRadios(bool on);
-```
-
-구현에서 지킬 것.
-
-- `RequestRadioAccess`가 `RadioAccessStatus_Allowed`를 돌려주지 않으면 아무것도 하지 말고 거짓을 돌려준다. 호출부가 설정 앱으로 물러설 수 있어야 한다.
-- 껐던 라디오 종류는 파일 정적 변수에 담는다. 프로세스가 다시 뜨면 기억이 사라지는데, 그때는 전부 켜는 것으로 물러선다. 설정 파일에 남길 가치는 없다.
-- 라디오 하나가 실패해도 나머지는 계속 처리한다. 하나라도 성공했으면 참을 돌려준다.
-- 로그 태그는 `Log(L"radio", ...)`를 쓴다.
-
-`ControlCenterLive`에 상태를 싣는다. `src/control_center.hpp`에 필드를 더하고,
-
-```cpp
-bool airplane_known = false;
-bool airplane_on = false;
-```
-
-`src/widgets/builtin.cpp`가 블루투스와 같은 주기(`bluetooth_due_`)로 `QueryAllRadios()`를 불러 `last_airplane_on_`에 담고, `live` 스냅숏을 만들 때 실어 보낸다. 라디오 열거는 블루투스 폴링과 겹치므로 주기를 새로 만들 이유가 없다.
-
-`BuiltinWidgets::OnEvent`에 분기를 더한다.
-
-```cpp
-} else if (ev.event == "toggle" && ev.id == kBluetoothId && ev.row_id == "airplane") {
-  std::lock_guard lock(mu_);
-  pending_airplane_on_ = ev.on;
-  wake = true;
-}
-```
-
-워커 루프에서 `pending_bt_on_`을 처리하는 자리(`if (bt_on) { SetBtRadio(*bt_on); ... }`) 바로 옆에 `SetAllRadios(*airplane_on)`을 넣고 `bluetooth_due_ = 0`으로 다음 폴링을 앞당긴다.
-
-`Invoke`의 `case kAirplane`은 다음과 같이 바꾼다.
-
-```cpp
-case kAirplane:
-  if (!airplane_known_) {
-    OpenSettingsPage(L"ms-settings:network-airplanemode");
-    break;
-  }
-  if (host_.dispatch) {
-    StatusEvent ev;
-    ev.id = "bamti.widget/bluetooth";
-    ev.event = "toggle";
-    ev.row_id = "airplane";
-    ev.on = !airplane_on_;
-    host_.dispatch(ev);
-  }
-  airplane_on_ = !airplane_on_;
-  PresentHost();
-  break;
-```
-
-`Render`의 `quick[]` 배열에서 이 타일의 `on` 값을 `false` 대신 `airplane_on_`으로 바꾼다.
-
-### 2.3 야간 모드 — CloudStore 블롭을 직접 고친다
+### 2.2 야간 모드 — CloudStore 블롭을 직접 고친다
 
 **여기가 이번 작업에서 가장 위험한 부분이다.** 야간 모드에는 공개 API가 없고, 상태가 HKCU 아래 이진 블롭 하나로만 존재한다.
 
@@ -384,7 +348,22 @@ bool SetNightLight(bool on);
 - 오프셋 10의 varint는 5바이트 고정이 아니라 값에 따라 길이가 달라진다. 최상위 비트가 0인 바이트가 나올 때까지 읽어 끝을 찾고, 새 시각을 같은 방식으로 인코딩해 그 구간을 통째로 갈아 끼운다. 길이가 달라질 수 있으므로 뒤쪽을 밀어야 한다. `10 00`의 삽입 위치도 varint 길이에 따라 움직이니 오프셋 18을 상수로 박지 말고 varint 끝에서부터 계산한다.
 - `RegSetValueExW`로 `REG_BINARY`를 쓴다. 키가 없으면 만들지 말고 거짓을 돌려준다.
 
-레지스트리 읽기와 쓰기는 빠르므로 UI 스레드에서 불러도 된다. 다만 상태 갱신은 위젯 폴링과 함께 두는 편이 유리하므로, `ControlCenterLive`에 `night_known`과 `night_on`을 더하고 비행기 모드와 같은 방식으로 실어 보낸다.
+**상태 읽기는 위젯 스레드까지 갈 것 없이 제어센터 안에서 처리한다.** 레지스트리에서 41바이트를 읽는 일이라 UI 스레드에서 불러도 무방하고, `ControlCenterContent::QuerySlowState`가 마침 `kSlowPeriodMs`(2초)마다 도는 자리인데 지금은 `slow_due_`만 갱신하는 빈 껍데기다. 여기에 읽기를 넣으면 `ControlCenterLive`와 `src/widgets/builtin.cpp`를 건드릴 필요가 없다.
+
+```cpp
+void ControlCenterContent::QuerySlowState(bool force) {
+  const ULONGLONG now = GetTickCount64();
+  if (!force && now < slow_due_) {
+    return;
+  }
+  slow_due_ = now + kSlowPeriodMs;
+  const NightLightState night = QueryNightLight();
+  night_known_ = night.known;
+  night_on_ = night.on;
+}
+```
+
+`src/control_center.hpp`의 비공개 멤버에 `bool night_known_ = false;`와 `bool night_on_ = false;`를 더한다.
 
 `Invoke`의 `case kNight`는 이렇게 된다.
 
@@ -409,20 +388,16 @@ case kNight:
 
 1. 홈 팝업 폭이 308dip이고, Wi-Fi를 눌러 패널로 들어갔다 나와도 폭이 변하지 않는다.
 2. Wi-Fi 카드와 Bluetooth 카드 사이에 10dip 간격이 보이고, 마우스를 올리면 각 카드만 따로 밝아진다.
-3. 디스플레이와 사운드 슬라이더가 사운드 패널의 슬라이더와 같은 두께, 같은 노브, 같은 좌우 아이콘 배치를 갖는다. 두 화면을 나란히 놓고 눈으로 비교한다.
-4. 슬라이더를 끌면 값이 따라오고, 트랙 양 끝에서 0과 100에 정확히 닿는다. 카드 어느 곳을 눌러도 드래그가 시작된다.
-5. 절전 모드 타일을 누르면 설정 앱이 뜨지 않고 배지가 강조색으로 바뀐다. Windows 설정의 배터리 절약 모드 표시도 함께 바뀐다. AC 전원이면 설정 앱이 뜬다.
-6. 비행기 모드 타일을 누르면 Wi-Fi와 Bluetooth가 함께 꺼지고, 홈의 두 연결 행 부제가 "연결 안 됨"과 "꺼짐"으로 바뀐다. 다시 누르면 껐던 것이 되살아난다.
+3. 빠른 설정에 절전 모드와 야간 모드 두 장만 한 줄로 놓여 있다. 비행기 모드와 접근성이 있던 자리에 빈 공간이나 잘린 카드가 남아 있지 않다.
+4. 디스플레이와 사운드 슬라이더가 사운드 패널의 슬라이더와 같은 두께, 같은 노브, 같은 좌우 아이콘 배치를 갖는다. 두 화면을 나란히 놓고 눈으로 비교한다.
+5. 슬라이더를 끌면 값이 따라오고, 트랙 양 끝에서 0과 100에 정확히 닿는다. 카드 어느 곳을 눌러도 드래그가 시작된다.
+6. 절전 모드 타일을 누르면 설정 앱이 뜨지 않고 배지가 강조색으로 바뀐다. Windows 설정의 배터리 절약 모드 표시도 함께 바뀐다. AC 전원이면 설정 앱이 뜬다.
 7. 야간 모드 타일을 누르면 화면 색온도가 즉시 따뜻해지고, Windows 설정의 야간 모드 스위치도 켜져 있다. 다시 누르면 돌아온다.
 8. `%LOCALAPPDATA%\bamti\night_light_backup.bin`이 만들어져 있고 크기가 41바이트다.
 
-**주의 두 가지가 있다.**
+**주의.** 검증 절차에 레지스트리 쓰기를 임의로 끼워 넣지 않는다. 야간 모드 확인은 앱의 타일을 눌러서만 하고, 되돌릴 때도 타일이나 Windows 설정을 쓴다. 레지스트리를 손으로 편집해 상태를 만들지 않는다.
 
-검증 절차에 레지스트리 쓰기를 임의로 끼워 넣지 않는다. 야간 모드 확인은 앱의 타일을 눌러서만 하고, 되돌릴 때도 타일이나 Windows 설정을 쓴다. 레지스트리를 손으로 편집해 상태를 만들지 않는다.
-
-Wi-Fi를 끄는 검증(6번)은 네트워크 연결이 끊긴다. **에이전트가 스스로 실행하지 말고 사람이 화면 앞에서 직접 확인하도록 남겨 둔다.** 무선을 끄면 에이전트 자신의 API 연결도 함께 끊어진다.
-
-빌드 경고는 `/W4`에서 0개를 유지한다.
+빌드 경고는 `/W4`에서 0개를 유지한다. 특히 1.3절에서 지운 글리프 상수와 열거값이 남아 있지 않은지 확인한다.
 
 ---
 
@@ -430,4 +405,6 @@ Wi-Fi를 끄는 검증(6번)은 네트워크 연결이 끊긴다. **에이전트
 
 1부와 2부는 서로 독립적이다. 1부를 먼저 끝내고 화면을 확인한 뒤 2부로 넘어가면 문제가 생겼을 때 원인을 가리기 쉽다.
 
-2부 안에서는 절전 모드(2.1), 비행기 모드(2.2), 야간 모드(2.3) 순서로 한다. 뒤로 갈수록 위험이 커지고, 앞의 것이 뒤의 것에 배선을 물려준다.
+1부 안에서는 타일을 지우는 1.3절을 폭을 줄이는 1.1절 바로 뒤에 처리하는 편이 낫다. 격자 상수가 한 번에 정리되고, 그 뒤의 슬라이더 작업이 확정된 좌표 위에서 진행된다.
+
+2부 안에서는 절전 모드(2.1)를 먼저 하고 야간 모드(2.2)를 나중에 한다. 절전 모드는 이미 있는 배선을 잇는 일이고, 야간 모드는 레지스트리를 직접 고치는 일이라 위험이 훨씬 크다.
