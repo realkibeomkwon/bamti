@@ -30,7 +30,7 @@ namespace {
 
 constexpr int kWidthDip = 680;
 constexpr int kShadowDip = 18;
-constexpr int kPadDip = 12;
+constexpr int kPadDip = 8;
 constexpr int kSearchHeightDip = 48;
 constexpr int kRowHeightDip = 36;
 constexpr int kHeaderHeightDip = 24;
