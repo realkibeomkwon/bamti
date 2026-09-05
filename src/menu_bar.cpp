@@ -1956,6 +1956,7 @@ void MenuBar::OpenTraySubmenu() {
   }
   bar_submenu_->Reset(hwnd_, dark_);
   bar_submenu_->SetPopup(&bar_submenu_popup_);
+  bar_submenu_->SetMaxWidthDip(360);
   tray_menu_keys_.clear();
   const std::vector<TrayMirror::MenuItem> entries = tray_.MenuItems();
   if (entries.empty()) {

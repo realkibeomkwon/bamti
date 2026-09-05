@@ -1,20 +1,12 @@
 #pragma once
 
+#include "menu_style.hpp"
 #include "popup_surface.hpp"
 
 #include <string>
 #include <vector>
 
 namespace bamti {
-
-struct BarMenuRow {
-  UINT id = 0;
-  std::wstring text;
-  bool separator = false;
-  bool checked = false;
-  bool enabled = true;
-  bool submenu = false;
-};
 
 class BarMenuContent : public PopupContent {
  public:
@@ -23,11 +15,13 @@ class BarMenuContent : public PopupContent {
   void AddSeparator();
   void SetPopup(PopupSurface* popup);
   void SetDark(bool dark);
+  void SetMaxWidthDip(int dip);
 
   bool empty() const;
   int SubmenuIndex() const;
   bool RowScreenRect(int index, RECT* out) const;
 
+  int CornerDip() const override { return kMenuCornerDip; }
   int RowCount() const override;
   bool StickyRow(int index) const override;
   SIZE Measure(UINT dpi) override;
@@ -41,7 +35,8 @@ class BarMenuContent : public PopupContent {
   HWND target_ = nullptr;
   PopupSurface* popup_ = nullptr;
   bool dark_ = true;
-  std::vector<BarMenuRow> rows_;
+  int max_width_dip_ = kMenuMaxWidthDip;
+  std::vector<MenuRow> rows_;
 };
 
 }  // namespace bamti

@@ -5,6 +5,7 @@
 #include "icon_cache.hpp"
 #include "log.hpp"
 #include "menu_bar.hpp"
+#include "menu_style.hpp"
 #include "taskbar_controller.hpp"
 #include "theme.hpp"
 #include "watchdog.hpp"
@@ -48,20 +49,6 @@ constexpr int kGroupGapDip = 12;
 constexpr int kDragSlopDip = 6;
 constexpr int kMarginBottomDip = 8;
 constexpr int kHotDip = 8;
-// 맥 독 우클릭 메뉴는 일반 NSMenu(22)보다 행이 높다. 13pt 글자에 위아래
-// 여유를 두면 행 30, 바깥 6, 구분 11 이 스크린샷과 맞는다.
-constexpr int kMenuPadDip = 6;
-constexpr int kMenuRowDip = 30;
-constexpr int kMenuSepDip = 11;
-constexpr int kMenuMinWidthDip = 160;
-constexpr int kMenuMaxWidthDip = 280;
-constexpr int kMenuCheckDip = 18;
-constexpr int kMenuArrowDip = 16;
-constexpr int kMenuHoverRadiusDip = 6;
-// 강조 칠이 행을 꽉 채우지 않게 위아래로 물러나는 양.
-// 맥 메뉴는 강조가 행의 70% 정도만 차지한다.
-constexpr int kMenuHoverInsetDip = 4;
-constexpr int kMenuCornerDip = 10;
 constexpr int kGroupSepInsetDip = 8;
 constexpr UINT kHideDelayMs = 100;
 constexpr UINT kRebuildDelayMs = 300;
@@ -857,173 +844,6 @@ void ShowInFolder(const DockApp& app) {
 
 }  // namespace
 
-struct DockMenuRow {
-  UINT id = 0;
-  std::wstring text;
-  bool separator = false;
-  bool checked = false;
-  bool submenu = false;
-};
-
-namespace {
-
-struct DockMenuMetrics {
-  int pad = 0;
-  int row_h = 0;
-  int sep_h = 0;
-  int check_w = 0;
-  int arrow_w = 0;
-};
-
-DockMenuMetrics MakeDockMenuMetrics(UINT dpi) {
-  return DockMenuMetrics{
-      DipToPx(kMenuPadDip, dpi),
-      DipToPx(kMenuRowDip, dpi),
-      DipToPx(kMenuSepDip, dpi),
-      DipToPx(kMenuCheckDip, dpi),
-      DipToPx(kMenuArrowDip, dpi),
-  };
-}
-
-SIZE MeasureDockMenuRows(const std::vector<DockMenuRow>& rows, UINT dpi) {
-  const DockMenuMetrics m = MakeDockMenuMetrics(dpi);
-  int text_w = 0;
-  for (const DockMenuRow& row : rows) {
-    if (row.separator || row.text.empty()) {
-      continue;
-    }
-    text_w = (std::max)(text_w, static_cast<int>(PopupTextWidth(dpi, row.text) + 0.5f));
-  }
-  int width = text_w + m.pad * 2 + m.check_w + m.arrow_w;
-  width = (std::max)(width, DipToPx(kMenuMinWidthDip, dpi));
-  width = (std::min)(width, DipToPx(kMenuMaxWidthDip, dpi));
-  int height = m.pad * 2;
-  for (const DockMenuRow& row : rows) {
-    height += row.separator ? m.sep_h : m.row_h;
-  }
-  return SIZE{width, height};
-}
-
-RECT DockMenuRowRectOf(const std::vector<DockMenuRow>& rows, int index, UINT dpi, int width) {
-  RECT result{};
-  if (index < 0 || index >= static_cast<int>(rows.size())) {
-    return result;
-  }
-  const DockMenuMetrics m = MakeDockMenuMetrics(dpi);
-  int y = m.pad;
-  for (int i = 0; i < index; ++i) {
-    y += rows[static_cast<size_t>(i)].separator ? m.sep_h : m.row_h;
-  }
-  const int h = rows[static_cast<size_t>(index)].separator ? m.sep_h : m.row_h;
-  result = {m.pad, y, width - m.pad, y + h};
-  return result;
-}
-
-void DrawDockMenuStroke(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, ID2D1StrokeStyle* style,
-                        const D2D1_POINT_2F* pts, UINT count, float stroke_px) {
-  if (target == nullptr || brush == nullptr || pts == nullptr || count < 2) {
-    return;
-  }
-  for (UINT i = 1; i < count; ++i) {
-    target->DrawLine(pts[i - 1], pts[i], brush, stroke_px, style);
-  }
-}
-
-void DrawDockMenuCheck(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, ID2D1StrokeStyle* style,
-                       const D2D1_RECT_F& col, UINT dpi) {
-  const float s = static_cast<float>(dpi) / 96.0f;
-  const float cx = (col.left + col.right) * 0.5f;
-  const float cy = (col.top + col.bottom) * 0.5f;
-  const D2D1_POINT_2F pts[] = {
-      D2D1::Point2F(cx - 4.2f * s, cy + 0.3f * s),
-      D2D1::Point2F(cx - 1.1f * s, cy + 3.2f * s),
-      D2D1::Point2F(cx + 4.6f * s, cy - 3.5f * s),
-  };
-  DrawDockMenuStroke(target, brush, style, pts, 3, 1.7f * s);
-}
-
-void DrawDockMenuChevron(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, ID2D1StrokeStyle* style,
-                         const D2D1_RECT_F& col, UINT dpi) {
-  const float s = static_cast<float>(dpi) / 96.0f;
-  const float cx = col.right - 6.5f * s;
-  const float cy = (col.top + col.bottom) * 0.5f;
-  const D2D1_POINT_2F pts[] = {
-      D2D1::Point2F(cx - 2.4f * s, cy - 4.0f * s),
-      D2D1::Point2F(cx + 1.8f * s, cy),
-      D2D1::Point2F(cx - 2.4f * s, cy + 4.0f * s),
-  };
-  DrawDockMenuStroke(target, brush, style, pts, 3, 1.5f * s);
-}
-
-void RenderDockMenuRows(ID2D1RenderTarget* target, UINT dpi, int hot, bool dark,
-                        const std::vector<DockMenuRow>& rows) {
-  if (target == nullptr) {
-    return;
-  }
-  const D2D1_SIZE_F sz = target->GetSize();
-  const int width = static_cast<int>(sz.width);
-  const DockMenuMetrics m = MakeDockMenuMetrics(dpi);
-  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> ink;
-  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover;
-  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> line;
-  const D2D1_COLOR_F text_c = ClockTextColor(dark);
-  const D2D1_COLOR_F hot_text_c = AccentOnColor(dark);
-  const D2D1_COLOR_F hover_c = AccentFillColor(dark);
-  const D2D1_COLOR_F line_c = DockStrokeColor(dark);
-  target->CreateSolidColorBrush(text_c, ink.GetAddressOf());
-  target->CreateSolidColorBrush(hover_c, hover.GetAddressOf());
-  target->CreateSolidColorBrush(D2D1::ColorF(line_c.r, line_c.g, line_c.b, line_c.a), line.GetAddressOf());
-  ID2D1Factory* factory = nullptr;
-  target->GetFactory(&factory);
-  Microsoft::WRL::ComPtr<ID2D1StrokeStyle> stroke_style;
-  if (factory != nullptr) {
-    factory->CreateStrokeStyle(
-        D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
-                                    D2D1_LINE_JOIN_ROUND, 2.0f),
-        nullptr, 0, stroke_style.GetAddressOf());
-  }
-  const float hover_r = corner::ToPx(kMenuHoverRadiusDip, dpi);
-  for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
-    const DockMenuRow& row = rows[static_cast<size_t>(i)];
-    const RECT rc = DockMenuRowRectOf(rows, i, dpi, width);
-    const D2D1_RECT_F box = D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
-                                        static_cast<float>(rc.right), static_cast<float>(rc.bottom));
-    if (row.separator) {
-      if (!line) {
-        continue;
-      }
-      const float y = static_cast<float>(rc.top + (rc.bottom - rc.top) / 2) + 0.5f;
-      target->DrawLine(D2D1::Point2F(box.left, y), D2D1::Point2F(box.right, y), line.Get(), 1.0f);
-      continue;
-    }
-    const bool selected = i == hot;
-    if (selected && hover) {
-      const float inset = corner::ToPx(kMenuHoverInsetDip, dpi);
-      const D2D1_RECT_F fill_box{box.left, box.top + inset, box.right, box.bottom - inset};
-      const float rr = corner::ClampPx(hover_r, fill_box.right - fill_box.left, fill_box.bottom - fill_box.top);
-      target->FillRoundedRectangle(D2D1_ROUNDED_RECT{fill_box, rr, rr}, hover.Get());
-    }
-    if (!ink) {
-      continue;
-    }
-    ink->SetColor(selected ? hot_text_c : text_c);
-    if (row.checked) {
-      DrawDockMenuCheck(target, ink.Get(), stroke_style.Get(),
-                        D2D1::RectF(box.left, box.top, box.left + static_cast<float>(m.check_w), box.bottom), dpi);
-    }
-    DrawPopupText(target, dpi, row.text,
-                  D2D1::RectF(box.left + static_cast<float>(m.check_w), box.top,
-                              box.right - static_cast<float>(m.arrow_w), box.bottom),
-                  ink.Get());
-    if (row.submenu) {
-      DrawDockMenuChevron(target, ink.Get(), stroke_style.Get(),
-                          D2D1::RectF(box.right - static_cast<float>(m.arrow_w), box.top, box.right, box.bottom), dpi);
-    }
-  }
-}
-
-}  // namespace
-
 class DockMenuContent : public PopupContent {
  public:
   void Reset(Dock* owner, const DockApp& app) {
@@ -1036,7 +856,7 @@ class DockMenuContent : public PopupContent {
     }
 
     window_targets_.reserve(app.windows.size());
-    std::vector<DockMenuRow> window_rows;
+    std::vector<MenuRow> window_rows;
     window_rows.reserve(app.windows.size());
     const HWND foreground = GetForegroundWindow();
     for (HWND hwnd : app.windows) {
@@ -1130,10 +950,10 @@ class DockMenuContent : public PopupContent {
 
   int CornerDip() const override { return kMenuCornerDip; }
 
-  SIZE Measure(UINT dpi) override { return MeasureDockMenuRows(rows_, dpi); }
+  SIZE Measure(UINT dpi) override { return MeasureMenuRows(rows_, dpi); }
 
   void Render(ID2D1RenderTarget* target, UINT dpi, int hot) override {
-    RenderDockMenuRows(target, dpi, hot, owner_ != nullptr ? owner_->dark_ : true, rows_);
+    RenderMenuRows(target, dpi, hot, owner_ != nullptr ? owner_->dark_ : true, rows_);
   }
 
   int HitTest(POINT client, UINT dpi) const override {
@@ -1143,16 +963,7 @@ class DockMenuContent : public PopupContent {
       GetClientRect(owner_->popup_.hwnd(), &rc);
       width = rc.right;
     }
-    for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
-      if (rows_[static_cast<size_t>(i)].separator) {
-        continue;
-      }
-      const RECT rc = RowRect(i, dpi, width);
-      if (PtInRect(&rc, client)) {
-        return i;
-      }
-    }
-    return -1;
+    return MenuHitTest(rows_, client, dpi, width);
   }
 
   void Invoke(int index) override {
@@ -1170,11 +981,11 @@ class DockMenuContent : public PopupContent {
   }
 
  private:
-  RECT RowRect(int index, UINT dpi, int width) const { return DockMenuRowRectOf(rows_, index, dpi, width); }
+  RECT RowRect(int index, UINT dpi, int width) const { return MenuRowRectOf(rows_, index, dpi, width); }
 
   Dock* owner_ = nullptr;
   DockApp app_{};
-  std::vector<DockMenuRow> rows_;
+  std::vector<MenuRow> rows_;
   std::vector<HWND> window_targets_;
 };
 
@@ -1205,10 +1016,10 @@ class DockSubmenuContent : public PopupContent {
   int RowCount() const override { return static_cast<int>(rows_.size()); }
   int CornerDip() const override { return kMenuCornerDip; }
 
-  SIZE Measure(UINT dpi) override { return MeasureDockMenuRows(rows_, dpi); }
+  SIZE Measure(UINT dpi) override { return MeasureMenuRows(rows_, dpi); }
 
   void Render(ID2D1RenderTarget* target, UINT dpi, int hot) override {
-    RenderDockMenuRows(target, dpi, hot, owner_ != nullptr ? owner_->dark_ : true, rows_);
+    RenderMenuRows(target, dpi, hot, owner_ != nullptr ? owner_->dark_ : true, rows_);
   }
 
   int HitTest(POINT client, UINT dpi) const override {
@@ -1218,16 +1029,7 @@ class DockSubmenuContent : public PopupContent {
       GetClientRect(owner_->submenu_.hwnd(), &rc);
       width = rc.right;
     }
-    for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
-      if (rows_[static_cast<size_t>(i)].separator) {
-        continue;
-      }
-      const RECT rc = RowRect(i, dpi, width);
-      if (PtInRect(&rc, client)) {
-        return i;
-      }
-    }
-    return -1;
+    return MenuHitTest(rows_, client, dpi, width);
   }
 
   void Invoke(int index) override {
@@ -1245,11 +1047,11 @@ class DockSubmenuContent : public PopupContent {
   }
 
  private:
-  RECT RowRect(int index, UINT dpi, int width) const { return DockMenuRowRectOf(rows_, index, dpi, width); }
+  RECT RowRect(int index, UINT dpi, int width) const { return MenuRowRectOf(rows_, index, dpi, width); }
 
   Dock* owner_ = nullptr;
   DockApp app_{};
-  std::vector<DockMenuRow> rows_;
+  std::vector<MenuRow> rows_;
 };
 
 Dock::Dock() = default;
