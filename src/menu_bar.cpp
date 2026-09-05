@@ -2073,7 +2073,7 @@ void MenuBar::OpenBarSubmenu(UINT cmd) {
   if (!bar_menu_->RowScreenRect(row_index, &row)) {
     return;
   }
-  const POINT anchor{row.right, row.top};
+  const POINT anchor{row.right, row.top - DipToPx(kMenuPadDip, Dpi())};
   status_popup_.SetAllied(&bar_submenu_popup_);
   bar_submenu_popup_.SetDark(dark_);
   if (!bar_submenu_popup_.Open(bar_submenu_.get(), anchor, PopupSurface::Anchor::RightOf, false)) {

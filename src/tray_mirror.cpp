@@ -18,6 +18,8 @@
 namespace bamti {
 namespace {
 
+std::unordered_set<uint64_t> g_live_keys;
+
 constexpr int kTrayPriorityBase = 5;
 constexpr ULONGLONG kPerfLogMs = 300000;
 constexpr UINT kSlowEnumMs = 200;
@@ -558,6 +560,13 @@ std::vector<TrayMirror::MenuItem> TrayMirror::MenuItems() const {
       guid = remembered->second.guid;
     }
     row.label = MenuLabel(tip, guid, true, key);
+    const std::string hex = KeyText(key);
+    std::wstring key_w(hex.begin(), hex.end());
+    Log(L"tray", L"hidden key=%s live=%d remembered=%d label=%s", key_w.c_str(),
+        g_live_keys.count(key) ? 1 : 0, remembered != last_tips_.end() ? 1 : 0, row.label.c_str());
+    if (LabelForGuid(guid) == nullptr && tip.empty()) {
+      continue;
+    }
     out.push_back(std::move(row));
     seen.insert(key);
   }
@@ -764,10 +773,12 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
   std::vector<TrayIconInfo> keep;
   std::vector<LastTip> tips;
   std::vector<uint64_t> tip_keys;
+  std::vector<uint64_t> live;
   next.reserve(raw.size());
   keep.reserve(raw.size());
   tips.reserve(raw.size());
   tip_keys.reserve(raw.size());
+  live.reserve(raw.size());
   for (const TrayIconInfo& icon : raw) {
     TrayIconInfo copy = icon;
     if (!use_runtime) {
@@ -780,6 +791,9 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
       hash = Fnv1a64(reinterpret_cast<const uint8_t*>(cls.data()), cls.size(), hash);
       const int32_t ord = copy.order;
       copy.key = Fnv1a64(reinterpret_cast<const uint8_t*>(&ord), sizeof(ord), hash);
+    }
+    if (copy.key != 0) {
+      live.push_back(copy.key);
     }
     if (copy.key != 0 && (!copy.tip.empty() || !GuidEmpty(copy.guid_item))) {
       LastTip rec;
@@ -810,6 +824,8 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
   {
     std::lock_guard lock(mu_);
     prev = items_;
+    g_live_keys.clear();
+    g_live_keys.insert(live.begin(), live.end());
     for (size_t i = 0; i < tips.size(); ++i) {
       LastTip& rec = last_tips_[tip_keys[i]];
       if (!tips[i].tip.empty()) {
