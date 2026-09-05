@@ -67,7 +67,7 @@ class MenuBar {
   void EndTrayPeek();
   bool PeekZoneHit(POINT client) const;
   bool DesktopPeekWanted(POINT client) const;
-  void UpdateDesktopPeek(POINT client, bool ctrl_down);
+  void UpdateDesktopPeek(POINT client);
   void StartDesktopPeek();
   void StopDesktopPeek();
   void RefreshFullscreenState();
@@ -212,7 +212,6 @@ class MenuBar {
   bool peek_active_ = false;
   bool peek_dwell_armed_ = false;
   POINT peek_pt_{};
-  bool peek_ctrl_ = false;
   int wheel_accum_ = 0;
 };
 

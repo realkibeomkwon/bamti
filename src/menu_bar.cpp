@@ -451,7 +451,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (wparam == kDesktopPeekDwellTimerId) {
         KillTimer(hwnd_, kDesktopPeekDwellTimerId);
         peek_dwell_armed_ = false;
-        if (peek_ctrl_ && DesktopPeekWanted(peek_pt_)) {
+        if (DesktopPeekWanted(peek_pt_)) {
           StartDesktopPeek();
         }
         return 0;
@@ -566,7 +566,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         return 0;
       }
       UpdateChrome(pt);
-      UpdateDesktopPeek(pt, (wparam & MK_CONTROL) != 0);
+      UpdateDesktopPeek(pt);
       return 0;
     }
     case WM_MOUSELEAVE:
@@ -2255,16 +2255,13 @@ bool MenuBar::DesktopPeekWanted(POINT client) const {
   if (status_popup_.IsOpen() || bar_submenu_popup_.IsOpen()) {
     return false;
   }
-  if (!peek_ctrl_ && (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
-      (GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0) {
+  if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0) {
     return false;
   }
   return PeekZoneHit(client);
 }
 
-void MenuBar::UpdateDesktopPeek(POINT client, bool ctrl_down) {
-  peek_ctrl_ = ctrl_down || (GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
-               (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+void MenuBar::UpdateDesktopPeek(POINT client) {
   if (!DesktopPeekWanted(client)) {
     if (hwnd_ != nullptr) {
       KillTimer(hwnd_, kDesktopPeekDwellTimerId);
