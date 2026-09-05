@@ -18,7 +18,8 @@ class BarMenuContent : public PopupContent {
   void SetMaxWidthDip(int dip);
 
   bool empty() const;
-  int SubmenuIndex() const;
+  UINT SubmenuIdAt(int index) const;
+  int RowIndexOfCommand(UINT id) const;
   bool RowScreenRect(int index, RECT* out) const;
 
   int CornerDip() const override { return kMenuCornerDip; }

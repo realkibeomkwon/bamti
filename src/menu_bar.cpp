@@ -47,9 +47,13 @@ constexpr UINT kTrayInterceptCmd = 17;
 constexpr UINT kAutostartCmd = 18;
 constexpr UINT kWidgetVolumeCmd = 19;
 constexpr UINT kWidgetControlCenterCmd = 20;
-constexpr UINT kTrayPeekCmd = 20;
 constexpr UINT kTrayHideIconCmd = 21;
 constexpr UINT kTrayMirrorOffCmd = 22;
+constexpr UINT kWidgetBluetoothCmd = 23;
+constexpr UINT kTrayPeekCmd = 24;
+constexpr UINT kSettingsCmd = 25;
+constexpr UINT kMenuWidgetsSubCmd = 30;
+constexpr UINT kMenuTraySubCmd = 31;
 constexpr UINT kTrayItemCmdBase = 4000;
 constexpr UINT_PTR kPeekTimerId = 4;
 constexpr UINT kPeekMs = 10000;
@@ -60,7 +64,6 @@ constexpr char kVolumeItemId[] = "bamti.widget/volume";
 constexpr char kBluetoothItemId[] = "bamti.widget/bluetooth";
 constexpr char kBatteryItemId[] = "bamti.widget/battery";
 constexpr char kCpuItemId[] = "bamti.widget/cpu";
-constexpr UINT kWidgetBluetoothCmd = 23;
 
 struct WidgetPage {
   const char* id;
@@ -438,7 +441,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       return 0;
     case kPopupClosedMsg:
       if (!status_popup_.IsOpen()) {
-        CloseTraySubmenu(L"parent");
+        CloseBarSubmenu(L"parent");
         status_popup_.SetAfterTick(nullptr, nullptr);
         if (cc_panel_ != nullptr) {
           cc_panel_->Dismissed();
@@ -904,6 +907,10 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         next.tray_backend = tray.tray_backend;
         next.tray_hidden_keys = tray.tray_hidden_keys;
         ApplySettings(next);
+      }
+      if (cmd == kSettingsCmd) {
+        // TODO: 설정 페이지
+        Log(L"bar", L"settings page not implemented yet");
       }
       return 0;
     }
@@ -1509,7 +1516,7 @@ void MenuBar::OpenOverflow() {
   }
   POINT anchor{chevron.left, chevron.bottom};
   ClientToScreen(hwnd_, &anchor);
-  CloseTraySubmenu(L"other-popup");
+  CloseBarSubmenu(L"other-popup");
   status_popup_.SetAfterTick(nullptr, nullptr);
   status_popup_.Open(overflow_panel_.get(), anchor, PopupSurface::Anchor::BelowAt);
 }
@@ -1614,7 +1621,7 @@ bool MenuBar::ShowControlCenter(const RECT& item_rect, ControlCenterPage page) {
   cc_open_ = true;
   clock_open_ = false;
   open_panel_id_.clear();
-  CloseTraySubmenu(L"other-popup");
+  CloseBarSubmenu(L"other-popup");
   status_popup_.SetAfterTick(nullptr, nullptr);
   status_popup_.SetDark(dark_);
   if (!status_popup_.Open(cc_panel_.get(), anchor, PopupSurface::Anchor::BelowAt)) {
@@ -1676,7 +1683,7 @@ bool MenuBar::ShowClockFlyout() {
   cc_open_ = false;
   clock_open_ = true;
   open_panel_id_.clear();
-  CloseTraySubmenu(L"other-popup");
+  CloseBarSubmenu(L"other-popup");
   status_popup_.SetAfterTick(nullptr, nullptr);
   status_popup_.SetDark(dark_);
   if (!status_popup_.Open(clock_panel_.get(), anchor, PopupSurface::Anchor::BelowAt)) {
@@ -1705,7 +1712,7 @@ void MenuBar::ShowClockMenu() {
   cc_open_ = false;
   clock_open_ = false;
   open_panel_id_.clear();
-  CloseTraySubmenu(L"other-popup");
+  CloseBarSubmenu(L"other-popup");
   status_popup_.SetAfterTick(nullptr, nullptr);
   status_popup_.SetDark(dark_);
   if (!status_popup_.Open(clock_menu_.get(), anchor, PopupSurface::Anchor::BelowAt)) {
@@ -1769,7 +1776,7 @@ void MenuBar::OpenStatusPanel(const StatusHit& hit) {
   ev.id = found->id;
   ev.event = "panel_open";
   status_.Dispatch(ev);
-  CloseTraySubmenu(L"other-popup");
+  CloseBarSubmenu(L"other-popup");
   status_popup_.SetAfterTick(nullptr, nullptr);
   status_popup_.Open(status_panel_.get(), anchor, PopupSurface::Anchor::BelowAt);
 }
@@ -1921,13 +1928,13 @@ void MenuBar::RemoveWinHook() {
 
 void MenuBar::AfterBarPopupTick(void* ctx) {
   if (ctx != nullptr) {
-    static_cast<MenuBar*>(ctx)->SyncTraySubmenu();
+    static_cast<MenuBar*>(ctx)->SyncBarSubmenu();
   }
 }
 
-void MenuBar::SyncTraySubmenu() {
+void MenuBar::SyncBarSubmenu() {
   if (!status_popup_.IsOpen() || bar_menu_ == nullptr) {
-    CloseTraySubmenu(L"parent");
+    CloseBarSubmenu(L"parent");
     return;
   }
   POINT cursor{};
@@ -1935,20 +1942,27 @@ void MenuBar::SyncTraySubmenu() {
   RECT sub{};
   const bool over_sub = got_cursor && bar_submenu_popup_.IsOpen() && bar_submenu_popup_.hwnd() != nullptr &&
                         GetWindowRect(bar_submenu_popup_.hwnd(), &sub) != FALSE && PtInRect(&sub, cursor);
-  const int opt = bar_menu_->SubmenuIndex();
-  const int hot = status_popup_.Hot();
-  if (opt >= 0 && (hot == opt || over_sub)) {
-    OpenTraySubmenu();
-  } else {
-    CloseTraySubmenu(L"hover-leave");
+  if (over_sub) {
+    return;
   }
+  const UINT cmd = bar_menu_->SubmenuIdAt(status_popup_.Hot());
+  if (cmd == 0) {
+    CloseBarSubmenu(L"hover-leave");
+    return;
+  }
+  if (cmd == open_submenu_cmd_) {
+    return;
+  }
+  CloseBarSubmenu(L"switch");
+  OpenBarSubmenu(cmd);
 }
 
-void MenuBar::OpenTraySubmenu() {
+void MenuBar::OpenBarSubmenu(UINT cmd) {
   if (!status_popup_.IsOpen() || bar_menu_ == nullptr || bar_submenu_popup_.IsOpen()) {
     return;
   }
-  if (bar_menu_->SubmenuIndex() < 0) {
+  const int row_index = bar_menu_->RowIndexOfCommand(cmd);
+  if (row_index < 0) {
     return;
   }
   if (!bar_submenu_) {
@@ -1956,24 +1970,46 @@ void MenuBar::OpenTraySubmenu() {
   }
   bar_submenu_->Reset(hwnd_, dark_);
   bar_submenu_->SetPopup(&bar_submenu_popup_);
-  bar_submenu_->SetMaxWidthDip(360);
-  tray_menu_keys_.clear();
-  const std::vector<TrayMirror::MenuItem> entries = tray_.MenuItems();
-  if (entries.empty()) {
-    bar_submenu_->Add(0, L"미러 중인 아이콘이 없습니다", false, false);
+  if (cmd == kMenuWidgetsSubCmd) {
+    const WidgetSettings s = widgets_.settings();
+    bar_submenu_->Add(kWidgetBatteryCmd, L"배터리", s.battery);
+    bar_submenu_->Add(kWidgetCpuCmd, L"CPU", s.cpu);
+    bar_submenu_->Add(kWidgetNetworkCmd, L"네트워크", s.network);
+    bar_submenu_->Add(kWidgetBluetoothCmd, L"블루투스", s.bluetooth);
+    bar_submenu_->Add(kWidgetVolumeCmd, L"볼륨", s.volume);
+    bar_submenu_->Add(kWidgetControlCenterCmd, L"제어 센터", s.control_center);
+    if (IsWidgetBoardAvailable()) {
+      bar_submenu_->Add(kWidgetBoardCmd, L"위젯 보드 단추", s.widget_board);
+    }
+  } else if (cmd == kMenuTraySubCmd) {
+    bar_submenu_->SetMaxWidthDip(360);
+    tray_menu_keys_.clear();
+    const std::vector<TrayMirror::MenuItem> entries = tray_.MenuItems();
+    if (entries.empty()) {
+      bar_submenu_->Add(0, L"미러 중인 아이콘이 없습니다", false, false);
+    } else {
+      const size_t n = (std::min)(entries.size(), kTrayHiddenKeysMax);
+      tray_menu_keys_.reserve(n);
+      for (size_t i = 0; i < n; ++i) {
+        bar_submenu_->Add(kTrayItemCmdBase + static_cast<UINT>(i), entries[i].label, entries[i].shown);
+        tray_menu_keys_.push_back(entries[i].key);
+      }
+      if (entries.size() > kTrayHiddenKeysMax) {
+        bar_submenu_->Add(0, L"이하 생략", false, false);
+      }
+    }
+    bar_submenu_->AddSeparator();
+    const WidgetSettings tray = tray_.settings();
+    bar_submenu_->Add(kTrayMirrorToggleCmd, L"트레이 미러", tray.tray_mirror);
+    bar_submenu_->Add(kTraySystemIconsCmd, L"시스템 아이콘도 표시", tray.tray_system_icons);
+    bar_submenu_->Add(kTrayOverflowIconsCmd, L"숨긴 아이콘도 표시", tray.tray_overflow_icons);
+    bar_submenu_->AddSeparator();
+    bar_submenu_->Add(kTrayPeekCmd, L"알림 영역 잠시 표시");
   } else {
-    const size_t n = (std::min)(entries.size(), kTrayHiddenKeysMax);
-    tray_menu_keys_.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-      bar_submenu_->Add(kTrayItemCmdBase + static_cast<UINT>(i), entries[i].label, entries[i].shown);
-      tray_menu_keys_.push_back(entries[i].key);
-    }
-    if (entries.size() > kTrayHiddenKeysMax) {
-      bar_submenu_->Add(0, L"이하 생략", false, false);
-    }
+    return;
   }
   RECT row{};
-  if (!bar_menu_->RowScreenRect(bar_menu_->SubmenuIndex(), &row)) {
+  if (!bar_menu_->RowScreenRect(row_index, &row)) {
     return;
   }
   const POINT anchor{row.right, row.top};
@@ -1981,11 +2017,14 @@ void MenuBar::OpenTraySubmenu() {
   bar_submenu_popup_.SetDark(dark_);
   if (!bar_submenu_popup_.Open(bar_submenu_.get(), anchor, PopupSurface::Anchor::RightOf, false)) {
     status_popup_.SetAllied(nullptr);
-    Log(L"bar", L"tray submenu open failed err=%lu", GetLastError());
+    Log(L"bar", L"submenu open failed err=%lu cmd=%u", GetLastError(), cmd);
+    return;
   }
+  open_submenu_cmd_ = cmd;
 }
 
-void MenuBar::CloseTraySubmenu(const wchar_t* reason) {
+void MenuBar::CloseBarSubmenu(const wchar_t* reason) {
+  open_submenu_cmd_ = 0;
   if (!bar_submenu_popup_.IsOpen()) {
     status_popup_.SetAllied(nullptr);
     return;
@@ -2002,31 +2041,17 @@ void MenuBar::ShowContextMenu(POINT screen) {
   if (!bar_menu_) {
     bar_menu_ = std::make_unique<BarMenuContent>();
   }
-  CloseTraySubmenu(L"reopen");
+  CloseBarSubmenu(L"reopen");
   bar_menu_->Reset(hwnd_, dark_);
   bar_menu_->SetPopup(&status_popup_);
 
-  const WidgetSettings s = widgets_.settings();
-  bar_menu_->Add(kWidgetBatteryCmd, L"배터리", s.battery);
-  bar_menu_->Add(kWidgetCpuCmd, L"CPU", s.cpu);
-  bar_menu_->Add(kWidgetNetworkCmd, L"네트워크", s.network);
-  bar_menu_->Add(kWidgetBluetoothCmd, L"블루투스", s.bluetooth);
-  bar_menu_->Add(kWidgetVolumeCmd, L"볼륨", s.volume);
-  bar_menu_->Add(kWidgetControlCenterCmd, L"제어 센터", s.control_center);
-  const bool board_ok = IsWidgetBoardAvailable();
-  bar_menu_->Add(kWidgetBoardCmd,
-                 board_ok ? L"위젯 보드 단추" : L"위젯 보드 단추 (이 PC에서 사용할 수 없습니다)",
-                 s.widget_board, board_ok);
-  const WidgetSettings tray = tray_.settings();
-  bar_menu_->Add(kTrayMirrorToggleCmd, L"트레이 미러", tray.tray_mirror);
-  bar_menu_->Add(kTraySystemIconsCmd, L"시스템 아이콘도 표시", tray.tray_system_icons);
-  bar_menu_->Add(kTrayOverflowIconsCmd, L"숨긴 아이콘도 표시", tray.tray_overflow_icons);
-  bar_menu_->Add(kTrayInterceptCmd, L"트레이 아이콘 가로채기(실험)", tray.tray_backend == "intercept");
-  bar_menu_->Add(0, L"트레이 아이콘", false, true, true);
-  bar_menu_->Add(kTrayPeekCmd, L"알림 영역 잠시 표시");
+  bar_menu_->Add(kMenuWidgetsSubCmd, L"표시 항목", false, true, true);
+  bar_menu_->Add(kMenuTraySubCmd, L"트레이 아이콘", false, true, true);
+  bar_menu_->AddSeparator();
+  bar_menu_->Add(kSettingsCmd, L"bamti 설정");
   bar_menu_->Add(kAutostartCmd, L"로그인 시 bamti 시작", AutostartEnabled());
   bar_menu_->AddSeparator();
-  bar_menu_->Add(kExitCommand, L"종료");
+  bar_menu_->Add(kExitCommand, L"bamti 종료");
 
   cc_open_ = false;
   clock_open_ = false;
@@ -2045,17 +2070,13 @@ void MenuBar::ShowTrayIconMenu(POINT screen, const std::string& id) {
   if (!bar_menu_) {
     bar_menu_ = std::make_unique<BarMenuContent>();
   }
-  CloseTraySubmenu(L"reopen");
+  CloseBarSubmenu(L"reopen");
   tray_menu_id_ = id;
   bar_menu_->Reset(hwnd_, dark_);
   bar_menu_->SetPopup(&status_popup_);
   bar_menu_->Add(kTrayPeekCmd, L"알림 영역 잠시 표시");
   bar_menu_->Add(kTrayHideIconCmd, L"이 아이콘 숨기기");
   bar_menu_->Add(kTrayMirrorOffCmd, L"트레이 미러 끄기");
-  bar_menu_->AddSeparator();
-  bar_menu_->Add(0, L"앱 메뉴는 알림 영역 잠시 표시로 엽니다", false, false);
-  bar_menu_->Add(0, L"숨긴 아이콘도 미러합니다. 클릭 반응이 없으면 알림 영역 잠시 표시로 여세요", false, false);
-  bar_menu_->Add(0, L"지금은 글리프만 표시합니다", false, false);
 
   cc_open_ = false;
   clock_open_ = false;

@@ -55,9 +55,9 @@ class MenuBar {
                 double bpbegin_ms, double bpend_ms);
   void ShowContextMenu(POINT screen);
   void ShowTrayIconMenu(POINT screen, const std::string& id);
-  void SyncTraySubmenu();
-  void OpenTraySubmenu();
-  void CloseTraySubmenu(const wchar_t* reason);
+  void SyncBarSubmenu();
+  void OpenBarSubmenu(UINT cmd);
+  void CloseBarSubmenu(const wchar_t* reason);
   static void AfterBarPopupTick(void* ctx);
   void ApplySettings(const WidgetSettings& next);
   void StartTrayPeek();
@@ -199,6 +199,7 @@ class MenuBar {
   std::vector<std::string> reorder_order_;
   std::string tray_menu_id_;
   std::vector<uint64_t> tray_menu_keys_;
+  UINT open_submenu_cmd_ = 0;
   int wheel_accum_ = 0;
 };
 

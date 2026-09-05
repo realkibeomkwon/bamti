@@ -6,6 +6,7 @@ void BarMenuContent::Reset(HWND target, bool dark) {
   target_ = target;
   dark_ = dark;
   rows_.clear();
+  max_width_dip_ = kMenuMaxWidthDip;
 }
 
 void BarMenuContent::Add(UINT id, std::wstring text, bool checked, bool enabled, bool submenu) {
@@ -32,9 +33,17 @@ bool BarMenuContent::empty() const {
   return rows_.empty();
 }
 
-int BarMenuContent::SubmenuIndex() const {
+UINT BarMenuContent::SubmenuIdAt(int index) const {
+  if (index < 0 || index >= static_cast<int>(rows_.size())) {
+    return 0;
+  }
+  const MenuRow& row = rows_[static_cast<size_t>(index)];
+  return row.submenu ? row.id : 0;
+}
+
+int BarMenuContent::RowIndexOfCommand(UINT id) const {
   for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
-    if (rows_[static_cast<size_t>(i)].submenu) {
+    if (rows_[static_cast<size_t>(i)].id == id) {
       return i;
     }
   }
@@ -95,7 +104,7 @@ void BarMenuContent::Invoke(int index) {
     return;
   }
   const MenuRow& row = rows_[static_cast<size_t>(index)];
-  if (row.id == 0 || !row.enabled || row.separator) {
+  if (row.id == 0 || !row.enabled || row.separator || row.submenu) {
     return;
   }
   PostMessageW(target_, WM_COMMAND, MAKEWPARAM(row.id, 0), 0);
