@@ -101,4 +101,14 @@ std::wstring LogFilePath() {
   return JoinPath(dir, L"bamti.log");
 }
 
+std::wstring NightLightBackupPath() {
+  const std::wstring local = KnownFolder(FOLDERID_LocalAppData);
+  if (local.empty()) {
+    return {};
+  }
+  const std::wstring dir = JoinPath(local, L"bamti");
+  CreateDirectoryW(dir.c_str(), nullptr);
+  return JoinPath(dir, L"night_light_backup.bin");
+}
+
 }  // namespace bamti

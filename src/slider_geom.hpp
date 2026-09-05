@@ -33,9 +33,4 @@ inline SliderGeometry SliderGeom(float left, float right, UINT dpi) {
   return SliderGeometry{left + r, right - r, r};
 }
 
-inline SliderGeometry SliderGeomThick(float left, float right, float thickness_px) {
-  const float r = thickness_px * 0.5f;
-  return SliderGeometry{left + r, right - r, r};
-}
-
 }  // namespace bamti

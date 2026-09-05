@@ -16,6 +16,7 @@ add_executable(bamti WIN32
   src/audio_devices.cpp
   src/bt_devices.cpp
   src/power_saver.cpp
+  src/night_light.cpp
   src/log.cpp
   src/watchdog.cpp
   src/menu_bar.cpp

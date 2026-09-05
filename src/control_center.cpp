@@ -4,6 +4,7 @@
 #include "bt_devices.hpp"
 #include "corner.hpp"
 #include "log.hpp"
+#include "night_light.hpp"
 #include "panel_style.hpp"
 #include "slider_geom.hpp"
 #include "status_item.hpp"
@@ -28,18 +29,16 @@ namespace bamti {
 namespace {
 
 constexpr int kPanelPadDip = 14;
-constexpr int kCcWidthDip = 340;
-constexpr int kCardWDip = 312;
+constexpr int kCardWDip = 280;
 constexpr int kSectionGapDip = 10;
-constexpr int kConnectHDip = 104;
+constexpr int kConnectHDip = 114;
 constexpr int kConnectRowHDip = 52;
-constexpr int kQuickHDip = 114;
-constexpr int kQuickTileWDip = 151;
+constexpr int kQuickHDip = 52;
+constexpr int kQuickTileWDip = 135;
 constexpr int kQuickTileHDip = 52;
 constexpr int kQuickGapDip = 10;
-constexpr int kSliderCardHDip = 56;
+constexpr int kSliderCardHDip = 60;
 constexpr int kFooterHDip = 28;
-constexpr int kSliderTrackHDip = 24;
 constexpr ULONGLONG kSlowPeriodMs = 2000;
 constexpr ULONGLONG kWifiScanPeriodMs = 15000;
 constexpr ULONGLONG kWifiScanWaitMs = 4000;
@@ -52,11 +51,8 @@ constexpr wchar_t kFluentFont[] = L"Segoe Fluent Icons";
 constexpr wchar_t kUiFont[] = L"Segoe UI";
 constexpr wchar_t kWifiGlyph[] = L"\xE701";
 constexpr wchar_t kBtGlyph[] = L"\xE702";
-constexpr wchar_t kPlaneGlyph[] = L"\xE709";
 constexpr wchar_t kSaverGlyph[] = L"\xE8BE";
 constexpr wchar_t kNightGlyph[] = L"\xE708";
-constexpr wchar_t kAccessGlyph[] = L"\xE776";
-constexpr wchar_t kVolGlyph[] = L"\xE767";
 constexpr wchar_t kBrightGlyph[] = L"\xE706";
 constexpr wchar_t kGearGlyph[] = L"\xE713";
 constexpr wchar_t kChevronGlyph[] = L"\xE76C";
@@ -1334,6 +1330,9 @@ void ControlCenterContent::QuerySlowState(bool force) {
     return;
   }
   slow_due_ = now + kSlowPeriodMs;
+  const NightLightState night = QueryNightLight();
+  night_known_ = night.known;
+  night_on_ = night.on;
 }
 
 void ControlCenterContent::ApplyLive() {
@@ -1617,10 +1616,7 @@ void ControlCenterContent::RefreshPageLists(bool force) {
 }
 
 int ControlCenterContent::WidthDip() const {
-  return (page_ == Page::kWifi || page_ == Page::kVolume || page_ == Page::kBluetooth || page_ == Page::kBattery ||
-          page_ == Page::kCpu)
-             ? panel::kWidthDip
-             : kCcWidthDip;
+  return panel::kWidthDip;
 }
 
 int ControlCenterContent::HeightDip() const {
@@ -1655,12 +1651,11 @@ void ControlCenterContent::EnsureFormats(UINT dpi) {
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
                         reinterpret_cast<IUnknown**>(dwrite_.ReleaseAndGetAddressOf()));
   }
-  if (dwrite_ && format_dpi_ == dpi && fluent17_ && fluent15_ && fluent14_ && semibold14_ && semibold13_ &&
-      regular14_ && regular13_ && regular12_ && regular11_) {
+  if (dwrite_ && format_dpi_ == dpi && fluent17_ && fluent14_ && semibold14_ && semibold13_ && regular14_ &&
+      regular13_ && regular12_ && regular11_) {
     return;
   }
   fluent17_.Reset();
-  fluent15_.Reset();
   fluent14_.Reset();
   semibold14_.Reset();
   semibold13_.Reset();
@@ -1675,7 +1670,6 @@ void ControlCenterContent::EnsureFormats(UINT dpi) {
   }
   const float s = static_cast<float>(dpi) / 96.0f;
   MakeFormat(dwrite_.Get(), kFluentFont, DWRITE_FONT_WEIGHT_NORMAL, 17.0f * s, DWRITE_TEXT_ALIGNMENT_CENTER, fluent17_);
-  MakeFormat(dwrite_.Get(), kFluentFont, DWRITE_FONT_WEIGHT_NORMAL, 15.0f * s, DWRITE_TEXT_ALIGNMENT_CENTER, fluent15_);
   MakeFormat(dwrite_.Get(), kFluentFont, DWRITE_FONT_WEIGHT_NORMAL, 14.0f * s, DWRITE_TEXT_ALIGNMENT_CENTER, fluent14_);
   MakeFormat(dwrite_.Get(), kUiFont, DWRITE_FONT_WEIGHT_SEMI_BOLD, 14.0f * s, DWRITE_TEXT_ALIGNMENT_LEADING, semibold14_);
   MakeFormat(dwrite_.Get(), kUiFont, DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.0f * s, DWRITE_TEXT_ALIGNMENT_LEADING, semibold13_);
@@ -1688,7 +1682,7 @@ void ControlCenterContent::EnsureFormats(UINT dpi) {
 
 RECT ControlCenterContent::ConnectRowRect(UINT dpi, int row) const {
   const int pad = DipToPx(kPanelPadDip, dpi);
-  const int y = pad + DipToPx(kConnectRowHDip, dpi) * row;
+  const int y = pad + row * DipToPx(kConnectRowHDip + kQuickGapDip, dpi);
   return RECT{pad, y, pad + DipToPx(kCardWDip, dpi), y + DipToPx(kConnectRowHDip, dpi)};
 }
 
@@ -1703,22 +1697,26 @@ RECT ControlCenterContent::QuickTileRect(UINT dpi, int col, int row) const {
   return RECT{x, y, x + w, y + h};
 }
 
-RECT ControlCenterContent::SliderTrackRect(UINT dpi, bool brightness) const {
+RECT ControlCenterContent::SliderCardRect(UINT dpi, bool brightness) const {
   const int pad = DipToPx(kPanelPadDip, dpi);
-  const int inset = DipToPx(12, dpi);
   int y = pad + DipToPx(kConnectHDip + kSectionGapDip + kQuickHDip + kSectionGapDip, dpi);
   if (!brightness && brightness_ok_) {
     y += DipToPx(kSliderCardHDip + kSectionGapDip, dpi);
   }
-  y += DipToPx(26, dpi);
-  const int left = pad + inset;
-  const int right = pad + DipToPx(kCardWDip, dpi) - inset;
-  return RECT{left, y, right, y + DipToPx(kSliderTrackHDip, dpi)};
+  return RECT{pad, y, pad + DipToPx(kCardWDip, dpi), y + DipToPx(kSliderCardHDip, dpi)};
+}
+
+RECT ControlCenterContent::SliderTrackRect(UINT dpi, bool brightness) const {
+  const RECT card = SliderCardRect(dpi, brightness);
+  const int side = DipToPx(12 + kVolumeSliderIconDip + kVolumeSliderGapDip, dpi);
+  const int row_top = card.top + DipToPx(28, dpi);
+  const int y = row_top + (DipToPx(kVolumeSliderRowHDip, dpi) - DipToPx(kVolumeTrackHDip, dpi)) / 2;
+  return RECT{card.left + side, y, card.right - side, y + DipToPx(kVolumeTrackHDip, dpi)};
 }
 
 RECT ControlCenterContent::FooterRect(UINT dpi) const {
   const int pad = DipToPx(kPanelPadDip, dpi);
-  const int width = DipToPx(kCcWidthDip, dpi);
+  const int width = DipToPx(panel::kWidthDip, dpi);
   const int h = DipToPx(kFooterHDip, dpi);
   const int y = DipToPx(HeightDip() - kPanelPadDip - kFooterHDip, dpi);
   return RECT{pad, y, width - pad, y + h};
@@ -1854,20 +1852,12 @@ void ControlCenterContent::BuildHits(UINT dpi) {
   }
   add(kWifi, ConnectRowRect(dpi, 0));
   add(kBluetooth, ConnectRowRect(dpi, 1));
-  add(kAirplane, QuickTileRect(dpi, 0, 0));
-  add(kSaver, QuickTileRect(dpi, 1, 0));
-  add(kNight, QuickTileRect(dpi, 0, 1));
-  add(kAccess, QuickTileRect(dpi, 1, 1));
+  add(kSaver, QuickTileRect(dpi, 0, 0));
+  add(kNight, QuickTileRect(dpi, 1, 0));
   if (brightness_ok_) {
-    const RECT track = SliderTrackRect(dpi, true);
-    add(kBrightness, RECT{track.left - DipToPx(12, dpi), track.top - DipToPx(26, dpi), track.right + DipToPx(12, dpi),
-                          track.top - DipToPx(26, dpi) + DipToPx(kSliderCardHDip, dpi)});
+    add(kBrightness, SliderCardRect(dpi, true));
   }
-  {
-    const RECT track = SliderTrackRect(dpi, false);
-    add(kVolume, RECT{track.left - DipToPx(12, dpi), track.top - DipToPx(26, dpi), track.right + DipToPx(12, dpi),
-                      track.top - DipToPx(26, dpi) + DipToPx(kSliderCardHDip, dpi)});
-  }
+  add(kVolume, SliderCardRect(dpi, false));
   add(kSettings, SettingsRect(dpi));
 }
 
@@ -1945,11 +1935,12 @@ void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_i
                                radius, radius};
     target->FillRoundedRectangle(rr, brush.Get());
   };
-  auto draw_badge = [&](float cx, float cy, float diameter, bool on, IDWriteTextFormat* format, const wchar_t* glyph) {
+  auto draw_badge = [&](float cx, float cy, float diameter, bool on, IDWriteTextFormat* format, const wchar_t* glyph,
+                        float alpha = 1.0f) {
     const float r = diameter * 0.5f;
-    brush->SetColor(on ? AccentFillColor(dark) : BadgeOffFill(dark));
+    brush->SetColor(ScaleAlpha(on ? AccentFillColor(dark) : BadgeOffFill(dark), alpha));
     target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), r, r), brush.Get());
-    brush->SetColor(on ? AccentOnColor(dark) : fg);
+    brush->SetColor(ScaleAlpha(on ? AccentOnColor(dark) : fg, alpha));
     if (dwrite_ && format) {
       DrawGlyph(target, dwrite_.Get(), format, brush.Get(), D2D1::RectF(cx - r, cy - r, cx + r, cy + r), glyph);
     }
@@ -1957,7 +1948,6 @@ void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_i
 
   const RECT connect0 = ConnectRowRect(dpi, 0);
   const RECT connect1 = ConnectRowRect(dpi, 1);
-  fill_round(RECT{connect0.left, connect0.top, connect1.right, connect1.bottom}, CardFillColor(dark));
   struct ConnectRow {
     int id;
     RECT rc;
@@ -1972,20 +1962,21 @@ void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_i
       {kBluetooth, connect1, kBtGlyph, L"Bluetooth", std::wstring(bt_sub), bt_on_},
   };
   for (const ConnectRow& row : connects) {
+    fill_round(row.rc, CardFillColor(dark));
     if (hot_id == row.id) {
       fill_round(row.rc, MenuItemHoverFill(dark, false));
     }
     const float cy = static_cast<float>(row.rc.top + row.rc.bottom) * 0.5f;
     const float cx = static_cast<float>(row.rc.left) + static_cast<float>(DipToPx(12 + 17, dpi));
     draw_badge(cx, cy, static_cast<float>(DipToPx(34, dpi)), row.on, fluent17_.Get(), row.glyph);
-    const float text_x = static_cast<float>(row.rc.left + DipToPx(58, dpi));
+    const float text_x = static_cast<float>(row.rc.left + DipToPx(55, dpi));
     const float chevron_l = static_cast<float>(row.rc.right - DipToPx(24, dpi));
     const float text_r = chevron_l - static_cast<float>(DipToPx(8, dpi));
     brush->SetColor(fg);
-    DrawTrimmed(target, dwrite_.Get(), semibold13_.Get(), brush.Get(),
+    DrawTrimmed(target, dwrite_.Get(), semibold14_.Get(), brush.Get(),
                 D2D1::RectF(text_x, static_cast<float>(row.rc.top + DipToPx(6, dpi)), text_r, cy), row.title);
     brush->SetColor(muted);
-    DrawTrimmed(target, dwrite_.Get(), regular11_.Get(), brush.Get(),
+    DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush.Get(),
                 D2D1::RectF(text_x, cy, text_r, static_cast<float>(row.rc.bottom - DipToPx(6, dpi))), row.sub);
     brush->SetColor(ScaleAlpha(fg, 0.45f));
     if (dwrite_ && fluent14_) {
@@ -2003,69 +1994,90 @@ void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_i
     const wchar_t* glyph;
     const wchar_t* name;
     bool on;
+    bool enabled;
   };
   const Quick quick[] = {
-      {kAirplane, 0, 0, kPlaneGlyph, L"비행기 모드", false},
-      {kSaver, 1, 0, kSaverGlyph, L"절전 모드", saver_on_},
-      {kNight, 0, 1, kNightGlyph, L"야간 모드", false},
-      {kAccess, 1, 1, kAccessGlyph, L"접근성", false},
+      {kSaver, 0, 0, kSaverGlyph, L"절전 모드", saver_on_, !battery_ac_},
+      {kNight, 1, 0, kNightGlyph, L"야간 모드", night_on_, true},
   };
   for (const Quick& tile : quick) {
     const RECT rc = QuickTileRect(dpi, tile.col, tile.row);
     fill_round(rc, CardFillColor(dark));
-    if (hot_id == tile.id) {
+    if (tile.enabled && hot_id == tile.id) {
       fill_round(rc, MenuItemHoverFill(dark, false));
     }
+    const float alpha = tile.enabled ? 1.0f : 0.40f;
     const float cy = static_cast<float>(rc.top + rc.bottom) * 0.5f;
-    const float cx = static_cast<float>(rc.left) + static_cast<float>(DipToPx(10 + 15, dpi));
-    draw_badge(cx, cy, static_cast<float>(DipToPx(30, dpi)), tile.on, fluent15_.Get(), tile.glyph);
-    brush->SetColor(fg);
-    DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush.Get(),
-                D2D1::RectF(static_cast<float>(rc.left + DipToPx(50, dpi)), static_cast<float>(rc.top),
+    const float cx = static_cast<float>(rc.left) + static_cast<float>(DipToPx(10 + panel::kCircleDip / 2, dpi));
+    draw_badge(cx, cy, static_cast<float>(DipToPx(panel::kCircleDip, dpi)), tile.on, fluent14_.Get(), tile.glyph, alpha);
+    brush->SetColor(ScaleAlpha(fg, alpha));
+    DrawTrimmed(target, dwrite_.Get(), regular14_.Get(), brush.Get(),
+                D2D1::RectF(static_cast<float>(rc.left + DipToPx(45, dpi)), static_cast<float>(rc.top),
                             static_cast<float>(rc.right - DipToPx(10, dpi)), static_cast<float>(rc.bottom)),
                 tile.name);
   }
 
-  auto draw_slider_card = [&](bool brightness, const wchar_t* title, float value, const wchar_t* glyph, int id) {
-    const RECT track = SliderTrackRect(dpi, brightness);
-    const RECT card{track.left - DipToPx(12, dpi), track.top - DipToPx(26, dpi), track.right + DipToPx(12, dpi),
-                    track.top - DipToPx(26, dpi) + DipToPx(kSliderCardHDip, dpi)};
+  auto draw_slider_card = [&](bool brightness, const wchar_t* title, float value, int id) {
+    const RECT card = SliderCardRect(dpi, brightness);
     fill_round(card, CardFillColor(dark));
     if (hot_id == id) {
       fill_round(card, MenuItemHoverFill(dark, false));
     }
     brush->SetColor(muted);
-    DrawTrimmed(target, dwrite_.Get(), regular11_.Get(), brush.Get(),
-                D2D1::RectF(static_cast<float>(card.left + DipToPx(12, dpi)), static_cast<float>(card.top + DipToPx(8, dpi)),
+    DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush.Get(),
+                D2D1::RectF(static_cast<float>(card.left + DipToPx(12, dpi)),
+                            static_cast<float>(card.top + DipToPx(8, dpi)),
                             static_cast<float>(card.right - DipToPx(12, dpi)),
-                            static_cast<float>(card.top + DipToPx(22, dpi))),
+                            static_cast<float>(card.top + DipToPx(8 + panel::kSectionHDip, dpi))),
                 title);
-    const float left = static_cast<float>(track.left);
-    const float right = static_cast<float>(track.right);
-    const float top = static_cast<float>(track.top);
-    const float bottom = static_cast<float>(track.bottom);
-    const float h = bottom - top;
-    const float pill = corner::PillPx(h);
-    const SliderGeometry geom = SliderGeomThick(left, right, h);
-    const float v = ClampUnit(value);
-    const float x = geom.lo + (geom.hi - geom.lo) * v;
-    brush->SetColor(ScaleAlpha(fg, 0.12f));
-    target->FillRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(left, top, right, bottom), pill, pill},
-                                 brush.Get());
-    brush->SetColor(AccentFillColor(dark));
-    target->FillRoundedRectangle(
-        D2D1_ROUNDED_RECT{D2D1::RectF(left, top, x + h * 0.5f, bottom), pill, pill}, brush.Get());
-    const D2D1_RECT_F cap = D2D1::RectF(left, top, left + h, top + h);
-    const bool covered = x + h * 0.5f >= left + h - 2.0f;
-    brush->SetColor(covered ? AccentOnColor(dark) : ScaleAlpha(fg, 0.7f));
+    const int row_top = card.top + DipToPx(28, dpi);
+    const float row_cy = static_cast<float>(row_top) + DipToPxF(static_cast<float>(kVolumeSliderRowHDip), dpi) * 0.5f;
+    const float icon = DipToPxF(static_cast<float>(kVolumeSliderIconDip), dpi);
+    const float left_icon_d = brightness ? DipToPxF(11.0f, dpi) : icon;
+    const float inset = DipToPxF(12.0f, dpi);
+    const D2D1_RECT_F left_icon{static_cast<float>(card.left) + inset, row_cy - left_icon_d * 0.5f,
+                                static_cast<float>(card.left) + inset + left_icon_d, row_cy + left_icon_d * 0.5f};
+    const D2D1_RECT_F right_icon{static_cast<float>(card.right) - inset - icon, row_cy - icon * 0.5f,
+                                 static_cast<float>(card.right) - inset, row_cy + icon * 0.5f};
+    brush->SetColor(fg);
     if (dwrite_ && fluent14_) {
-      DrawGlyphInked(target, dwrite_.Get(), fluent14_.Get(), brush.Get(), cap, glyph);
+      DrawGlyphInked(target, dwrite_.Get(), fluent14_.Get(), brush.Get(), left_icon,
+                     brightness ? kBrightGlyph : kVolSmallGlyph);
+      DrawGlyphInked(target, dwrite_.Get(), fluent14_.Get(), brush.Get(), right_icon,
+                     brightness ? kBrightGlyph : kVolLoudGlyph);
     }
+    const RECT track = SliderTrackRect(dpi, brightness);
+    const float track_l = static_cast<float>(track.left);
+    const float track_r = static_cast<float>(track.right);
+    const float track_t = static_cast<float>(track.top);
+    const float track_b = static_cast<float>(track.bottom);
+    const float track_h = track_b - track_t;
+    const float pill = corner::PillPx(track_h);
+    const float knob = DipToPxF(kVolumeKnobDip, dpi);
+    const float knob_r = knob * 0.5f;
+    const float lo = track_l + knob_r;
+    const float hi = track_r - knob_r;
+    const float v = ClampUnit(value);
+    const float knob_x = lo + (hi - lo) * v;
+    D2D1_COLOR_F fill = AccentFillColor(dark);
+    D2D1_COLOR_F knob_color = AccentOnColor(dark);
+    if (!brightness && muted_) {
+      fill = ScaleAlpha(fill, 0.40f);
+      knob_color = ScaleAlpha(knob_color, 0.40f);
+    }
+    brush->SetColor(BadgeOffFill(dark));
+    target->FillRoundedRectangle(
+        D2D1_ROUNDED_RECT{D2D1::RectF(track_l, track_t, track_r, track_b), pill, pill}, brush.Get());
+    brush->SetColor(fill);
+    target->FillRoundedRectangle(
+        D2D1_ROUNDED_RECT{D2D1::RectF(track_l, track_t, knob_x, track_b), pill, pill}, brush.Get());
+    brush->SetColor(knob_color);
+    target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knob_x, row_cy), knob_r, knob_r), brush.Get());
   };
   if (brightness_ok_) {
-    draw_slider_card(true, L"디스플레이", brightness_, kBrightGlyph, kBrightness);
+    draw_slider_card(true, L"디스플레이", brightness_, kBrightness);
   }
-  draw_slider_card(false, L"사운드", muted_ ? 0.0f : volume_, kVolGlyph, kVolume);
+  draw_slider_card(false, L"사운드", volume_, kVolume);
 
   const RECT gear = SettingsRect(dpi);
   brush->SetColor(hot_id == kSettings ? fg : ScaleAlpha(fg, 0.8f));
@@ -2638,7 +2650,7 @@ void ControlCenterContent::RenderListPage(ID2D1RenderTarget* target, UINT dpi, i
   const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
   const float radius = corner::ToPx(corner::kOverlayDip, dpi);
   const int pad = DipToPx(kPanelPadDip, dpi);
-  const int width = DipToPx(kCcWidthDip, dpi);
+  const int width = DipToPx(panel::kWidthDip, dpi);
   auto fill_round = [&](const RECT& rc, D2D1_COLOR_F color) {
     brush->SetColor(color);
     const D2D1_ROUNDED_RECT rr{D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
@@ -2891,17 +2903,32 @@ void ControlCenterContent::Invoke(int index) {
     case kPageSaverSettings:
       OpenSettingsPage(L"ms-settings:batterysaver");
       break;
-    case kAirplane:
-      OpenSettingsPage(L"ms-settings:network-airplanemode");
-      break;
     case kSaver:
-      OpenSettingsPage(L"ms-settings:batterysaver");
+      if (battery_ac_) {
+        break;
+      }
+      if (!battery_saver_toggle_ok_) {
+        OpenSettingsPage(L"ms-settings:batterysaver");
+        break;
+      }
+      if (host_.dispatch) {
+        StatusEvent ev;
+        ev.id = "bamti.widget/battery";
+        ev.event = "toggle";
+        ev.row_id = "saver";
+        ev.on = !saver_on_;
+        host_.dispatch(ev);
+      }
+      saver_on_ = !saver_on_;
+      PresentHost();
       break;
     case kNight:
-      OpenSettingsPage(L"ms-settings:night-light");
-      break;
-    case kAccess:
-      OpenSettingsPage(L"ms-settings:easeofaccess");
+      if (!night_known_ || !SetNightLight(!night_on_)) {
+        OpenSettingsPage(L"ms-settings:night-light");
+        break;
+      }
+      night_on_ = !night_on_;
+      PresentHost();
       break;
     case kSettings:
       OpenSettingsPage(L"ms-settings:");
@@ -3013,7 +3040,8 @@ bool ControlCenterContent::StickyRow(int index) const {
     return false;
   }
   const int id = hits_[static_cast<size_t>(index)].id;
-  if (id == kWifi || id == kBluetooth || id == kPageBack || id == kPageToggle || id == kPageScan) {
+  if (id == kWifi || id == kBluetooth || id == kPageBack || id == kPageToggle || id == kPageScan ||
+      (id == kSaver && battery_ac_)) {
     return true;
   }
   return id >= kPageList && id < kPageList + kBtListMax + kBtScanMax;
@@ -3039,20 +3067,10 @@ void ControlCenterContent::DragTo(int index, POINT client, UINT dpi) {
   if (hit.id != kVolume && hit.id != kBrightness) {
     return;
   }
-  RECT track = SliderTrackRect(dpi, hit.id == kBrightness);
-  SliderGeometry geom{};
-  if (page_ == Page::kVolume && hit.id == kVolume) {
-    track = VolumeSliderTrackRect(dpi);
-    const float left = static_cast<float>(track.left);
-    const float right = static_cast<float>(track.right);
-    const float knob_r = DipToPxF(kVolumeKnobDip, dpi) * 0.5f;
-    geom = SliderGeometry{left + knob_r, right - knob_r, knob_r};
-  } else {
-    const float left = static_cast<float>(track.left);
-    const float right = static_cast<float>(track.right);
-    const float thickness = static_cast<float>(track.bottom - track.top);
-    geom = SliderGeomThick(left, right, thickness);
-  }
+  const RECT track = (page_ == Page::kVolume && hit.id == kVolume) ? VolumeSliderTrackRect(dpi)
+                                                                 : SliderTrackRect(dpi, hit.id == kBrightness);
+  const float knob_r = DipToPxF(kVolumeKnobDip, dpi) * 0.5f;
+  const SliderGeometry geom{static_cast<float>(track.left) + knob_r, static_cast<float>(track.right) - knob_r, knob_r};
   float v = geom.hi > geom.lo ? (static_cast<float>(client.x) - geom.lo) / (geom.hi - geom.lo) : 0.0f;
   v = ClampUnit(v);
   v = std::round(v / 0.02f) * 0.02f;

@@ -9,5 +9,6 @@ std::wstring DataDir();
 std::wstring DockPinsPath();
 std::wstring TaskbarGuardPath();
 std::wstring LogFilePath();
+std::wstring NightLightBackupPath();
 
 }  // namespace bamti

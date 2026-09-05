@@ -104,10 +104,8 @@ class ControlCenterContent : public PopupContent {
   enum HitId {
     kWifi = 0,
     kBluetooth,
-    kAirplane,
     kSaver,
     kNight,
-    kAccess,
     kVolume,
     kBrightness,
     kSettings,
@@ -167,6 +165,7 @@ class ControlCenterContent : public PopupContent {
   RECT VolumeSliderTrackRect(UINT dpi) const;
   RECT ConnectRowRect(UINT dpi, int row) const;
   RECT QuickTileRect(UINT dpi, int col, int row) const;
+  RECT SliderCardRect(UINT dpi, bool brightness) const;
   RECT SliderTrackRect(UINT dpi, bool brightness) const;
   RECT FooterRect(UINT dpi) const;
   RECT SettingsRect(UINT dpi) const;
@@ -200,6 +199,8 @@ class ControlCenterContent : public PopupContent {
   bool brightness_ok_ = false;
   bool muted_ = false;
   bool saver_on_ = false;
+  bool night_known_ = false;
+  bool night_on_ = false;
   bool wifi_on_ = false;
   std::wstring wifi_name_ = L"연결 안 됨";
   bool wifi_radio_on_ = false;
@@ -249,7 +250,6 @@ class ControlCenterContent : public PopupContent {
   UINT format_dpi_ = 0;
   Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
   Microsoft::WRL::ComPtr<IDWriteTextFormat> fluent17_;
-  Microsoft::WRL::ComPtr<IDWriteTextFormat> fluent15_;
   Microsoft::WRL::ComPtr<IDWriteTextFormat> fluent14_;
   Microsoft::WRL::ComPtr<IDWriteTextFormat> semibold14_;
   Microsoft::WRL::ComPtr<IDWriteTextFormat> semibold13_;
