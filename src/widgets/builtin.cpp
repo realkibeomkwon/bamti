@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstring>
 #include <optional>
+#include <utility>
 
 namespace bamti {
 namespace {
@@ -1513,13 +1514,30 @@ void BuiltinWidgets::WorkerLoop() {
         }
       }
       bool ok = false;
+      std::vector<GUID> services;
       if (found != nullptr) {
-        ok = SetBtDeviceConnected(found->raw, req.connect);
+        {
+          std::lock_guard lock(mu_);
+          if (req.connect) {
+            const auto it = bt_disabled_services_.find(req.address);
+            if (it != bt_disabled_services_.end()) {
+              services = it->second;
+            }
+          }
+        }
+        ok = SetBtDeviceConnected(found->raw, req.connect, &services);
       } else {
         Log(L"bt", L"set service state missing connect=%d", req.connect ? 1 : 0);
       }
       {
         std::lock_guard lock(mu_);
+        if (ok) {
+          if (req.connect) {
+            bt_disabled_services_.erase(req.address);
+          } else {
+            bt_disabled_services_[req.address] = std::move(services);
+          }
+        }
         ++bt_list_rev_;
         if (!ok) {
           ++bt_connect_fail_rev_;

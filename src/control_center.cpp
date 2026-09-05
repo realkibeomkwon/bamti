@@ -1358,7 +1358,10 @@ void ControlCenterContent::ApplyLive() {
   bt_on_ = live.bt_on;
   bt_can_toggle_ = live.bt_can_toggle;
   bt_scanning_ = live.bt_scanning;
-  bt_connecting_addr_ = live.bt_connecting;
+  if (live.bt_connecting != bt_connecting_addr_) {
+    bt_connecting_addr_ = live.bt_connecting;
+    bt_connecting_since_ = GetTickCount64();
+  }
   if (live.bt_list_rev != bt_list_rev_) {
     const bool refresh = bt_list_rev_ != 0;
     bt_list_rev_ = live.bt_list_rev;
@@ -2401,7 +2404,8 @@ void ControlCenterContent::RenderBluetoothPage(ID2D1RenderTarget* target, UINT d
       panel::DrawRowCircle(target, dwrite_.Get(), fluent14_.Get(), brush, cx, cy, dpi, dark, dev.connected,
                            BtClassGlyph(dev.info.ulClassofDevice));
       float text_r = static_cast<float>(row.right);
-      const bool busy = !bt_connecting_addr_.empty() && bt_connecting_addr_ == dev.address;
+      const bool busy = !bt_connecting_addr_.empty() && bt_connecting_addr_ == dev.address &&
+                        (GetTickCount64() - bt_connecting_since_ < 60000);
       if (busy) {
         const float status_w = DipToPxF(92.0f, dpi);
         brush->SetColor(muted);
@@ -2951,6 +2955,7 @@ void ControlCenterContent::Invoke(int index) {
             }
             if (host_.bt_connect) {
               bt_connecting_addr_ = dev.address;
+              bt_connecting_since_ = GetTickCount64();
               host_.bt_connect(dev.address, !dev.connected);
             } else {
               OpenSettingsPage(L"ms-settings:bluetooth");

@@ -6,6 +6,7 @@
 #include "widgets/brightness.hpp"
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -102,6 +103,7 @@ class BuiltinWidgets : public StatusSource {
   std::wstring bt_connecting_addr_;
   uint64_t bt_list_rev_ = 0;
   uint64_t bt_connect_fail_rev_ = 0;
+  std::map<std::wstring, std::vector<GUID>> bt_disabled_services_;
   std::unique_ptr<VolumeControl> volume_;
   bool logged_notify_latency_ = false;
   ULONGLONG battery_due_ = 0;

@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cwchar>
+#include <utility>
 #include <vector>
 
 namespace bamti {
@@ -219,6 +220,42 @@ void FillBatteries(std::vector<BtDeviceInfo>* devices) {
       Log(L"cc", L"bt battery key produced no values; hiding percents");
     }
   }
+}
+
+const GUID kBtSvcAudioSink{0x0000110B, 0x0000, 0x1000, {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}};
+const GUID kBtSvcHandsfree{0x0000111E, 0x0000, 0x1000, {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}};
+const GUID kBtSvcHeadset{0x00001108, 0x0000, 0x1000, {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}};
+const GUID kBtSvcAvrcp{0x0000110E, 0x0000, 0x1000, {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}};
+const GUID kBtSvcHid{0x00001124, 0x0000, 0x1000, {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}};
+
+bool IsPreferredBtService(ULONG major, const GUID& guid) {
+  if (major == 0x04) {
+    return InlineIsEqualGUID(guid, kBtSvcAudioSink) || InlineIsEqualGUID(guid, kBtSvcHandsfree) ||
+           InlineIsEqualGUID(guid, kBtSvcHeadset) || InlineIsEqualGUID(guid, kBtSvcAvrcp);
+  }
+  if (major == 0x05) {
+    return InlineIsEqualGUID(guid, kBtSvcHid);
+  }
+  return true;
+}
+
+void FilterPreferredBtServices(ULONG major, std::vector<GUID>* guids) {
+  if (guids == nullptr || (major != 0x04 && major != 0x05)) {
+    return;
+  }
+  auto it = std::remove_if(guids->begin(), guids->end(),
+                           [major](const GUID& g) { return !IsPreferredBtService(major, g); });
+  guids->erase(it, guids->end());
+}
+
+std::vector<GUID> FallbackBtServices(ULONG major) {
+  if (major == 0x04) {
+    return {kBtSvcAudioSink, kBtSvcHandsfree, kBtSvcHeadset, kBtSvcAvrcp};
+  }
+  if (major == 0x05) {
+    return {kBtSvcHid};
+  }
+  return {};
 }
 
 }  // namespace
@@ -491,7 +528,7 @@ std::vector<BtDeviceInfo> ScanBtDevices() {
   return out;
 }
 
-bool SetBtDeviceConnected(const BLUETOOTH_DEVICE_INFO& info, bool connect) {
+bool SetBtDeviceConnected(const BLUETOOTH_DEVICE_INFO& info, bool connect, std::vector<GUID>* services) {
   LARGE_INTEGER t0{};
   LARGE_INTEGER t1{};
   QueryPerformanceCounter(&t0);
@@ -517,9 +554,46 @@ bool SetBtDeviceConnected(const BLUETOOTH_DEVICE_INFO& info, bool connect) {
     di.dwSize = sizeof(di);
   }
 
-  DWORD n = 0;
-  DWORD err = BluetoothEnumerateInstalledServices(radio, &di, &n, nullptr);
-  if ((err != ERROR_SUCCESS && err != ERROR_MORE_DATA) || n == 0) {
+  const ULONG major = (di.ulClassofDevice >> 8) & 0x1F;
+  std::vector<GUID> guids;
+  const wchar_t* source = L"enumerated";
+  int listed_n = 0;
+
+  if (connect && services != nullptr && !services->empty()) {
+    guids = *services;
+    source = L"remembered";
+  } else {
+    DWORD n = 0;
+    DWORD err = BluetoothEnumerateInstalledServices(radio, &di, &n, nullptr);
+    if ((err == ERROR_SUCCESS || err == ERROR_MORE_DATA) && n > 0) {
+      constexpr DWORD kBtServiceMax = 32;
+      if (n > kBtServiceMax) {
+        n = kBtServiceMax;
+      }
+      guids.resize(n);
+      DWORD inout = n;
+      err = BluetoothEnumerateInstalledServices(radio, &di, &inout, guids.data());
+      if (err == ERROR_SUCCESS || err == ERROR_MORE_DATA) {
+        if (inout < n) {
+          guids.resize(inout);
+        }
+      } else {
+        guids.clear();
+      }
+    }
+    listed_n = static_cast<int>(guids.size());
+    FilterPreferredBtServices(major, &guids);
+  }
+
+  if (guids.empty() && connect) {
+    guids = FallbackBtServices(major);
+    source = L"fallback";
+  }
+
+  Log(L"bt", L"set service source=%s class=0x%02lX listed=%d keep=%d", source, static_cast<unsigned long>(major),
+      listed_n, static_cast<int>(guids.size()));
+
+  if (guids.empty()) {
     if (radio != nullptr) {
       CloseHandle(radio);
     }
@@ -527,28 +601,20 @@ bool SetBtDeviceConnected(const BLUETOOTH_DEVICE_INFO& info, bool connect) {
     return finish(0, 0, false);
   }
 
-  constexpr DWORD kBtServiceMax = 32;
-  if (n > kBtServiceMax) {
-    n = kBtServiceMax;
-  }
-  std::vector<GUID> guids(n);
-  DWORD inout = n;
-  err = BluetoothEnumerateInstalledServices(radio, &di, &inout, guids.data());
-  if (err != ERROR_SUCCESS && err != ERROR_MORE_DATA) {
-    if (radio != nullptr) {
-      CloseHandle(radio);
-    }
-    BluetoothFindRadioClose(radio_find);
-    return finish(0, static_cast<int>(n), false);
-  }
-  if (inout < n) {
-    n = inout;
-  }
-
   const DWORD flag = connect ? BLUETOOTH_SERVICE_ENABLE : BLUETOOTH_SERVICE_DISABLE;
   int ok_n = 0;
-  for (DWORD i = 0; i < n; ++i) {
-    if (BluetoothSetServiceState(radio, &di, &guids[i], flag) == ERROR_SUCCESS) {
+  const int total_n = static_cast<int>(guids.size());
+  for (int i = 0; i < total_n; ++i) {
+    LARGE_INTEGER s0{};
+    LARGE_INTEGER s1{};
+    QueryPerformanceCounter(&s0);
+    const DWORD serr = BluetoothSetServiceState(radio, &di, &guids[static_cast<size_t>(i)], flag);
+    QueryPerformanceCounter(&s1);
+    const GUID& g = guids[static_cast<size_t>(i)];
+    Log(L"bt", L"service %d/%d {%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X} state=%lu took %.0f ms", i + 1,
+        total_n, static_cast<unsigned long>(g.Data1), g.Data2, g.Data3, g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3],
+        g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7], static_cast<unsigned long>(serr), QpcMs(s0, s1));
+    if (serr == ERROR_SUCCESS) {
       ++ok_n;
     }
   }
@@ -557,7 +623,12 @@ bool SetBtDeviceConnected(const BLUETOOTH_DEVICE_INFO& info, bool connect) {
     CloseHandle(radio);
   }
   BluetoothFindRadioClose(radio_find);
-  return finish(ok_n, static_cast<int>(n), ok_n > 0);
+
+  const bool ok = ok_n > 0;
+  if (!connect && ok && services != nullptr) {
+    *services = std::move(guids);
+  }
+  return finish(ok_n, total_n, ok);
 }
 
 }  // namespace bamti

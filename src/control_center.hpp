@@ -219,6 +219,7 @@ class ControlCenterContent : public PopupContent {
   bool bt_scanning_ = false;
   uint64_t bt_scan_rev_ = 0;
   std::wstring bt_connecting_addr_;
+  ULONGLONG bt_connecting_since_ = 0;
   uint64_t bt_list_rev_ = 0;
   uint64_t bt_connect_fail_rev_ = 0;
   bool bt_fail_armed_ = false;
