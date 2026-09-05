@@ -479,3 +479,186 @@ cmake --build out/cmake-debug --config Debug
 ## 작업 순서
 
 1단계를 끝내고 네트워크 패널이 그대로인지 확인한 다음 2단계로 넘어가라. 2단계와 3단계는 서로 기대지 않으므로 순서를 바꾸어도 된다. 각 단계를 마칠 때마다 빌드하고, 무엇을 확인했는지 보고하라.
+
+---
+
+# 덧붙임 — 배터리와 CPU 패널도 같은 디자인 언어로 옮긴다
+
+2026-09-05에 사용자가 더한 요구다. 앞의 1단계부터 4단계까지를 그대로 두고, 아래 5단계와 6단계를 이어서 진행한다.
+
+## 5단계 — 배터리 패널과 CPU 패널
+
+### 지금 상태
+
+배터리와 CPU는 `BuiltinWidgets::SampleBattery`와 `SampleCpu`가 `StatusPanel`을 만들어 붙이고, `StatusPanelContent`(`src/status_panel.cpp`)가 그린다. 이쪽 치수는 네트워크 패널과 전혀 다르다.
+
+| 항목 | `StatusPanelContent` | `panel::` 토큰 |
+| --- | --- | --- |
+| 패널 여백 | 12 | 14 |
+| 폭 | 280~360 가변 | 308 고정 |
+| 행 높이 | 항목마다 18~28 | 32 |
+| 블록 간격 | 18 | 8 |
+| 창 곡률 | `corner::kOverlayDip` (8) | `corner::kHeroDip` (16) |
+
+여백과 곡률과 행 높이가 모두 어긋나므로, 네트워크 패널 옆에 나란히 놓으면 다른 프로그램의 창처럼 보인다.
+
+### 방침
+
+**배터리와 CPU도 `ControlCenterContent`의 전용 페이지로 옮긴다.** `Page`에 `kBattery`와 `kCpu`를 더하고, `ControlCenterPage`에도 같은 값을 더한다. 볼륨이 2단계에서 옮겨 가고 나면 내장 위젯 가운데 `StatusPanelContent`에 남는 것이 없어야 한다.
+
+**목록에서 무언가를 고르는 기능은 넣지 않는다.** 배터리와 CPU에는 고를 대상이 없다. 배치와 간격과 여백과 곡률만 맞추는 작업이다. 다만 절전 모드 토글은 예외이며 아래 5-3에서 따로 다룬다.
+
+### 5-1. 배터리 페이지
+
+```
+┌────────────────────────────────────┐
+│ 배터리                        85%  │   제목 + 오른쪽에 백분율
+│ ──────────────────────────────────  │
+│  ▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░          │   게이지 바
+│  2시간 15분 남음                    │   보조 줄, 남은 시간을 모르면 생략
+│ ──────────────────────────────────  │
+│ 절전 모드                    (◯━)  │   토글 행
+│ 전원                        연결됨  │   키값 행
+│ ──────────────────────────────────  │
+│ 전원 설정…                          │
+└────────────────────────────────────┘
+```
+
+| 순서 | 요소 | 높이 |
+| --- | --- | --- |
+| 1 | 제목 "배터리" + 오른쪽 백분율 | `panel::kHeaderHDip` (24) |
+| 2 | 간격 | `panel::kHeaderGapDip` (9) |
+| 3 | 게이지 바 | 10 |
+| 4 | 남은 시간 줄 (있을 때만) | `panel::kNoteHDip` (16) |
+| 5 | 간격 | `panel::kDivGapDip` (8) |
+| 6 | 구분선 | `panel::kDivHDip` (1) |
+| 7 | 간격 | `panel::kDivGapDip` (8) |
+| 8 | 절전 모드 토글 행 | `panel::kRowHDip` (32) |
+| 9 | 전원 키값 행 | `panel::kRowHDip` (32) |
+| 10 | 간격 | `panel::kDivGapDip` (8) |
+| 11 | 구분선 | `panel::kDivHDip` (1) |
+| 12 | 간격 | `panel::kDivGapDip` (8) |
+| 13 | "전원 설정…" | `panel::kSettingsHDip` (22) |
+| 14 | 하단 패딩 | `panel::kBottomPadDip` (10) |
+
+폭은 `panel::kWidthDip`(308)이다. 1단계의 `panel::Stack`으로 `MakeBatteryPage`를 만든다.
+
+- 제목 오른쪽의 백분율은 `semibold14_`로 fg 색이며 오른쪽 정렬이다.
+- 게이지 바는 좌우 인셋을 뺀 폭 전체를 쓴다. 높이 10 DIP, 곡률은 `corner::PillPx`. 바탕은 `BadgeOffFill(dark)`, 채움은 `BatteryFillRgb(dark, level, ac)`가 돌려주는 색이다. 이 함수는 이미 `theme.hpp`에 있으니 그대로 쓴다.
+- 남은 시간 줄은 `regular12_` muted 색이다. `RemainText`가 빈 문자열을 돌려주거나 전원이 연결되어 있으면 이 줄을 통째로 뺀다.
+- 키값 행은 왼쪽에 `regular14_` fg 색 라벨, 오른쪽 끝에 `regular14_` muted 색 값이다. 아이콘 원은 넣지 않는다. 왼쪽 시작 위치는 `panel::kInsetDip`(14)이며 `panel::kTextLeftDip`(49)이 아니다. 원 아이콘이 없기 때문이다.
+- 키값 행에는 호버를 깔지 않는다. 누를 수 없는 행이기 때문이다.
+
+### 5-2. CPU 페이지
+
+```
+┌────────────────────────────────────┐
+│ CPU                           23%  │
+│ ──────────────────────────────────  │
+│  ▓▓▓▓▓░░░░░░░░░░░░░░░░░░░          │
+│ ──────────────────────────────────  │
+│ 사용자                        15%  │
+│ 커널                           8%  │
+│ 논리 프로세서                   16  │
+│ ──────────────────────────────────  │
+│ 작업 관리자…                        │
+└────────────────────────────────────┘
+```
+
+배터리 페이지와 같은 배치이며, 보조 줄과 토글 행이 없고 키값 행이 셋이다. 게이지 채움 색은 `CpuFillRgb(dark, level)`을 쓴다. 하단 항목은 "작업 관리자…"이고 기존 `PendingAction::kTaskManager` 경로를 그대로 쓴다.
+
+CPU 사용률은 5초마다 바뀐다. 패널이 열려 있는 동안 값이 갱신되어야 하므로, `ControlCenterLive`에 `cpu_ok`, `cpu_usage`, `cpu_user`, `cpu_kernel`, `cpu_nproc`를 더해 `ApplyLive`가 받아 가게 한다. 배터리도 마찬가지로 `battery_ok`, `battery_level`, `battery_ac`, `battery_charging`, `battery_remain_text`, `battery_saver_on`을 더한다. **제어 센터가 자기 스레드에서 `GetSystemPowerStatus`나 `ReadCpuTimes`를 다시 부르지 않게 하라.** 값은 위젯 워커가 이미 가지고 있다.
+
+### 5-3. 절전 모드 토글
+
+배터리 페이지의 절전 모드 행은 읽기만 하는 키값이 아니라 **눌러서 켜고 끌 수 있는 토글**이다. 토글 모양과 크기는 `panel::DrawToggle`로 그리며 Wi-Fi와 블루투스의 토글과 같다. 다만 행의 오른쪽 끝에 놓이므로 헤더의 토글과 위치만 다르다.
+
+현재 상태를 읽는 것은 이미 되어 있다. `SYSTEM_POWER_STATUS::SystemStatusFlag`의 최하위 비트가 절전 모드다(`control_center.cpp` 1047행, `builtin.cpp` 876행).
+
+**문제는 켜고 끄는 쪽이다. Windows에는 절전 모드를 즉시 켜고 끄는 공개 API가 없다.** 아래 순서로 시도하고, 어디까지 되었는지 반드시 보고하라.
+
+**1순위 — `powrprof.dll`의 전원 계획 API**
+
+절전 모드가 발동하는 배터리 임계값을 100으로 올리면 켜지고, 0으로 내리면 꺼진다. 레지스트리를 직접 쓰지 않고 문서화된 함수로 처리한다.
+
+```cpp
+// SUB_ENERGYSAVER
+constexpr GUID kSubEnergySaver = {0xde830923, 0xa562, 0x41af, {0xa0, 0x86, 0xe3, 0xa2, 0xc6, 0xba, 0xd2, 0xda}};
+// ESBATTTHRESHOLD
+constexpr GUID kEsBattThreshold = {0xe69653ca, 0xcf7f, 0x4f05, {0xaa, 0x73, 0xcb, 0x83, 0x3f, 0xa9, 0x0a, 0xd4}};
+```
+
+`PowerGetActiveScheme`으로 활성 계획을 얻고, `PowerReadDCValueIndex`로 현재 임계값을 읽고, `PowerWriteDCValueIndex`로 새 값을 쓴 뒤 `PowerSetActiveScheme`으로 적용한다. 이 GUID와 함수 이름은 **반드시 실기에서 확인하라.**
+
+**되돌리기가 이 작업에서 가장 중요하다.**
+
+- 절전 모드를 켜기 전에 읽은 원래 임계값을 `WidgetSettings`에 `int saver_threshold_backup = -1;`로 저장하고 설정 파일에 적는다. 메모리에만 두면 앱이 죽었을 때 사용자의 전원 설정이 100으로 남는다.
+- 끌 때는 저장해 둔 값으로 되돌린다. 저장된 값이 없으면 Windows 기본값인 20으로 되돌린다.
+- 앱이 시작될 때 `saver_threshold_backup`이 `-1`이 아니면, 지난번에 되돌리지 못하고 끝났다는 뜻이다. 그 값으로 되돌리고 `-1`로 지운다.
+- 값을 쓰기 전후로 `Log(L"power", L"saver threshold %d -> %d", old, next)`를 남긴다.
+
+**AC 전원에 연결되어 있으면 이 방법은 듣지 않는다.** 절전 모드는 배터리로 돌 때만 발동하기 때문이다. AC에 연결된 동안에는 토글을 흐리게 그리고, 누르면 아무 일도 하지 않는다. Wi-Fi 토글이 `wifi_hw_radio_on_`을 다루는 방식과 같다.
+
+**2순위 — 물러서기**
+
+`PowerWriteDCValueIndex`가 권한 부족으로 실패하거나, 값을 바꿔도 `SystemStatusFlag`가 따라오지 않으면 이 경로를 버린다. 토글 대신 "절전 모드" 키값 행에 현재 상태만 보이고, 그 행을 누르면 `ms-settings:batterysaver`를 연다. 물러섰다면 **무엇이 어떻게 실패했는지 반드시 보고하라.**
+
+**금지**
+
+- **레지스트리에 직접 쓰지 마라.** `HKLM\SYSTEM\CurrentControlSet\Control\Power` 아래를 건드리는 방법이 인터넷에 널리 돌아다니지만 쓰지 않는다. 되돌리지 못하면 사용자의 전원 설정이 망가진다.
+- 관리자 권한을 요구하는 경로로 가지 마라. 이 앱은 사용자 권한으로 돈다.
+
+### 5-4. 상단바 좌클릭 경로
+
+`kBatteryItemId`(`"bamti.widget/battery"`)와 `kCpuItemId`(`"bamti.widget/cpu"`)를 `menu_bar.cpp`에 상수로 두고, `OpenStatusPanel`에서 각각 `ControlCenterPage::kBattery`와 `ControlCenterPage::kCpu`로 갈라낸다. 2단계에서 볼륨을 갈라낸 것과 같은 모양이며, 다시 누르면 닫히는 토글 동작도 같다.
+
+갈래가 다섯이 되므로 `if` 를 늘어놓지 말고 표로 만들어라.
+
+```cpp
+// 상단바 항목과 제어 센터 페이지의 짝. 여기에 없는 항목만 StatusPanelContent로 간다.
+struct WidgetPage {
+  const char* id;
+  ControlCenterPage page;
+};
+constexpr WidgetPage kWidgetPages[] = {
+    {kNetworkItemId, ControlCenterPage::kWifi},
+    {kVolumeItemId, ControlCenterPage::kVolume},
+    {kBluetoothItemId, ControlCenterPage::kBluetooth},
+    {kBatteryItemId, ControlCenterPage::kBattery},
+    {kCpuItemId, ControlCenterPage::kCpu},
+};
+```
+
+### 5-5. `SampleBattery`와 `SampleCpu`의 `StatusPanel`
+
+두 함수가 만드는 `StatusPanel`은 이제 상단바에서 쓰이지 않는다. 볼륨과 마찬가지로 **지우지 말고 그대로 발행한다.** 파이프로 연결된 외부 소비자가 읽고 있을 수 있다.
+
+---
+
+## 6단계 — `StatusPanelContent`의 곡률과 여백을 맞춘다
+
+5단계를 마치면 `StatusPanelContent`는 파이프로 들어온 외부 패널만 그린다. 그래도 상단바에서 열리는 창이므로 다른 패널과 나란히 보인다. 배치까지 뜯어고칠 필요는 없고 겉모습만 맞춘다.
+
+- `CornerDip()`을 재정의해 `corner::kHeroDip`을 돌려준다. 지금은 기본값 `corner::kOverlayDip`이라 모서리가 덜 둥글다.
+- `kPanelPadDip`을 12에서 `panel::kInsetDip`(14)으로 바꾼다.
+- `kPanelMinWidthDip`을 280에서 `panel::kWidthDip`(308)로 바꾼다. `kPanelMaxWidthDip`(360)은 그대로 둔다. 외부 패널은 내용의 폭을 미리 알 수 없으므로 가변 폭을 남긴다.
+- 호버 곡률이 `corner::HoverPx`를 쓰는지 확인하고, 아니면 그렇게 바꾼다.
+
+**행 높이와 블록 간격은 건드리지 마라.** 외부 패널은 게이지와 토글과 버튼을 임의로 섞어 보내므로, 행 높이를 32로 못 박으면 오히려 어긋난다.
+
+---
+
+## 덧붙인 부분의 검증
+
+빌드와 화면 확인은 앞의 검증 절과 같고, 아래를 더한다.
+
+1. 배터리 패널과 CPU 패널의 폭이 308이고, 네트워크 패널과 나란히 놓았을 때 여백과 구분선 위치와 모서리 곡률이 모두 같다.
+2. 다섯 패널(네트워크, 볼륨, 블루투스, 배터리, CPU)을 차례로 열어 스크린샷을 남기고, 겹쳐 보아 어긋난 곳이 없는지 확인한다.
+3. CPU 패널을 열어 둔 채로 10초 이상 두었을 때 숫자와 게이지가 갱신된다.
+4. 배터리가 없는 기기에서는 배터리 항목이 상단바에 나오지 않는다(`DropItem` 경로가 그대로 산다).
+
+### 절전 모드 토글에서 하지 말 것
+
+- **절전 모드를 실제로 켜고 끄는 검증을 반복하지 마라.** 전원 계획 값을 건드리는 작업이므로 한 번 켜고 한 번 끈 뒤, 임계값이 원래 값으로 돌아왔는지 `PowerReadDCValueIndex`로 확인하는 것으로 끝낸다.
+- 확인 뒤에는 `saver_threshold_backup`이 `-1`로 지워졌는지 설정 파일을 열어 보고 확인하라.
+- AC 전원에 연결된 상태로 검증했다면 토글이 흐리게 나오는 것까지만 확인하고, 실제 동작 확인은 사용자에게 부탁하라.
