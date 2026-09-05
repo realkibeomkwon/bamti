@@ -88,6 +88,32 @@ bool IsControlPanelLnk(const std::wstring& filename) {
   return EqualsIgnoreCase(filename, L"4 - Control Panel.lnk");
 }
 
+std::wstring SettingsAppDisplayName(HRESULT* hr_out) {
+  constexpr wchar_t kSettingsParsing[] =
+      L"shell:AppsFolder\\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel";
+  Microsoft::WRL::ComPtr<IShellItem> item;
+  HRESULT hr = SHCreateItemFromParsingName(kSettingsParsing, nullptr, IID_PPV_ARGS(&item));
+  if (SUCCEEDED(hr) && item) {
+    PWSTR name = nullptr;
+    hr = item->GetDisplayName(SIGDN_NORMALDISPLAY, &name);
+    if (SUCCEEDED(hr) && name != nullptr && name[0] != L'\0') {
+      std::wstring out = name;
+      CoTaskMemFree(name);
+      if (hr_out != nullptr) {
+        *hr_out = hr;
+      }
+      return out;
+    }
+    if (name != nullptr) {
+      CoTaskMemFree(name);
+    }
+  }
+  if (hr_out != nullptr) {
+    *hr_out = hr;
+  }
+  return {};
+}
+
 bool QueryRunAsUser(const std::wstring& lnk_path, bool* runas) {
   if (runas == nullptr) {
     return false;
@@ -220,12 +246,18 @@ std::vector<WinXEntry> LoadWinXEntries() {
       wchar_t raw[1024]{};
       GetPrivateProfileStringW(L"LocalizedFileNames", name.c_str(), L"", raw, 1024, ini.c_str());
       std::wstring label = LoadIndirect(raw);
-      if (IsControlPanelLnk(name)) {
-        Log(L"winx", L"control panel label=%s", label.empty() ? L"" : label.c_str());
-      }
       if (label.empty()) {
         label = FallbackLabel(name);
         Log(L"winx", L"fallback label file=%s name=%s", name.c_str(), label.c_str());
+      }
+      if (IsControlPanelLnk(name)) {
+        HRESULT settings_hr = E_FAIL;
+        std::wstring settings = SettingsAppDisplayName(&settings_hr);
+        Log(L"winx", L"settings label=%s hr=0x%08lx", settings.empty() ? L"" : settings.c_str(),
+            static_cast<unsigned long>(settings_hr));
+        if (!settings.empty()) {
+          label = std::move(settings);
+        }
       }
 
       WinXEntry entry;

@@ -2101,7 +2101,6 @@ void MenuBar::ShowStartContextMenu(POINT screen) {
     }
     bar_menu_->Add(kPowerSubCmd, L"종료 또는 로그아웃", false, true, true);
   }
-  HibernateAvailable();
 
   RECT start = StartRect();
   POINT anchor{start.left, start.bottom};
