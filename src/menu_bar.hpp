@@ -69,7 +69,9 @@ class MenuBar {
   bool DesktopPeekWanted() const;
   void UpdateDesktopPeek();
   void StartDesktopPeek();
-  void StopDesktopPeek();
+  void StopDesktopPeek(const wchar_t* reason);
+  void ShowDesktop();
+  void HideDesktop();
   void StartCornerWatch();
   void StopCornerWatch();
   void RefreshFullscreenState();
@@ -212,6 +214,11 @@ class MenuBar {
   std::vector<WinXEntry> winx_entries_;
   UINT open_submenu_cmd_ = 0;
   bool peek_latched_ = false;
+  bool desktop_shown_ = false;
+  HWND desktop_probe_ = nullptr;
+  HRESULT desktop_hr_ = E_FAIL;
+  int desktop_iconic_before_ = 0;
+  bool desktop_pending_undo_ = false;
   bool peek_dwell_armed_ = false;
   bool corner_watch_on_ = false;
   int wheel_accum_ = 0;
