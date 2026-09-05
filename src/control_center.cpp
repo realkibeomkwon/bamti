@@ -2950,7 +2950,8 @@ void ControlCenterContent::Invoke(int index) {
         } else if (page_ == Page::kBluetooth && i >= 0 && i < static_cast<int>(bt_devices_.size())) {
           BtDevice& dev = bt_devices_[static_cast<size_t>(i)];
           if (dev.paired) {
-            if (!bt_connecting_addr_.empty() && bt_connecting_addr_ == dev.address) {
+            if (!bt_connecting_addr_.empty() && bt_connecting_addr_ == dev.address &&
+                (GetTickCount64() - bt_connecting_since_ < 60000)) {
               break;
             }
             if (host_.bt_connect) {

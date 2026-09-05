@@ -11,7 +11,9 @@
 #include <wrl/wrappers/corewrappers.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cwchar>
+#include <new>
 #include <utility>
 #include <vector>
 
@@ -528,6 +530,168 @@ std::vector<BtDeviceInfo> ScanBtDevices() {
   return out;
 }
 
+namespace {
+
+constexpr int kBtServiceParallelMax = 4;
+constexpr DWORD kBtServiceWaitMs = 20000;
+
+void LogBtServiceResult(int index, int total_n, const GUID& g, DWORD state, double took_ms) {
+  Log(L"bt", L"service %d/%d {%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X} state=%lu took %.0f ms", index,
+      total_n, static_cast<unsigned long>(g.Data1), g.Data2, g.Data3, g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3],
+      g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7], static_cast<unsigned long>(state), took_ms);
+}
+
+struct BtServiceJob {
+  BLUETOOTH_DEVICE_INFO di{};
+  GUID guid{};
+  DWORD flag = 0;
+  DWORD state = static_cast<DWORD>(-1);
+  double took_ms = 0;
+  int index = 0;
+  HANDLE done = nullptr;
+  std::atomic<int> refs{0};
+};
+
+void ReleaseBtServiceJob(BtServiceJob* job) {
+  if (job == nullptr) {
+    return;
+  }
+  if (job->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+    if (job->done != nullptr) {
+      CloseHandle(job->done);
+    }
+    delete job;
+  }
+}
+
+void RunBtServiceJob(BtServiceJob* job) {
+  BLUETOOTH_FIND_RADIO_PARAMS radio_params{};
+  radio_params.dwSize = sizeof(radio_params);
+  HANDLE radio = nullptr;
+  const HBLUETOOTH_RADIO_FIND radio_find = BluetoothFindFirstRadio(&radio_params, &radio);
+  if (radio_find == nullptr) {
+    DWORD err = GetLastError();
+    if (err == ERROR_SUCCESS) {
+      err = ERROR_INVALID_HANDLE;
+    }
+    job->state = err;
+    if (job->done != nullptr) {
+      SetEvent(job->done);
+    }
+    return;
+  }
+
+  LARGE_INTEGER s0{};
+  LARGE_INTEGER s1{};
+  QueryPerformanceCounter(&s0);
+  job->state = BluetoothSetServiceState(radio, &job->di, &job->guid, job->flag);
+  QueryPerformanceCounter(&s1);
+  job->took_ms = QpcMs(s0, s1);
+
+  if (radio != nullptr) {
+    CloseHandle(radio);
+  }
+  BluetoothFindRadioClose(radio_find);
+  if (job->done != nullptr) {
+    SetEvent(job->done);
+  }
+}
+
+VOID CALLBACK SetBtServiceJobCallback(PTP_CALLBACK_INSTANCE instance, PVOID ctx) {
+  (void)instance;
+  auto* job = static_cast<BtServiceJob*>(ctx);
+  RunBtServiceJob(job);
+  ReleaseBtServiceJob(job);
+}
+
+int SetBtServicesSerial(HANDLE radio, BLUETOOTH_DEVICE_INFO* di, GUID* guids, int total_n, DWORD flag) {
+  int ok_n = 0;
+  for (int i = 0; i < total_n; ++i) {
+    LARGE_INTEGER s0{};
+    LARGE_INTEGER s1{};
+    QueryPerformanceCounter(&s0);
+    const DWORD serr = BluetoothSetServiceState(radio, di, &guids[i], flag);
+    QueryPerformanceCounter(&s1);
+    LogBtServiceResult(i + 1, total_n, guids[i], serr, QpcMs(s0, s1));
+    if (serr == ERROR_SUCCESS) {
+      ++ok_n;
+    }
+  }
+  return ok_n;
+}
+
+int SetBtServicesParallel(const BLUETOOTH_DEVICE_INFO& di, const GUID* guids, int total_n, DWORD flag) {
+  int ok_n = 0;
+  const ULONGLONG deadline = GetTickCount64() + kBtServiceWaitMs;
+
+  for (int start = 0; start < total_n; start += kBtServiceParallelMax) {
+    if (GetTickCount64() >= deadline) {
+      break;
+    }
+    const int remain_n = total_n - start;
+    const int batch_n = remain_n < kBtServiceParallelMax ? remain_n : kBtServiceParallelMax;
+
+    BtServiceJob* jobs[kBtServiceParallelMax]{};
+    HANDLE waits[kBtServiceParallelMax]{};
+    int wait_n = 0;
+
+    for (int j = 0; j < batch_n; ++j) {
+      const int index = start + j;
+      auto* job = new (std::nothrow) BtServiceJob();
+      if (job == nullptr) {
+        continue;
+      }
+      job->di = di;
+      if (job->di.dwSize == 0) {
+        job->di.dwSize = sizeof(job->di);
+      }
+      job->guid = guids[static_cast<size_t>(index)];
+      job->flag = flag;
+      job->index = index;
+      job->done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      if (job->done == nullptr) {
+        delete job;
+        continue;
+      }
+      job->refs.store(2, std::memory_order_relaxed);
+      if (!TrySubmitThreadpoolCallback(&SetBtServiceJobCallback, job, nullptr)) {
+        RunBtServiceJob(job);
+        LogBtServiceResult(index + 1, total_n, job->guid, job->state, job->took_ms);
+        if (job->state == ERROR_SUCCESS) {
+          ++ok_n;
+        }
+        job->refs.store(1, std::memory_order_relaxed);
+        ReleaseBtServiceJob(job);
+        continue;
+      }
+      jobs[wait_n] = job;
+      waits[wait_n] = job->done;
+      ++wait_n;
+    }
+
+    if (wait_n <= 0) {
+      continue;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    const DWORD wait_ms = now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+    WaitForMultipleObjects(static_cast<DWORD>(wait_n), waits, TRUE, wait_ms);
+    for (int j = 0; j < wait_n; ++j) {
+      if (WaitForSingleObject(waits[j], 0) == WAIT_OBJECT_0) {
+        LogBtServiceResult(jobs[j]->index + 1, total_n, jobs[j]->guid, jobs[j]->state, jobs[j]->took_ms);
+        if (jobs[j]->state == ERROR_SUCCESS) {
+          ++ok_n;
+        }
+      }
+      ReleaseBtServiceJob(jobs[j]);
+    }
+  }
+
+  return ok_n;
+}
+
+}  // namespace
+
 bool SetBtDeviceConnected(const BLUETOOTH_DEVICE_INFO& info, bool connect, std::vector<GUID>* services) {
   LARGE_INTEGER t0{};
   LARGE_INTEGER t1{};
@@ -602,21 +766,11 @@ bool SetBtDeviceConnected(const BLUETOOTH_DEVICE_INFO& info, bool connect, std::
   }
 
   const DWORD flag = connect ? BLUETOOTH_SERVICE_ENABLE : BLUETOOTH_SERVICE_DISABLE;
-  int ok_n = 0;
   const int total_n = static_cast<int>(guids.size());
-  for (int i = 0; i < total_n; ++i) {
-    LARGE_INTEGER s0{};
-    LARGE_INTEGER s1{};
-    QueryPerformanceCounter(&s0);
-    const DWORD serr = BluetoothSetServiceState(radio, &di, &guids[static_cast<size_t>(i)], flag);
-    QueryPerformanceCounter(&s1);
-    const GUID& g = guids[static_cast<size_t>(i)];
-    Log(L"bt", L"service %d/%d {%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X} state=%lu took %.0f ms", i + 1,
-        total_n, static_cast<unsigned long>(g.Data1), g.Data2, g.Data3, g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3],
-        g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7], static_cast<unsigned long>(serr), QpcMs(s0, s1));
-    if (serr == ERROR_SUCCESS) {
-      ++ok_n;
-    }
+  int ok_n = SetBtServicesParallel(di, guids.data(), total_n, flag);
+  if (ok_n == 0) {
+    Log(L"bt", L"parallel failed ok=0/%d; retrying serially", total_n);
+    ok_n = SetBtServicesSerial(radio, &di, guids.data(), total_n, flag);
   }
 
   if (radio != nullptr) {
