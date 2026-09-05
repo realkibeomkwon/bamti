@@ -95,6 +95,7 @@
     <ClCompile Include="src\task_list.cpp" />
     <ClCompile Include="src\dock.cpp" />
     <ClCompile Include="src\popup_surface.cpp" />
+    <ClCompile Include="src\wifi_password.cpp" />
     <ClCompile Include="src\start_menu.cpp" />
     <ClCompile Include="src\spotlight.cpp" />
     <ClCompile Include="src\tray_backend_uia.cpp" />
@@ -120,6 +121,7 @@
     <ClInclude Include="src\task_list.hpp" />
     <ClInclude Include="src\dock.hpp" />
     <ClInclude Include="src\popup_surface.hpp" />
+    <ClInclude Include="src\wifi_password.hpp" />
     <ClInclude Include="src\start_menu.hpp" />
     <ClInclude Include="src\spotlight.hpp" />
     <ClInclude Include="src\tray_backend.hpp" />

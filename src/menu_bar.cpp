@@ -47,7 +47,6 @@ constexpr UINT kTrayInterceptCmd = 17;
 constexpr UINT kAutostartCmd = 18;
 constexpr UINT kWidgetVolumeCmd = 19;
 constexpr UINT kWidgetControlCenterCmd = 20;
-constexpr UINT kWidgetWifiCmd = 23;
 constexpr UINT kTrayPeekCmd = 20;
 constexpr UINT kTrayHideIconCmd = 21;
 constexpr UINT kTrayMirrorOffCmd = 22;
@@ -56,7 +55,7 @@ constexpr UINT_PTR kPeekTimerId = 4;
 constexpr UINT kPeekMs = 10000;
 constexpr char kSpotlightItemId[] = "bamti.widget/spotlight";
 constexpr char kControlCenterItemId[] = "bamti.widget/control_center";
-constexpr char kWifiItemId[] = "bamti.widget/wifi";
+constexpr char kNetworkItemId[] = "bamti.widget/network";
 
 UINT g_taskbar_created = 0;
 
@@ -413,6 +412,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (!status_popup_.IsOpen()) {
         CloseTraySubmenu(L"parent");
         status_popup_.SetAfterTick(nullptr, nullptr);
+        if (cc_panel_ != nullptr) {
+          cc_panel_->Dismissed();
+        }
         cc_open_ = false;
         clock_open_ = false;
         if (!open_panel_id_.empty()) {
@@ -621,8 +623,8 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           ToggleControlCenter();
           return 0;
         }
-        if (hit->id == kWifiItemId) {
-          ToggleWifiPanel(*hit);
+        if (hit->id == kNetworkItemId) {
+          ToggleNetworkPanel(*hit);
           return 0;
         }
         status_popup_.Close();
@@ -738,7 +740,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         return 0;
       }
       if (cmd == kWidgetBatteryCmd || cmd == kWidgetCpuCmd || cmd == kWidgetNetworkCmd ||
-          cmd == kWidgetVolumeCmd || cmd == kWidgetWifiCmd || cmd == kWidgetBoardCmd ||
+          cmd == kWidgetVolumeCmd || cmd == kWidgetBoardCmd ||
           cmd == kWidgetControlCenterCmd) {
         WidgetSettings next = widgets_.settings();
         const WidgetSettings tray = tray_.settings();
@@ -755,8 +757,6 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           next.network = !next.network;
         } else if (cmd == kWidgetVolumeCmd) {
           next.volume = !next.volume;
-        } else if (cmd == kWidgetWifiCmd) {
-          next.wifi = !next.wifi;
         } else if (cmd == kWidgetControlCenterCmd) {
           next.control_center = !next.control_center;
         } else if (cmd == kWidgetBoardCmd) {
@@ -1565,8 +1565,15 @@ bool MenuBar::ShowControlCenter(const RECT& item_rect, ControlCenterPage page) {
   }
   ControlCenterHost host;
   host.dark = dark_;
+  host.popup_hwnd = status_popup_.hwnd();
   host.dispatch = [this](const StatusEvent& ev) { status_.Dispatch(ev); };
   host.live = [this]() { return widgets_.LiveForControlCenter(); };
+  host.present = [this]() {
+    if (status_popup_.IsOpen()) {
+      status_popup_.Present();
+    }
+  };
+  host.set_allied = [this](HWND hwnd) { status_popup_.SetAlliedHwnd(hwnd); };
   cc_panel_->Reset(std::move(host), page);
   POINT anchor{item_rect.left, item_rect.bottom};
   ClientToScreen(hwnd_, &anchor);
@@ -1672,11 +1679,11 @@ void MenuBar::ShowClockMenu() {
   }
 }
 
-void MenuBar::ToggleWifiPanel(const StatusHit& hit) {
-  if (fullscreen_occluded_ || !widgets_.settings().wifi) {
+void MenuBar::ToggleNetworkPanel(const StatusHit& hit) {
+  if (fullscreen_occluded_ || !widgets_.settings().network) {
     return;
   }
-  if (cc_open_ && status_popup_.IsOpen() && cc_panel_ != nullptr && cc_panel_->ShowsWifi()) {
+  if (cc_open_ && status_popup_.IsOpen() && cc_panel_ != nullptr && cc_panel_->ShowsNetwork()) {
     status_popup_.Close();
     cc_open_ = false;
     return;
@@ -1685,7 +1692,7 @@ void MenuBar::ToggleWifiPanel(const StatusHit& hit) {
 }
 
 void MenuBar::OpenStatusPanel(const StatusHit& hit) {
-  if (hit.id == kWifiItemId && ShowControlCenter(hit.rect, ControlCenterPage::kWifi)) {
+  if (hit.id == kNetworkItemId && ShowControlCenter(hit.rect, ControlCenterPage::kWifi)) {
     return;
   }
   if (status_panel_ == nullptr || hwnd_ == nullptr) {
@@ -1962,7 +1969,6 @@ void MenuBar::ShowContextMenu(POINT screen) {
   bar_menu_->Add(kWidgetCpuCmd, L"CPU", s.cpu);
   bar_menu_->Add(kWidgetNetworkCmd, L"네트워크", s.network);
   bar_menu_->Add(kWidgetVolumeCmd, L"볼륨", s.volume);
-  bar_menu_->Add(kWidgetWifiCmd, L"Wi-Fi", s.wifi);
   bar_menu_->Add(kWidgetControlCenterCmd, L"제어 센터", s.control_center);
   const bool board_ok = IsWidgetBoardAvailable();
   bar_menu_->Add(kWidgetBoardCmd,
@@ -2024,8 +2030,8 @@ void MenuBar::ApplySettings(const WidgetSettings& next) {
   widgets_.SetSettings(merged);
   tray_.SetSettings(merged);
   if (cc_open_) {
-    const bool wifi_page = cc_panel_ != nullptr && cc_panel_->ShowsWifi();
-    const bool keep = merged.control_center || (wifi_page && merged.wifi);
+    const bool net_page = cc_panel_ != nullptr && cc_panel_->ShowsNetwork();
+    const bool keep = merged.control_center || (net_page && merged.network);
     if (!keep) {
       status_popup_.Close();
       cc_open_ = false;

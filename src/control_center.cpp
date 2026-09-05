@@ -5,6 +5,7 @@
 #include "slider_geom.hpp"
 #include "status_item.hpp"
 #include "theme.hpp"
+#include "wifi_password.hpp"
 
 #include <bluetoothapis.h>
 #include <d2d1helper.h>
@@ -17,6 +18,8 @@
 #include <cmath>
 #include <cstring>
 #include <cwchar>
+#include <new>
+#include <string_view>
 
 namespace bamti {
 namespace {
@@ -35,6 +38,12 @@ constexpr int kSliderCardHDip = 56;
 constexpr int kFooterHDip = 28;
 constexpr int kSliderTrackHDip = 24;
 constexpr ULONGLONG kSlowPeriodMs = 2000;
+constexpr ULONGLONG kWifiScanPeriodMs = 15000;
+constexpr ULONGLONG kWifiScanWaitMs = 4000;
+constexpr ULONGLONG kRadioRefreshMs = 300;
+constexpr DWORD kMaxPhyIndex = 64;
+constexpr UINT kWlanNotifyMsg = WM_APP + 71;
+constexpr wchar_t kWlanNotifyClass[] = L"bamti.WlanNotify";
 
 constexpr wchar_t kFluentFont[] = L"Segoe Fluent Icons";
 constexpr wchar_t kUiFont[] = L"Segoe UI";
@@ -52,11 +61,37 @@ constexpr wchar_t kBackGlyph[] = L"\xE76B";
 constexpr wchar_t kLockGlyph[] = L"\xE72E";
 constexpr int kPageHeaderHDip = 48;
 constexpr int kPageRowHDip = 52;
-constexpr int kPageListMax = 6;
+constexpr int kBtListMax = 6;
+constexpr int kWifiKnownMax = 6;
+constexpr int kWifiOtherMax = 6;
+constexpr int kWifiListTotalMax = 10;
 constexpr int kPageFooterHDip = 32;
+constexpr int kNetPageWidthDip = 308;
+constexpr int kNetInsetDip = 14;
+constexpr int kNetTopPadDip = 9;
+constexpr int kNetHeaderHDip = 24;
+constexpr int kNetHeaderGapDip = 9;
+constexpr int kNetEthHDip = 16;
+constexpr int kNetEthGapDip = 8;
+constexpr int kNetDivHDip = 1;
+constexpr int kNetDivGapDip = 8;
+constexpr int kNetSectionHDip = 17;
+constexpr int kNetRowHDip = 32;
+constexpr int kNetSettingsHDip = 22;
+constexpr int kNetBottomPadDip = 10;
+constexpr int kNetToggleWDip = 54;
+constexpr int kNetToggleHDip = 24;
+constexpr int kNetBackWDip = 24;
+constexpr int kNetCircleDip = 26;
+constexpr float kNetKnobDip = 19.0f;
+constexpr float kNetKnobInsetDip = 2.5f;
 
 int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
+}
+
+float DipToPxF(float dip, UINT dpi) {
+  return dip * static_cast<float>(dpi) / 96.0f;
 }
 
 double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
@@ -304,24 +339,708 @@ bool MakeFormat(IDWriteFactory* dwrite, const wchar_t* family, DWRITE_FONT_WEIGH
   return true;
 }
 
+struct NetworkPageMetrics {
+  int height = 0;
+  int header_y = kNetTopPadDip;
+  bool show_toggle = false;
+  bool show_eth = false;
+  int eth_y = 0;
+  int div1_y = 0;
+  int known_header_y = -1;
+  int known_list_y = -1;
+  int known_n = 0;
+  int other_header_y = -1;
+  int other_list_y = -1;
+  int other_n = 0;
+  int empty_y = -1;
+  const wchar_t* empty_text = nullptr;
+  int div2_y = 0;
+  int net_settings_y = 0;
+  int wifi_settings_y = 0;
+};
+
+NetworkPageMetrics MakeNetworkPage(bool eth_on, bool iface_ok, bool radio_on, int known_n, int other_n) {
+  NetworkPageMetrics m;
+  m.show_toggle = iface_ok;
+  m.show_eth = eth_on;
+  m.known_n = known_n > 0 ? known_n : 0;
+  m.other_n = other_n > 0 ? other_n : 0;
+  int y = kNetTopPadDip;
+  m.header_y = y;
+  y += kNetHeaderHDip + kNetHeaderGapDip;
+  if (m.show_eth) {
+    m.eth_y = y;
+    y += kNetEthHDip + kNetEthGapDip;
+  }
+  m.div1_y = y;
+  y += kNetDivHDip + kNetDivGapDip;
+  if (!iface_ok) {
+    m.empty_y = y;
+    m.empty_text = L"무선 어댑터가 없습니다";
+    y += kNetRowHDip;
+  } else if (!radio_on) {
+    m.empty_y = y;
+    m.empty_text = L"Wi-Fi가 꺼져 있습니다";
+    y += kNetRowHDip;
+  } else if (m.known_n + m.other_n == 0) {
+    m.empty_y = y;
+    m.empty_text = L"사용 가능한 네트워크가 없습니다";
+    y += kNetRowHDip;
+  } else {
+    if (m.known_n > 0) {
+      m.known_header_y = y;
+      y += kNetSectionHDip;
+      m.known_list_y = y;
+      y += kNetRowHDip * m.known_n;
+    }
+    if (m.other_n > 0) {
+      m.other_header_y = y;
+      y += kNetSectionHDip;
+      m.other_list_y = y;
+      y += kNetRowHDip * m.other_n;
+    }
+  }
+  y += kNetDivGapDip;
+  m.div2_y = y;
+  y += kNetDivHDip + kNetDivGapDip;
+  m.net_settings_y = y;
+  y += kNetSettingsHDip;
+  m.wifi_settings_y = y;
+  y += kNetSettingsHDip + kNetBottomPadDip;
+  m.height = y;
+  return m;
+}
+
+void WipeWide(std::wstring* text) {
+  if (text == nullptr || text->empty()) {
+    return;
+  }
+  SecureZeroMemory(text->data(), text->size() * sizeof(wchar_t));
+  text->clear();
+}
+
+std::wstring XmlEscape(std::wstring_view in) {
+  std::wstring out;
+  out.reserve(in.size());
+  for (const wchar_t ch : in) {
+    switch (ch) {
+      case L'&':
+        out += L"&amp;";
+        break;
+      case L'<':
+        out += L"&lt;";
+        break;
+      case L'>':
+        out += L"&gt;";
+        break;
+      case L'"':
+        out += L"&quot;";
+        break;
+      case L'\'':
+        out += L"&apos;";
+        break;
+      default:
+        out.push_back(ch);
+        break;
+    }
+  }
+  return out;
+}
+
+std::wstring Utf8ToHex(const std::string& utf8) {
+  static const wchar_t kDigits[] = L"0123456789ABCDEF";
+  std::wstring out;
+  out.resize(utf8.size() * 2);
+  for (size_t i = 0; i < utf8.size(); ++i) {
+    const unsigned char b = static_cast<unsigned char>(utf8[i]);
+    out[i * 2] = kDigits[b >> 4];
+    out[i * 2 + 1] = kDigits[b & 0x0F];
+  }
+  return out;
+}
+
+std::wstring ReasonText(DWORD reason) {
+  wchar_t buf[256]{};
+  if (WlanReasonCodeToString(reason, 256, buf, nullptr) == ERROR_SUCCESS && buf[0] != 0) {
+    return buf;
+  }
+  wchar_t fallback[64]{};
+  swprintf_s(fallback, L"reason %lu", static_cast<unsigned long>(reason));
+  return fallback;
+}
+
+bool MapWifiSecurity(DWORD auth, DWORD cipher, const wchar_t** auth_xml, const wchar_t** enc_xml, bool* wep) {
+  if (auth_xml == nullptr || enc_xml == nullptr || wep == nullptr) {
+    return false;
+  }
+  *wep = false;
+  switch (auth) {
+    case DOT11_AUTH_ALGO_RSNA_PSK:
+      *auth_xml = L"WPA2PSK";
+      break;
+    case DOT11_AUTH_ALGO_WPA_PSK:
+      *auth_xml = L"WPAPSK";
+      break;
+    case DOT11_AUTH_ALGO_WPA3_SAE:
+      *auth_xml = L"WPA3SAE";
+      break;
+    case DOT11_AUTH_ALGO_80211_SHARED_KEY:
+      *auth_xml = L"open";
+      *wep = true;
+      *enc_xml = L"WEP";
+      return true;
+    default:
+      return false;
+  }
+  switch (cipher) {
+    case DOT11_CIPHER_ALGO_CCMP:
+      *enc_xml = L"AES";
+      return true;
+    case DOT11_CIPHER_ALGO_TKIP:
+      *enc_xml = L"TKIP";
+      return true;
+    case DOT11_CIPHER_ALGO_WEP:
+    case DOT11_CIPHER_ALGO_WEP40:
+    case DOT11_CIPHER_ALGO_WEP104:
+      *enc_xml = L"WEP";
+      return true;
+    default:
+      return false;
+  }
+}
+
+WifiKind ClassifyWifiAuth(DWORD auth) {
+  switch (auth) {
+    case DOT11_AUTH_ALGO_80211_OPEN:
+    case DOT11_AUTH_ALGO_OWE:
+      return WifiKind::kOpen;
+    case DOT11_AUTH_ALGO_WPA_PSK:
+    case DOT11_AUTH_ALGO_RSNA_PSK:
+    case DOT11_AUTH_ALGO_WPA3_SAE:
+    case DOT11_AUTH_ALGO_80211_SHARED_KEY:
+      return WifiKind::kPersonal;
+    case DOT11_AUTH_ALGO_WPA:
+    case DOT11_AUTH_ALGO_RSNA:
+    case DOT11_AUTH_ALGO_WPA3:
+    case DOT11_AUTH_ALGO_WPA3_ENT:
+      return WifiKind::kEnterprise;
+    default:
+      return WifiKind::kUnknown;
+  }
+}
+
+const wchar_t* WifiKindName(WifiKind kind) {
+  switch (kind) {
+    case WifiKind::kOpen:
+      return L"open";
+    case WifiKind::kPersonal:
+      return L"personal";
+    case WifiKind::kEnterprise:
+      return L"enterprise";
+    default:
+      return L"unknown";
+  }
+}
+
+std::wstring BuildWifiProfileXml(const std::wstring& ssid, const std::wstring& password, const wchar_t* auth_xml,
+                                 const wchar_t* enc_xml, bool wep) {
+  const std::string utf8 = WideToUtf8Bytes(ssid);
+  const std::wstring hex = Utf8ToHex(utf8);
+  const std::wstring name = XmlEscape(ssid);
+  std::wstring key = XmlEscape(password);
+  std::wstring xml;
+  xml += L"<?xml version=\"1.0\"?>";
+  xml += L"<WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">";
+  xml += L"<name>";
+  xml += name;
+  xml += L"</name><SSIDConfig><SSID><hex>";
+  xml += hex;
+  xml += L"</hex><name>";
+  xml += name;
+  xml += L"</name></SSID></SSIDConfig>";
+  xml += L"<connectionType>ESS</connectionType><connectionMode>manual</connectionMode>";
+  xml += L"<MSM><security><authEncryption><authentication>";
+  xml += auth_xml != nullptr ? auth_xml : L"WPA2PSK";
+  xml += L"</authentication><encryption>";
+  xml += enc_xml != nullptr ? enc_xml : L"AES";
+  xml += L"</encryption><useOneX>false</useOneX></authEncryption>";
+  xml += L"<sharedKey><keyType>";
+  xml += wep ? L"networkKey" : L"passPhrase";
+  xml += L"</keyType><protected>false</protected><keyMaterial>";
+  xml += key;
+  xml += L"</keyMaterial></sharedKey></security></MSM></WLANProfile>";
+  WipeWide(&key);
+  return xml;
+}
+
+struct WlanNotifyEvent {
+  int kind = 0;
+  DWORD reason = 0;
+  wchar_t ssid[33]{};
+};
+
+ControlCenterContent* NotifySelf(HWND hwnd) {
+  if (hwnd == nullptr) {
+    return nullptr;
+  }
+  return reinterpret_cast<ControlCenterContent*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+}
+
+void CALLBACK OnWlanNotify(PWLAN_NOTIFICATION_DATA data, PVOID ctx) {
+  const HWND hwnd = static_cast<HWND>(ctx);
+  if (hwnd == nullptr || !IsWindow(hwnd) || data == nullptr) {
+    return;
+  }
+  auto* ev = new (std::nothrow) WlanNotifyEvent();
+  if (ev == nullptr) {
+    return;
+  }
+  if (data->NotificationSource == WLAN_NOTIFICATION_SOURCE_MSM) {
+    if (data->NotificationCode == wlan_notification_msm_radio_state_change) {
+      ev->kind = 1;
+    } else {
+      delete ev;
+      return;
+    }
+  } else if (data->NotificationSource == WLAN_NOTIFICATION_SOURCE_ACM) {
+    if (data->NotificationCode == wlan_notification_acm_connection_complete) {
+      ev->kind = 2;
+      if (data->pData != nullptr && data->dwDataSize >= sizeof(WLAN_CONNECTION_NOTIFICATION_DATA)) {
+        const auto* conn = static_cast<const WLAN_CONNECTION_NOTIFICATION_DATA*>(data->pData);
+        ev->reason = conn->wlanReasonCode;
+        const std::wstring ssid = SsidWide(conn->dot11Ssid);
+        wcsncpy_s(ev->ssid, ssid.c_str(), _TRUNCATE);
+      }
+    } else {
+      delete ev;
+      return;
+    }
+  } else {
+    delete ev;
+    return;
+  }
+  if (PostMessageW(hwnd, kWlanNotifyMsg, 0, reinterpret_cast<LPARAM>(ev)) == FALSE) {
+    delete ev;
+  }
+}
+
+LRESULT CALLBACK NotifyWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  if (msg == WM_NCCREATE) {
+    auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+    return DefWindowProcW(hwnd, msg, wp, lp);
+  }
+  if (msg == kWlanNotifyMsg) {
+    auto* ev = reinterpret_cast<WlanNotifyEvent*>(lp);
+    ControlCenterContent* self = NotifySelf(hwnd);
+    if (self != nullptr && ev != nullptr) {
+      self->HandleWlanNotify(ev->kind, ev->reason, ev->ssid);
+    }
+    delete ev;
+    return 0;
+  }
+  return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
 }  // namespace
 
+ControlCenterContent::ControlCenterContent() = default;
+
+ControlCenterContent::~ControlCenterContent() {
+  Dismissed();
+  if (notify_hwnd_ != nullptr && IsWindow(notify_hwnd_)) {
+    DestroyWindow(notify_hwnd_);
+  }
+  notify_hwnd_ = nullptr;
+}
+
+void ControlCenterContent::PresentHost() {
+  if (host_.present) {
+    host_.present();
+  }
+}
+
+void ControlCenterContent::SetAlliedHost(HWND hwnd) {
+  if (host_.set_allied) {
+    host_.set_allied(hwnd);
+  }
+}
+
+void ControlCenterContent::EnsureNotifyWindow() {
+  if (notify_hwnd_ != nullptr && IsWindow(notify_hwnd_)) {
+    return;
+  }
+  WNDCLASSEXW wc{};
+  wc.cbSize = sizeof(wc);
+  wc.lpfnWndProc = NotifyWndProc;
+  wc.hInstance = GetModuleHandleW(nullptr);
+  wc.lpszClassName = kWlanNotifyClass;
+  if (RegisterClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+    return;
+  }
+  notify_hwnd_ = CreateWindowExW(0, kWlanNotifyClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, this);
+}
+
+void ControlCenterContent::EnsureWlanNotify() {
+  EnsureNotifyWindow();
+  if (wlan_handle_ != nullptr) {
+    return;
+  }
+  wlan_handle_ = OpenWlan();
+  if (wlan_handle_ == nullptr || notify_hwnd_ == nullptr) {
+    return;
+  }
+  WlanRegisterNotification(wlan_handle_, WLAN_NOTIFICATION_SOURCE_ACM | WLAN_NOTIFICATION_SOURCE_MSM, TRUE,
+                           OnWlanNotify, notify_hwnd_, nullptr, nullptr);
+}
+
+void ControlCenterContent::StopWlanNotify() {
+  if (wlan_handle_ == nullptr) {
+    return;
+  }
+  WlanRegisterNotification(wlan_handle_, WLAN_NOTIFICATION_SOURCE_NONE, TRUE, nullptr, nullptr, nullptr, nullptr);
+  WlanCloseHandle(wlan_handle_, nullptr);
+  wlan_handle_ = nullptr;
+}
+
+HANDLE ControlCenterContent::WlanHandle() {
+  if (wlan_handle_ != nullptr) {
+    return wlan_handle_;
+  }
+  return OpenWlan();
+}
+
+void ControlCenterContent::ReleaseWlan(HANDLE handle) {
+  if (handle != nullptr && handle != wlan_handle_) {
+    WlanCloseHandle(handle, nullptr);
+  }
+}
+
+void ControlCenterContent::QueryWifiRadio(HANDLE handle) {
+  if (handle == nullptr || !wifi_iface_ok_) {
+    return;
+  }
+  DWORD size = 0;
+  PWLAN_RADIO_STATE cur = nullptr;
+  if (WlanQueryInterface(handle, &wifi_iface_, wlan_intf_opcode_radio_state, nullptr, &size,
+                         reinterpret_cast<PVOID*>(&cur), nullptr) != ERROR_SUCCESS ||
+      cur == nullptr) {
+    return;
+  }
+  bool hw_on = false;
+  bool sw_on = false;
+  const DWORD n = cur->dwNumberOfPhys;
+  for (DWORD i = 0; i < n && i < kMaxPhyIndex; ++i) {
+    if (cur->PhyRadioState[i].dot11HardwareRadioState != dot11_radio_state_off) {
+      hw_on = true;
+    }
+    if (cur->PhyRadioState[i].dot11SoftwareRadioState != dot11_radio_state_off) {
+      sw_on = true;
+    }
+  }
+  wifi_hw_radio_on_ = n == 0 ? true : hw_on;
+  wifi_radio_on_ = wifi_hw_radio_on_ && sw_on;
+  static bool logged_hw = false;
+  if (!logged_hw) {
+    logged_hw = true;
+    const DWORD hw0 = n > 0 ? static_cast<DWORD>(cur->PhyRadioState[0].dot11HardwareRadioState) : 0;
+    Log(L"cc", L"wifi hardware radio=%d phys=%lu phy0=%lu", wifi_hw_radio_on_ ? 1 : 0, static_cast<unsigned long>(n),
+        static_cast<unsigned long>(hw0));
+  }
+  WlanFreeMemory(cur);
+}
+
+void ControlCenterContent::SetWifiRadio(bool on) {
+  HANDLE handle = WlanHandle();
+  if (handle == nullptr || !wifi_iface_ok_) {
+    ReleaseWlan(handle);
+    return;
+  }
+  DWORD size = 0;
+  PWLAN_RADIO_STATE cur = nullptr;
+  const DWORD qerr = WlanQueryInterface(handle, &wifi_iface_, wlan_intf_opcode_radio_state, nullptr, &size,
+                                        reinterpret_cast<PVOID*>(&cur), nullptr);
+  if (qerr != ERROR_SUCCESS || cur == nullptr) {
+    Log(L"cc", L"wifi radio query err=%lu", static_cast<unsigned long>(qerr));
+    ReleaseWlan(handle);
+    return;
+  }
+  const DWORD n = cur->dwNumberOfPhys;
+  bool hw_on = false;
+  for (DWORD i = 0; i < n && i < kMaxPhyIndex; ++i) {
+    if (cur->PhyRadioState[i].dot11HardwareRadioState != dot11_radio_state_off) {
+      hw_on = true;
+    }
+  }
+  wifi_hw_radio_on_ = n == 0 ? true : hw_on;
+  if (!wifi_hw_radio_on_) {
+    Log(L"cc", L"wifi radio hardware off phys=%lu", static_cast<unsigned long>(n));
+    WlanFreeMemory(cur);
+    ReleaseWlan(handle);
+    return;
+  }
+  const DOT11_RADIO_STATE want = on ? dot11_radio_state_on : dot11_radio_state_off;
+  DWORD last_err = ERROR_SUCCESS;
+  DWORD last_idx = 0;
+  for (DWORD i = 0; i < n && i < kMaxPhyIndex; ++i) {
+    WLAN_PHY_RADIO_STATE phy{};
+    phy.dwPhyIndex = cur->PhyRadioState[i].dwPhyIndex;
+    phy.dot11SoftwareRadioState = want;
+    last_idx = phy.dwPhyIndex;
+    last_err = WlanSetInterface(handle, &wifi_iface_, wlan_intf_opcode_radio_state, sizeof(phy), &phy, nullptr);
+    Log(L"cc", L"wifi radio set %d phys=%lu idx=%lu err=%lu", on ? 1 : 0, static_cast<unsigned long>(n),
+        static_cast<unsigned long>(last_idx), static_cast<unsigned long>(last_err));
+  }
+  WlanFreeMemory(cur);
+  if (last_err == ERROR_SUCCESS) {
+    wifi_radio_on_ = on;
+  }
+  list_due_ = GetTickCount64() + kRadioRefreshMs;
+  ReleaseWlan(handle);
+}
+
+void ControlCenterContent::ConnectWifiProfile(const std::wstring& ssid) {
+  HANDLE handle = WlanHandle();
+  if (handle == nullptr || !wifi_iface_ok_) {
+    ReleaseWlan(handle);
+    return;
+  }
+  connecting_ssid_ = ssid;
+  WLAN_CONNECTION_PARAMETERS params{};
+  params.wlanConnectionMode = wlan_connection_mode_profile;
+  params.strProfile = ssid.c_str();
+  params.dot11BssType = dot11_BSS_type_infrastructure;
+  const DWORD err = WlanConnect(handle, &wifi_iface_, &params, nullptr);
+  Log(L"cc", L"wifi connect %s err=%lu", ssid.c_str(), static_cast<unsigned long>(err));
+  ReleaseWlan(handle);
+  list_due_ = GetTickCount64() + kRadioRefreshMs;
+}
+
+void ControlCenterContent::ConnectWifi(const WifiNetwork& net) {
+  if (net.connected) {
+    return;
+  }
+  if (net.has_profile) {
+    ConnectWifiProfile(net.ssid);
+    return;
+  }
+  if (net.kind == WifiKind::kOpen) {
+    HANDLE handle = WlanHandle();
+    if (handle == nullptr || !wifi_iface_ok_) {
+      ReleaseWlan(handle);
+      return;
+    }
+    DOT11_SSID ssid{};
+    const std::string utf8 = WideToUtf8Bytes(net.ssid);
+    ssid.uSSIDLength = (std::min)(static_cast<ULONG>(utf8.size()), static_cast<ULONG>(DOT11_SSID_MAX_LENGTH));
+    if (ssid.uSSIDLength > 0) {
+      memcpy(ssid.ucSSID, utf8.data(), ssid.uSSIDLength);
+    }
+    connecting_ssid_ = net.ssid;
+    WLAN_CONNECTION_PARAMETERS params{};
+    params.wlanConnectionMode = wlan_connection_mode_discovery_unsecure;
+    params.pDot11Ssid = &ssid;
+    params.dot11BssType = dot11_BSS_type_infrastructure;
+    const DWORD err = WlanConnect(handle, &wifi_iface_, &params, nullptr);
+    Log(L"cc", L"wifi connect %s err=%lu", net.ssid.c_str(), static_cast<unsigned long>(err));
+    ReleaseWlan(handle);
+    list_due_ = GetTickCount64() + kRadioRefreshMs;
+    return;
+  }
+}
+
+void ControlCenterContent::FallbackWifi(const WifiNetwork& net, const wchar_t* why) {
+  Log(L"cc", L"wifi fallback ssid=%s why=%s auth=%lu cipher=%lu", net.ssid.c_str(), why != nullptr ? why : L"",
+      static_cast<unsigned long>(net.auth), static_cast<unsigned long>(net.cipher));
+  OpenSettingsPage(L"ms-availablenetworks:");
+}
+
+RECT ControlCenterContent::WifiRowScreen(int index) const {
+  RECT row{};
+  if (host_.popup_hwnd == nullptr || !IsWindow(host_.popup_hwnd)) {
+    return row;
+  }
+  for (const Hit& hit : hits_) {
+    if (hit.id >= kPageList && hit.extra == index) {
+      row = hit.rc;
+      MapWindowPoints(host_.popup_hwnd, nullptr, reinterpret_cast<POINT*>(&row), 2);
+      return row;
+    }
+  }
+  return row;
+}
+
+void ControlCenterContent::CloseWifiPassword() {
+  if (wifi_prompt_ && wifi_prompt_->visible()) {
+    wifi_prompt_->Hide();
+  }
+  SetAlliedHost(nullptr);
+  wifi_prompt_ssid_.clear();
+}
+
+void ControlCenterContent::OpenWifiPassword(int index, const std::wstring& error) {
+  if (index < 0 || index >= static_cast<int>(wifi_nets_.size())) {
+    return;
+  }
+  const RECT row = WifiRowScreen(index);
+  if (row.right <= row.left) {
+    return;
+  }
+  if (!wifi_prompt_) {
+    wifi_prompt_ = std::make_unique<WifiPasswordPrompt>();
+    wifi_prompt_->SetCallbacks([this](std::wstring password) { OnPasswordSubmit(std::move(password)); },
+                               [this]() { CloseWifiPassword(); });
+  }
+  wifi_prompt_ssid_ = wifi_nets_[static_cast<size_t>(index)].ssid;
+  UINT dpi = 96;
+  if (host_.popup_hwnd != nullptr) {
+    dpi = GetDpiForWindow(host_.popup_hwnd);
+  }
+  if (dpi == 0) {
+    dpi = 96;
+  }
+  if (!wifi_prompt_->Show(host_.popup_hwnd, row, dpi, host_.dark, error)) {
+    wifi_prompt_ssid_.clear();
+    return;
+  }
+  SetAlliedHost(wifi_prompt_->hwnd());
+  ShowWindow(wifi_prompt_->hwnd(), SW_SHOW);
+  SetWindowPos(wifi_prompt_->hwnd(), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+  wifi_prompt_->FocusEdit();
+}
+
+void ControlCenterContent::OnPasswordSubmit(std::wstring password) {
+  WifiNetwork net{};
+  bool found = false;
+  for (const WifiNetwork& row : wifi_nets_) {
+    if (row.ssid == wifi_prompt_ssid_) {
+      net = row;
+      found = true;
+      break;
+    }
+  }
+  CloseWifiPassword();
+  if (!found) {
+    WipeWide(&password);
+    return;
+  }
+  const wchar_t* auth_xml = nullptr;
+  const wchar_t* enc_xml = nullptr;
+  bool wep = false;
+  if (!MapWifiSecurity(net.auth, net.cipher, &auth_xml, &enc_xml, &wep)) {
+    WipeWide(&password);
+    FallbackWifi(net, L"cipher");
+    return;
+  }
+  HANDLE handle = WlanHandle();
+  if (handle == nullptr || !wifi_iface_ok_) {
+    WipeWide(&password);
+    ReleaseWlan(handle);
+    return;
+  }
+  std::wstring xml = BuildWifiProfileXml(net.ssid, password, auth_xml, enc_xml, wep);
+  WipeWide(&password);
+  DWORD reason = 0;
+  const DWORD set_err = WlanSetProfile(handle, &wifi_iface_, WLAN_PROFILE_USER, xml.c_str(), nullptr, TRUE, nullptr,
+                                       &reason);
+  WipeWide(&xml);
+  if (set_err != ERROR_SUCCESS || reason != WLAN_REASON_CODE_SUCCESS) {
+    const std::wstring text = ReasonText(reason != 0 ? reason : set_err);
+    Log(L"cc", L"wifi profile %s err=%lu reason=%s code=%lu", net.ssid.c_str(), static_cast<unsigned long>(set_err),
+        text.c_str(), static_cast<unsigned long>(reason));
+    ReleaseWlan(handle);
+    if (net.auth == DOT11_AUTH_ALGO_WPA3_SAE) {
+      FallbackWifi(net, L"wpa3sae");
+      return;
+    }
+    int idx = -1;
+    for (int i = 0; i < static_cast<int>(wifi_nets_.size()); ++i) {
+      if (wifi_nets_[static_cast<size_t>(i)].ssid == net.ssid) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx >= 0) {
+      OpenWifiPassword(idx, text);
+    }
+    return;
+  }
+  Log(L"cc", L"wifi profile %s err=0", net.ssid.c_str());
+  ReleaseWlan(handle);
+  ConnectWifiProfile(net.ssid);
+}
+
+void ControlCenterContent::HandleWlanNotify(int kind, DWORD reason, const std::wstring& ssid) {
+  if (kind == 1) {
+    HANDLE handle = WlanHandle();
+    QueryWifiRadio(handle);
+    ReleaseWlan(handle);
+    list_due_ = 0;
+    RefreshPageLists(true);
+    PresentHost();
+    return;
+  }
+  if (kind != 2) {
+    return;
+  }
+  const std::wstring text = ReasonText(reason);
+  Log(L"cc", L"wifi acm complete ssid=%s reason=%s code=%lu", ssid.c_str(), text.c_str(),
+      static_cast<unsigned long>(reason));
+  list_due_ = 0;
+  RefreshPageLists(true);
+  if (reason != WLAN_REASON_CODE_SUCCESS) {
+    std::wstring target = ssid.empty() ? connecting_ssid_ : ssid;
+    int idx = -1;
+    for (int i = 0; i < static_cast<int>(wifi_nets_.size()); ++i) {
+      if (wifi_nets_[static_cast<size_t>(i)].ssid == target) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx >= 0 && wifi_nets_[static_cast<size_t>(idx)].kind == WifiKind::kPersonal) {
+      OpenWifiPassword(idx, text.empty() ? std::wstring(L"연결에 실패했습니다") : text);
+    }
+  } else {
+    CloseWifiPassword();
+  }
+  connecting_ssid_.clear();
+  PresentHost();
+}
+
+void ControlCenterContent::Dismissed() {
+  CloseWifiPassword();
+  StopWlanNotify();
+  connecting_ssid_.clear();
+}
+
 void ControlCenterContent::Reset(ControlCenterHost host, ControlCenterPage page) {
+  CloseWifiPassword();
+  StopWlanNotify();
   host_ = std::move(host);
   drag_id_ = -1;
   page_ = page == ControlCenterPage::kWifi ? Page::kWifi : Page::kHome;
   show_back_ = page != ControlCenterPage::kWifi;
   slow_due_ = 0;
   list_due_ = 0;
+  wifi_scan_due_ = 0;
+  wifi_scan_wait_until_ = 0;
+  connecting_ssid_.clear();
   QuerySlowState(true);
   ApplyLive();
   if (page_ != Page::kHome) {
+    if (page_ == Page::kWifi) {
+      EnsureWlanNotify();
+    }
     RefreshPageLists(true);
   }
 }
 
-bool ControlCenterContent::ShowsWifi() const {
+bool ControlCenterContent::ShowsNetwork() const {
   return page_ == Page::kWifi;
+}
+
+int ControlCenterContent::CornerDip() const {
+  return page_ == Page::kWifi ? corner::kHeroDip : corner::kOverlayDip;
 }
 
 void ControlCenterContent::Refresh() {
@@ -371,17 +1090,16 @@ void ControlCenterContent::ApplyLive() {
   }
   wifi_on_ = live.wifi_on;
   wifi_name_ = live.wifi_name.empty() ? std::wstring(L"연결 안 됨") : live.wifi_name;
+  eth_on_ = live.eth_on;
+  eth_name_ = live.eth_name;
   if (page_ == Page::kHome) {
     wifi_radio_on_ = wifi_on_;
   }
 }
 
 int ControlCenterContent::ListCount() const {
-  if (page_ == Page::kWifi) {
-    return (std::min)(static_cast<int>(wifi_nets_.size()), kPageListMax);
-  }
   if (page_ == Page::kBluetooth) {
-    return (std::min)(static_cast<int>(bt_devices_.size()), kPageListMax);
+    return (std::min)(static_cast<int>(bt_devices_.size()), kBtListMax);
   }
   return 0;
 }
@@ -391,54 +1109,173 @@ void ControlCenterContent::RefreshPageLists(bool force) {
   if (!force && now < list_due_) {
     return;
   }
-  list_due_ = now + kSlowPeriodMs;
   if (page_ == Page::kWifi) {
-    wifi_nets_.clear();
-    wifi_iface_ok_ = false;
+    const auto commit = [this](std::vector<WifiNetwork> nets) {
+      std::vector<WifiNetwork> known;
+      std::vector<WifiNetwork> other;
+      for (const WifiNetwork& n : nets) {
+        if (n.has_profile) {
+          known.push_back(n);
+        } else {
+          other.push_back(n);
+        }
+      }
+      std::stable_partition(known.begin(), known.end(), [](const WifiNetwork& n) { return n.connected; });
+      std::stable_partition(other.begin(), other.end(), [](const WifiNetwork& n) { return n.connected; });
+      if (known.size() > static_cast<size_t>(kWifiKnownMax)) {
+        known.resize(static_cast<size_t>(kWifiKnownMax));
+      }
+      if (other.size() > static_cast<size_t>(kWifiOtherMax)) {
+        other.resize(static_cast<size_t>(kWifiOtherMax));
+      }
+      while (known.size() + other.size() > static_cast<size_t>(kWifiListTotalMax)) {
+        if (!other.empty()) {
+          other.pop_back();
+        } else if (!known.empty()) {
+          known.pop_back();
+        } else {
+          break;
+        }
+      }
+      wifi_known_n_ = static_cast<int>(known.size());
+      wifi_nets_.clear();
+      wifi_nets_.insert(wifi_nets_.end(), known.begin(), known.end());
+      wifi_nets_.insert(wifi_nets_.end(), other.begin(), other.end());
+    };
+
     HANDLE handle = OpenWlan();
     if (handle == nullptr) {
+      wifi_iface_ok_ = false;
       wifi_radio_on_ = false;
+      wifi_known_n_ = 0;
+      wifi_nets_.clear();
+      list_due_ = now + kSlowPeriodMs;
       return;
     }
     bool radio = false;
     wifi_iface_ok_ = FirstWlanIface(handle, &wifi_iface_, &radio);
     wifi_radio_on_ = radio;
-    if (wifi_iface_ok_) {
-      PWLAN_AVAILABLE_NETWORK_LIST list = nullptr;
-      if (WlanGetAvailableNetworkList(handle, &wifi_iface_, 0, nullptr, &list) == ERROR_SUCCESS && list != nullptr) {
-        for (DWORD i = 0; i < list->dwNumberOfItems; ++i) {
-          const WLAN_AVAILABLE_NETWORK& net = list->Network[i];
-          WifiNetwork row;
-          row.ssid = SsidWide(net.dot11Ssid);
-          if (row.ssid.empty()) {
-            continue;
-          }
-          row.connected = (net.dwFlags & WLAN_AVAILABLE_NETWORK_CONNECTED) != 0;
-          row.has_profile = (net.dwFlags & WLAN_AVAILABLE_NETWORK_HAS_PROFILE) != 0;
-          row.secure = net.bSecurityEnabled != FALSE;
-          bool seen = false;
-          for (WifiNetwork& exist : wifi_nets_) {
-            if (exist.ssid == row.ssid) {
-              exist.connected = exist.connected || row.connected;
-              exist.has_profile = exist.has_profile || row.has_profile;
-              seen = true;
-              break;
-            }
-          }
-          if (!seen) {
-            wifi_nets_.push_back(std::move(row));
-          }
-        }
-        WlanFreeMemory(list);
+    QueryWifiRadio(handle);
+    if (!wifi_iface_ok_ || !wifi_radio_on_) {
+      wifi_known_n_ = 0;
+      wifi_nets_.clear();
+      CloseWifiPassword();
+      WlanCloseHandle(handle, nullptr);
+      list_due_ = now + kSlowPeriodMs;
+      return;
+    }
+
+    if (force || now >= wifi_scan_due_) {
+      const DWORD scan_err = WlanScan(handle, &wifi_iface_, nullptr, nullptr, nullptr);
+      static bool logged_scan = false;
+      if (!logged_scan) {
+        logged_scan = true;
+        Log(L"cc", L"wifi scan err=%lu", static_cast<unsigned long>(scan_err));
+      }
+      if (scan_err == ERROR_SUCCESS || scan_err == ERROR_BUSY) {
+        wifi_scan_due_ = now + kWifiScanPeriodMs;
+        wifi_scan_wait_until_ = now + kWifiScanWaitMs;
       }
     }
-    WlanCloseHandle(handle, nullptr);
-    std::stable_partition(wifi_nets_.begin(), wifi_nets_.end(), [](const WifiNetwork& n) { return n.connected; });
-    if (wifi_nets_.size() > static_cast<size_t>(kPageListMax)) {
-      wifi_nets_.resize(static_cast<size_t>(kPageListMax));
+
+    std::vector<WifiNetwork> fresh;
+    PWLAN_AVAILABLE_NETWORK_LIST list = nullptr;
+    const DWORD list_err = WlanGetAvailableNetworkList(handle, &wifi_iface_, 0, nullptr, &list);
+    static bool logged_list = false;
+    if (!logged_list && list_err != ERROR_SUCCESS) {
+      logged_list = true;
+      Log(L"cc", L"wifi list err=%lu", static_cast<unsigned long>(list_err));
     }
+    if (list_err == ERROR_SUCCESS && list != nullptr) {
+      for (DWORD i = 0; i < list->dwNumberOfItems; ++i) {
+        const WLAN_AVAILABLE_NETWORK& net = list->Network[i];
+        WifiNetwork row;
+        row.ssid = SsidWide(net.dot11Ssid);
+        if (row.ssid.empty()) {
+          continue;
+        }
+        row.connected = (net.dwFlags & WLAN_AVAILABLE_NETWORK_CONNECTED) != 0;
+        row.has_profile = (net.dwFlags & WLAN_AVAILABLE_NETWORK_HAS_PROFILE) != 0;
+        row.secure = net.bSecurityEnabled != FALSE;
+        row.auth = static_cast<DWORD>(net.dot11DefaultAuthAlgorithm);
+        row.cipher = static_cast<DWORD>(net.dot11DefaultCipherAlgorithm);
+        row.kind = ClassifyWifiAuth(row.auth);
+        bool seen = false;
+        for (WifiNetwork& exist : fresh) {
+          if (exist.ssid == row.ssid) {
+            exist.connected = exist.connected || row.connected;
+            exist.has_profile = exist.has_profile || row.has_profile;
+            exist.secure = exist.secure || row.secure;
+            if (row.has_profile || row.connected || exist.auth == 0) {
+              exist.auth = row.auth;
+              exist.cipher = row.cipher;
+              exist.kind = row.kind;
+            }
+            seen = true;
+            break;
+          }
+        }
+        if (!seen) {
+          fresh.push_back(std::move(row));
+        }
+      }
+      WlanFreeMemory(list);
+    }
+    WlanCloseHandle(handle, nullptr);
+
+    const bool scan_pending = now < wifi_scan_wait_until_;
+    if (scan_pending && !wifi_nets_.empty() && fresh.size() < wifi_nets_.size()) {
+      std::vector<WifiNetwork> merged = wifi_nets_;
+      for (WifiNetwork& exist : merged) {
+        exist.connected = false;
+      }
+      for (const WifiNetwork& row : fresh) {
+        bool seen = false;
+        for (WifiNetwork& exist : merged) {
+          if (exist.ssid == row.ssid) {
+            exist.connected = row.connected;
+            exist.has_profile = exist.has_profile || row.has_profile;
+            exist.secure = row.secure;
+            exist.auth = row.auth;
+            exist.cipher = row.cipher;
+            exist.kind = row.kind;
+            seen = true;
+            break;
+          }
+        }
+        if (!seen) {
+          merged.push_back(row);
+        }
+      }
+      commit(std::move(merged));
+    } else {
+      commit(std::move(fresh));
+    }
+    static std::vector<std::wstring> logged_kinds;
+    for (const WifiNetwork& n : wifi_nets_) {
+      bool seen = false;
+      for (const std::wstring& s : logged_kinds) {
+        if (s == n.ssid) {
+          seen = true;
+          break;
+        }
+      }
+      if (seen) {
+        continue;
+      }
+      logged_kinds.push_back(n.ssid);
+      Log(L"cc", L"wifi kind ssid=%s auth=%lu kind=%s", n.ssid.c_str(), static_cast<unsigned long>(n.auth),
+          WifiKindName(n.kind));
+    }
+    static int logged_n = -1;
+    if (logged_n != static_cast<int>(wifi_nets_.size())) {
+      logged_n = static_cast<int>(wifi_nets_.size());
+      Log(L"cc", L"wifi list n=%d known=%d pending=%d", logged_n, wifi_known_n_, scan_pending ? 1 : 0);
+    }
+    list_due_ = scan_pending ? now : now + kSlowPeriodMs;
     return;
   }
+  list_due_ = now + kSlowPeriodMs;
   if (page_ != Page::kBluetooth) {
     return;
   }
@@ -482,12 +1319,24 @@ void ControlCenterContent::RefreshPageLists(bool force) {
   }
   BluetoothFindRadioClose(radio_find);
   std::stable_partition(bt_devices_.begin(), bt_devices_.end(), [](const BtDevice& d) { return d.connected; });
-  if (bt_devices_.size() > static_cast<size_t>(kPageListMax)) {
-    bt_devices_.resize(static_cast<size_t>(kPageListMax));
+  if (bt_devices_.size() > static_cast<size_t>(kBtListMax)) {
+    bt_devices_.resize(static_cast<size_t>(kBtListMax));
   }
 }
 
+int ControlCenterContent::WidthDip() const {
+  return page_ == Page::kWifi ? kNetPageWidthDip : kCcWidthDip;
+}
+
 int ControlCenterContent::HeightDip() const {
+  if (page_ == Page::kWifi) {
+    const int other_n = (std::max)(0, static_cast<int>(wifi_nets_.size()) - wifi_known_n_);
+    return MakeNetworkPage(eth_on_, wifi_iface_ok_, wifi_radio_on_, wifi_known_n_, other_n).height;
+  }
+  if (page_ == Page::kBluetooth) {
+    const int n = (std::max)(ListCount(), 1);
+    return kPanelPadDip + kPageHeaderHDip + 8 + n * kPageRowHDip + kPageFooterHDip + kPanelPadDip;
+  }
   int h = kPanelPadDip + kConnectHDip + kSectionGapDip + kQuickHDip + kSectionGapDip;
   if (brightness_ok_) {
     h += kSliderCardHDip + kSectionGapDip;
@@ -501,14 +1350,17 @@ void ControlCenterContent::EnsureFormats(UINT dpi) {
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
                         reinterpret_cast<IUnknown**>(dwrite_.ReleaseAndGetAddressOf()));
   }
-  if (dwrite_ && format_dpi_ == dpi && fluent17_ && fluent15_ && fluent14_ && semibold13_ && regular12_ &&
-      regular11_) {
+  if (dwrite_ && format_dpi_ == dpi && fluent17_ && fluent15_ && fluent14_ && semibold14_ && semibold13_ &&
+      regular14_ && regular13_ && regular12_ && regular11_) {
     return;
   }
   fluent17_.Reset();
   fluent15_.Reset();
   fluent14_.Reset();
+  semibold14_.Reset();
   semibold13_.Reset();
+  regular14_.Reset();
+  regular13_.Reset();
   regular12_.Reset();
   regular11_.Reset();
   center11_.Reset();
@@ -520,7 +1372,10 @@ void ControlCenterContent::EnsureFormats(UINT dpi) {
   MakeFormat(dwrite_.Get(), kFluentFont, DWRITE_FONT_WEIGHT_NORMAL, 17.0f * s, DWRITE_TEXT_ALIGNMENT_CENTER, fluent17_);
   MakeFormat(dwrite_.Get(), kFluentFont, DWRITE_FONT_WEIGHT_NORMAL, 15.0f * s, DWRITE_TEXT_ALIGNMENT_CENTER, fluent15_);
   MakeFormat(dwrite_.Get(), kFluentFont, DWRITE_FONT_WEIGHT_NORMAL, 14.0f * s, DWRITE_TEXT_ALIGNMENT_CENTER, fluent14_);
+  MakeFormat(dwrite_.Get(), kUiFont, DWRITE_FONT_WEIGHT_SEMI_BOLD, 14.0f * s, DWRITE_TEXT_ALIGNMENT_LEADING, semibold14_);
   MakeFormat(dwrite_.Get(), kUiFont, DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.0f * s, DWRITE_TEXT_ALIGNMENT_LEADING, semibold13_);
+  MakeFormat(dwrite_.Get(), kUiFont, DWRITE_FONT_WEIGHT_NORMAL, 14.0f * s, DWRITE_TEXT_ALIGNMENT_LEADING, regular14_);
+  MakeFormat(dwrite_.Get(), kUiFont, DWRITE_FONT_WEIGHT_NORMAL, 13.0f * s, DWRITE_TEXT_ALIGNMENT_LEADING, regular13_);
   MakeFormat(dwrite_.Get(), kUiFont, DWRITE_FONT_WEIGHT_NORMAL, 12.0f * s, DWRITE_TEXT_ALIGNMENT_LEADING, regular12_);
   MakeFormat(dwrite_.Get(), kUiFont, DWRITE_FONT_WEIGHT_NORMAL, 11.0f * s, DWRITE_TEXT_ALIGNMENT_LEADING, regular11_);
   MakeFormat(dwrite_.Get(), kUiFont, DWRITE_FONT_WEIGHT_NORMAL, 11.0f * s, DWRITE_TEXT_ALIGNMENT_CENTER, center11_);
@@ -579,7 +1434,37 @@ void ControlCenterContent::BuildHits(UINT dpi) {
     hit.extra = extra;
     hits_.push_back(hit);
   };
-  if (page_ != Page::kHome) {
+  if (page_ == Page::kWifi) {
+    const int other_n = (std::max)(0, static_cast<int>(wifi_nets_.size()) - wifi_known_n_);
+    const NetworkPageMetrics m = MakeNetworkPage(eth_on_, wifi_iface_ok_, wifi_radio_on_, wifi_known_n_, other_n);
+    const int width = DipToPx(kNetPageWidthDip, dpi);
+    const int inset = DipToPx(kNetInsetDip, dpi);
+    if (show_back_) {
+      add(kPageBack, RECT{inset, DipToPx(m.header_y, dpi), inset + DipToPx(kNetBackWDip, dpi),
+                          DipToPx(m.header_y + kNetHeaderHDip, dpi)});
+    }
+    if (m.show_toggle) {
+      add(kPageToggle, RECT{width - inset - DipToPx(kNetToggleWDip, dpi), DipToPx(m.header_y, dpi), width - inset,
+                            DipToPx(m.header_y + kNetToggleHDip, dpi)});
+    }
+    auto add_rows = [&](int y0, int n, int extra0) {
+      for (int i = 0; i < n; ++i) {
+        const int top = DipToPx(y0 + i * kNetRowHDip, dpi);
+        add(kPageList + extra0 + i,
+            RECT{inset, top, width - inset, top + DipToPx(kNetRowHDip, dpi)}, extra0 + i);
+      }
+    };
+    add_rows(m.known_list_y, m.known_n, 0);
+    add_rows(m.other_list_y, m.other_n, m.known_n);
+    add(kPageNetworkSettings,
+        RECT{inset, DipToPx(m.net_settings_y, dpi), width - inset,
+             DipToPx(m.net_settings_y + kNetSettingsHDip, dpi)});
+    add(kPageWifiSettings,
+        RECT{inset, DipToPx(m.wifi_settings_y, dpi), width - inset,
+             DipToPx(m.wifi_settings_y + kNetSettingsHDip, dpi)});
+    return;
+  }
+  if (page_ == Page::kBluetooth) {
     const int pad = DipToPx(kPanelPadDip, dpi);
     const int width = DipToPx(kCcWidthDip, dpi);
     if (show_back_) {
@@ -593,12 +1478,6 @@ void ControlCenterContent::BuildHits(UINT dpi) {
     for (int i = 0; i < n; ++i) {
       const RECT row{pad, list_top + i * row_h, width - pad, list_top + (i + 1) * row_h};
       add(kPageList + i, row, i);
-      if (page_ == Page::kWifi && i < static_cast<int>(wifi_nets_.size()) && wifi_nets_[static_cast<size_t>(i)].connected) {
-        add(kPageAction + i,
-            RECT{row.right - DipToPx(88, dpi), row.bottom - DipToPx(28, dpi), row.right - DipToPx(8, dpi),
-                 row.bottom - DipToPx(6, dpi)},
-            i);
-      }
     }
     add(kPageMore, RECT{pad, DipToPx(HeightDip() - kPanelPadDip - kPageFooterHDip, dpi), width - pad,
                         DipToPx(HeightDip() - kPanelPadDip, dpi)});
@@ -626,7 +1505,7 @@ void ControlCenterContent::BuildHits(UINT dpi) {
 SIZE ControlCenterContent::Measure(UINT dpi) {
   EnsureFormats(dpi);
   BuildHits(dpi);
-  return SIZE{DipToPx(kCcWidthDip, dpi), DipToPx(HeightDip(), dpi)};
+  return SIZE{DipToPx(WidthDip(), dpi), DipToPx(HeightDip(), dpi)};
 }
 
 void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_index) {
@@ -650,6 +1529,12 @@ void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_i
   const int hot_id = (hot_index >= 0 && hot_index < static_cast<int>(hits_.size()))
                          ? hits_[static_cast<size_t>(hot_index)].id
                          : -1;
+  if (page_ == Page::kWifi) {
+    RenderNetworkPage(target, dpi, hot_id, brush.Get());
+    QueryPerformanceCounter(&t1);
+    Log(L"cc", L"render %.2fms rows=%d page=1", QpcMs(t0, t1), static_cast<int>(hits_.size()));
+    return;
+  }
   if (page_ != Page::kHome) {
     RenderListPage(target, dpi, hot_id, brush.Get());
     QueryPerformanceCounter(&t1);
@@ -801,6 +1686,173 @@ void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_i
   Log(L"cc", L"render %.2fms rows=%d", QpcMs(t0, t1), static_cast<int>(hits_.size()));
 }
 
+void ControlCenterContent::RenderNetworkPage(ID2D1RenderTarget* target, UINT dpi, int hot_id,
+                                             ID2D1SolidColorBrush* brush) {
+  if (target == nullptr || brush == nullptr) {
+    return;
+  }
+  const bool dark = host_.dark;
+  const D2D1_COLOR_F fg = ClockTextColor(dark);
+  const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
+  const int other_n = (std::max)(0, static_cast<int>(wifi_nets_.size()) - wifi_known_n_);
+  const NetworkPageMetrics m = MakeNetworkPage(eth_on_, wifi_iface_ok_, wifi_radio_on_, wifi_known_n_, other_n);
+  const int width = DipToPx(kNetPageWidthDip, dpi);
+  const int inset = DipToPx(kNetInsetDip, dpi);
+  auto fill_hover = [&](const RECT& rc) {
+    brush->SetColor(MenuItemHoverFill(dark, false));
+    const float hover_r = corner::HoverPx(static_cast<float>(rc.bottom - rc.top), dpi);
+    const D2D1_ROUNDED_RECT rr{D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
+                                           static_cast<float>(rc.right), static_cast<float>(rc.bottom)),
+                               hover_r, hover_r};
+    target->FillRoundedRectangle(rr, brush);
+  };
+  auto draw_div = [&](int y_dip) {
+    const float y = DipToPxF(static_cast<float>(y_dip), dpi);
+    const float h = DipToPxF(static_cast<float>(kNetDivHDip), dpi);
+    brush->SetColor(ScaleAlpha(fg, 0.10f));
+    target->FillRectangle(D2D1::RectF(static_cast<float>(inset), y, static_cast<float>(width - inset), y + h), brush);
+  };
+  auto text_rect = [&](int y, int h, int left, int right) {
+    return D2D1::RectF(static_cast<float>(left), static_cast<float>(DipToPx(y, dpi)), static_cast<float>(right),
+                       static_cast<float>(DipToPx(y + h, dpi)));
+  };
+
+  if (show_back_) {
+    const RECT back{inset, DipToPx(m.header_y, dpi), inset + DipToPx(kNetBackWDip, dpi),
+                    DipToPx(m.header_y + kNetHeaderHDip, dpi)};
+    if (hot_id == kPageBack) {
+      fill_hover(back);
+    }
+    brush->SetColor(fg);
+    if (dwrite_ && fluent17_) {
+      DrawGlyph(target, dwrite_.Get(), fluent17_.Get(), brush,
+                D2D1::RectF(static_cast<float>(back.left), static_cast<float>(back.top),
+                            static_cast<float>(back.right), static_cast<float>(back.bottom)),
+                kBackGlyph);
+    }
+  }
+
+  const float title_l = static_cast<float>(inset + (show_back_ ? DipToPx(kNetBackWDip + 4, dpi) : 0));
+  const float title_r = static_cast<float>(width - inset - (m.show_toggle ? DipToPx(kNetToggleWDip + 8, dpi) : 0));
+  brush->SetColor(fg);
+  DrawTrimmed(target, dwrite_.Get(), semibold14_ ? semibold14_.Get() : semibold13_.Get(), brush,
+              D2D1::RectF(title_l, static_cast<float>(DipToPx(m.header_y, dpi)), title_r,
+                          static_cast<float>(DipToPx(m.header_y + kNetHeaderHDip, dpi))),
+              L"Wi-Fi");
+
+  if (m.show_toggle) {
+    const RECT toggle{width - inset - DipToPx(kNetToggleWDip, dpi), DipToPx(m.header_y, dpi), width - inset,
+                      DipToPx(m.header_y + kNetToggleHDip, dpi)};
+    const float th = static_cast<float>(toggle.bottom - toggle.top);
+    const float toggle_pill = corner::PillPx(th);
+    D2D1_COLOR_F track = wifi_radio_on_ ? AccentFillColor(dark) : BadgeOffFill(dark);
+    D2D1_COLOR_F knob_color = AccentOnColor(dark);
+    if (!wifi_hw_radio_on_) {
+      track = ScaleAlpha(track, 0.40f);
+      knob_color = ScaleAlpha(knob_color, 0.40f);
+    }
+    brush->SetColor(track);
+    target->FillRoundedRectangle(
+        D2D1_ROUNDED_RECT{D2D1::RectF(static_cast<float>(toggle.left), static_cast<float>(toggle.top),
+                                      static_cast<float>(toggle.right), static_cast<float>(toggle.bottom)),
+                          toggle_pill, toggle_pill},
+        brush);
+    const float knob = DipToPxF(kNetKnobDip, dpi);
+    const float knob_inset = DipToPxF(kNetKnobInsetDip, dpi);
+    const float knob_x = wifi_radio_on_ ? static_cast<float>(toggle.right) - knob_inset - knob
+                                        : static_cast<float>(toggle.left) + knob_inset;
+    brush->SetColor(knob_color);
+    target->FillEllipse(
+        D2D1::Ellipse(D2D1::Point2F(knob_x + knob * 0.5f, static_cast<float>(toggle.top) + th * 0.5f), knob * 0.5f,
+                      knob * 0.5f),
+        brush);
+  }
+
+  if (m.show_eth) {
+    std::wstring eth = L"이더넷: ";
+    eth += eth_name_.empty() ? std::wstring(L"연결됨") : eth_name_;
+    brush->SetColor(muted);
+    DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush,
+                text_rect(m.eth_y, kNetEthHDip, inset, width - inset), eth);
+  }
+
+  draw_div(m.div1_y);
+
+  if (m.empty_text != nullptr) {
+    brush->SetColor(muted);
+    DrawTrimmed(target, dwrite_.Get(), regular14_ ? regular14_.Get() : regular12_.Get(), brush,
+                text_rect(m.empty_y, kNetRowHDip, inset, width - inset), m.empty_text);
+  }
+
+  auto draw_section = [&](int header_y, const wchar_t* title, int list_y, int n, int extra0) {
+    if (header_y >= 0) {
+      brush->SetColor(muted);
+      DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush,
+                  text_rect(header_y, kNetSectionHDip, inset, width - inset), title);
+    }
+    const float circle = DipToPxF(static_cast<float>(kNetCircleDip), dpi);
+    const float glyph = circle * 0.55f;
+    const float lock_w = DipToPxF(9.0f, dpi);
+    const float lock_h = DipToPxF(12.5f, dpi);
+    const float lock_gap = DipToPxF(2.0f, dpi);
+    for (int i = 0; i < n; ++i) {
+      const int idx = extra0 + i;
+      if (idx < 0 || idx >= static_cast<int>(wifi_nets_.size())) {
+        continue;
+      }
+      const WifiNetwork& net = wifi_nets_[static_cast<size_t>(idx)];
+      const RECT row{inset, DipToPx(list_y + i * kNetRowHDip, dpi), width - inset,
+                     DipToPx(list_y + (i + 1) * kNetRowHDip, dpi)};
+      if (hot_id == kPageList + idx) {
+        fill_hover(row);
+      }
+      const float cy = static_cast<float>(row.top + row.bottom) * 0.5f;
+      const float cx = static_cast<float>(row.left) + circle * 0.5f;
+      brush->SetColor(net.connected ? AccentFillColor(dark) : BadgeOffFill(dark));
+      target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), circle * 0.5f, circle * 0.5f), brush);
+      brush->SetColor(net.connected ? AccentOnColor(dark) : fg);
+      if (dwrite_ && fluent14_) {
+        DrawGlyphInked(target, dwrite_.Get(), fluent14_.Get(), brush,
+                       D2D1::RectF(cx - glyph * 0.5f, cy - glyph * 0.5f, cx + glyph * 0.5f, cy + glyph * 0.5f),
+                       kWifiGlyph);
+      }
+      const float text_l = static_cast<float>(DipToPx(49, dpi));
+      float text_r = static_cast<float>(row.right);
+      if (net.secure) {
+        const float lock_r = static_cast<float>(row.right) - lock_gap;
+        const float lock_l = lock_r - lock_w;
+        brush->SetColor(muted);
+        if (dwrite_ && fluent14_) {
+          DrawGlyphInked(target, dwrite_.Get(), fluent14_.Get(), brush,
+                         D2D1::RectF(lock_l, cy - lock_h * 0.5f, lock_r, cy + lock_h * 0.5f), kLockGlyph);
+        }
+        text_r = lock_l - DipToPxF(8.0f, dpi);
+      }
+      brush->SetColor(fg);
+      DrawTrimmed(target, dwrite_.Get(), regular14_ ? regular14_.Get() : regular12_.Get(), brush,
+                  D2D1::RectF(text_l, static_cast<float>(row.top), text_r, static_cast<float>(row.bottom)), net.ssid);
+    }
+  };
+  draw_section(m.known_header_y, L"알려진 네트워크", m.known_list_y, m.known_n, 0);
+  draw_section(m.other_header_y, L"다른 네트워크", m.other_list_y, m.other_n, m.known_n);
+
+  draw_div(m.div2_y);
+
+  auto draw_settings = [&](int y, int id, const wchar_t* label) {
+    const RECT row{inset, DipToPx(y, dpi), width - inset, DipToPx(y + kNetSettingsHDip, dpi)};
+    if (hot_id == id) {
+      fill_hover(row);
+    }
+    brush->SetColor(fg);
+    DrawTrimmed(target, dwrite_.Get(), regular13_ ? regular13_.Get() : regular12_.Get(), brush,
+                D2D1::RectF(static_cast<float>(row.left), static_cast<float>(row.top),
+                            static_cast<float>(row.right), static_cast<float>(row.bottom)),
+                label);
+  };
+  draw_settings(m.net_settings_y, kPageNetworkSettings, L"네트워크 설정\u2026");
+  draw_settings(m.wifi_settings_y, kPageWifiSettings, L"Wi-Fi 설정\u2026");
+}
+
 void ControlCenterContent::RenderListPage(ID2D1RenderTarget* target, UINT dpi, int hot_id,
                                           ID2D1SolidColorBrush* brush) {
   if (target == nullptr || brush == nullptr) {
@@ -828,8 +1880,8 @@ void ControlCenterContent::RenderListPage(ID2D1RenderTarget* target, UINT dpi, i
     target->FillRoundedRectangle(rr, brush);
   };
 
-  const bool on = page_ == Page::kWifi ? wifi_radio_on_ : bt_on_;
-  const wchar_t* title = page_ == Page::kWifi ? L"Wi-Fi" : L"Bluetooth";
+  const bool on = bt_on_;
+  const wchar_t* title = L"Bluetooth";
   if (show_back_) {
     if (hot_id == kPageBack) {
       fill_hover(RECT{pad, pad, pad + DipToPx(32, dpi), pad + DipToPx(kPageHeaderHDip, dpi)},
@@ -881,24 +1933,17 @@ void ControlCenterContent::RenderListPage(ID2D1RenderTarget* target, UINT dpi, i
     DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush,
                 D2D1::RectF(static_cast<float>(pad), static_cast<float>(list_top), static_cast<float>(width - pad),
                             static_cast<float>(list_top + row_h)),
-                page_ == Page::kWifi ? L"사용 가능한 네트워크가 없습니다" : L"장치가 없습니다");
+                L"장치가 없습니다");
   }
   for (int i = 0; i < n; ++i) {
     const RECT row{pad, list_top + i * row_h, width - pad, list_top + (i + 1) * row_h};
-    if (hot_id == kPageList + i || hot_id == kPageAction + i) {
+    if (hot_id == kPageList + i) {
       fill_round(row, MenuItemHoverFill(dark, false));
     }
     std::wstring name;
     std::wstring sub;
     bool connected = false;
-    bool secure = false;
-    if (page_ == Page::kWifi) {
-      const WifiNetwork& net = wifi_nets_[static_cast<size_t>(i)];
-      name = net.ssid;
-      connected = net.connected;
-      secure = net.secure;
-      sub = connected ? (secure ? L"연결됨, 보안" : L"연결됨") : (secure ? L"보안" : L"개방");
-    } else {
+    if (i < static_cast<int>(bt_devices_.size())) {
       const BtDevice& dev = bt_devices_[static_cast<size_t>(i)];
       name = dev.name;
       connected = dev.connected;
@@ -918,18 +1963,10 @@ void ControlCenterContent::RenderListPage(ID2D1RenderTarget* target, UINT dpi, i
     if (dwrite_ && fluent14_) {
       DrawGlyph(target, dwrite_.Get(), fluent14_.Get(), brush,
                 D2D1::RectF(gx, gy, gx + glyph_box, gy + glyph_box),
-                page_ == Page::kWifi ? kWifiGlyph : kBtGlyph);
-    }
-    if (page_ == Page::kWifi && secure && dwrite_ && fluent14_) {
-      brush->SetColor(muted);
-      DrawGlyph(target, dwrite_.Get(), fluent14_.Get(), brush,
-                D2D1::RectF(gx + glyph_box - static_cast<float>(DipToPx(6, dpi)),
-                            gy + glyph_box - static_cast<float>(DipToPx(8, dpi)), gx + glyph_box + static_cast<float>(DipToPx(6, dpi)),
-                            gy + glyph_box + static_cast<float>(DipToPx(4, dpi))),
-                kLockGlyph);
+                kBtGlyph);
     }
     const float text_l = static_cast<float>(row.left + DipToPx(44, dpi));
-    const float text_r = static_cast<float>(row.right - DipToPx(connected && page_ == Page::kWifi ? 96 : 12, dpi));
+    const float text_r = static_cast<float>(row.right - DipToPx(12, dpi));
     const float mid = static_cast<float>(row.top + row.bottom) * 0.5f;
     brush->SetColor(fg);
     DrawTrimmed(target, dwrite_.Get(), semibold13_.Get(), brush,
@@ -937,16 +1974,6 @@ void ControlCenterContent::RenderListPage(ID2D1RenderTarget* target, UINT dpi, i
     brush->SetColor(muted);
     DrawTrimmed(target, dwrite_.Get(), regular11_.Get(), brush,
                 D2D1::RectF(text_l, mid, text_r, static_cast<float>(row.bottom - DipToPx(6, dpi))), sub);
-    if (connected && page_ == Page::kWifi) {
-      const RECT action{row.right - DipToPx(88, dpi), row.bottom - DipToPx(28, dpi), row.right - DipToPx(8, dpi),
-                        row.bottom - DipToPx(6, dpi)};
-      fill_round(action, BadgeOffFill(dark));
-      brush->SetColor(fg);
-      DrawTrimmed(target, dwrite_.Get(), center11_ ? center11_.Get() : regular11_.Get(), brush,
-                  D2D1::RectF(static_cast<float>(action.left), static_cast<float>(action.top),
-                              static_cast<float>(action.right), static_cast<float>(action.bottom)),
-                  L"연결 끊기");
-    }
   }
 
   const RECT more{pad, DipToPx(HeightDip() - kPanelPadDip - kPageFooterHDip, dpi), width - pad,
@@ -958,7 +1985,7 @@ void ControlCenterContent::RenderListPage(ID2D1RenderTarget* target, UINT dpi, i
   DrawTrimmed(target, dwrite_.Get(), regular12_.Get(), brush,
               D2D1::RectF(static_cast<float>(more.left + DipToPx(4, dpi)), static_cast<float>(more.top),
                           static_cast<float>(more.right), static_cast<float>(more.bottom)),
-              page_ == Page::kWifi ? L"추가 Wi-Fi 설정" : L"추가 Bluetooth 설정");
+              L"추가 Bluetooth 설정");
 }
 
 int ControlCenterContent::HitTest(POINT client, UINT dpi) const {
@@ -980,32 +2007,27 @@ void ControlCenterContent::Invoke(int index) {
     case kWifi:
       page_ = Page::kWifi;
       list_due_ = 0;
+      EnsureWlanNotify();
       RefreshPageLists(true);
       break;
     case kBluetooth:
       page_ = Page::kBluetooth;
       list_due_ = 0;
+      CloseWifiPassword();
+      StopWlanNotify();
       RefreshPageLists(true);
       break;
     case kPageBack:
+      CloseWifiPassword();
+      StopWlanNotify();
       page_ = Page::kHome;
       break;
     case kPageToggle:
       if (page_ == Page::kWifi) {
-        HANDLE handle = OpenWlan();
-        if (handle != nullptr && wifi_iface_ok_) {
-          WLAN_PHY_RADIO_STATE phy{};
-          phy.dot11SoftwareRadioState = wifi_radio_on_ ? dot11_radio_state_off : dot11_radio_state_on;
-          WLAN_RADIO_STATE state{};
-          state.dwNumberOfPhys = 1;
-          state.PhyRadioState[0] = phy;
-          const DWORD err = WlanSetInterface(handle, &wifi_iface_, wlan_intf_opcode_radio_state, sizeof(state),
-                                             &state, nullptr);
-          Log(L"cc", L"wifi radio set %d err=%lu", wifi_radio_on_ ? 0 : 1, static_cast<unsigned long>(err));
-          WlanCloseHandle(handle, nullptr);
+        if (!wifi_hw_radio_on_) {
+          break;
         }
-        list_due_ = 0;
-        RefreshPageLists(true);
+        SetWifiRadio(!wifi_radio_on_);
       } else if (page_ == Page::kBluetooth) {
         BLUETOOTH_FIND_RADIO_PARAMS params{};
         params.dwSize = sizeof(params);
@@ -1026,7 +2048,13 @@ void ControlCenterContent::Invoke(int index) {
       }
       break;
     case kPageMore:
-      OpenSettingsPage(page_ == Page::kWifi ? L"ms-settings:network-wifi" : L"ms-settings:bluetooth");
+      OpenSettingsPage(L"ms-settings:bluetooth");
+      break;
+    case kPageNetworkSettings:
+      OpenSettingsPage(L"ms-settings:network");
+      break;
+    case kPageWifiSettings:
+      OpenSettingsPage(L"ms-settings:network-wifi");
       break;
     case kAirplane:
       OpenSettingsPage(L"ms-settings:network-airplanemode");
@@ -1044,45 +2072,29 @@ void ControlCenterContent::Invoke(int index) {
       OpenSettingsPage(L"ms-settings:");
       break;
     default:
-      if (hit.id >= kPageAction && hit.id < kPageAction + kPageListMax && page_ == Page::kWifi) {
-        const int i = hit.extra;
-        if (i >= 0 && i < static_cast<int>(wifi_nets_.size())) {
-          HANDLE handle = OpenWlan();
-          if (handle != nullptr && wifi_iface_ok_) {
-            const DWORD err = WlanDisconnect(handle, &wifi_iface_, nullptr);
-            Log(L"cc", L"wifi disconnect err=%lu", static_cast<unsigned long>(err));
-            WlanCloseHandle(handle, nullptr);
-          }
-          list_due_ = 0;
-          RefreshPageLists(true);
-        }
-      } else if (hit.id >= kPageList && hit.id < kPageList + kPageListMax) {
+      if (hit.id >= kPageList && hit.id < kPageList + kWifiListTotalMax) {
         const int i = hit.extra;
         if (page_ == Page::kWifi && i >= 0 && i < static_cast<int>(wifi_nets_.size())) {
           const WifiNetwork& net = wifi_nets_[static_cast<size_t>(i)];
           if (!net.connected) {
-            HANDLE handle = OpenWlan();
-            if (handle != nullptr && wifi_iface_ok_) {
-              DOT11_SSID ssid{};
-              const std::string utf8 = WideToUtf8Bytes(net.ssid);
-              ssid.uSSIDLength = (std::min)(static_cast<ULONG>(utf8.size()), static_cast<ULONG>(DOT11_SSID_MAX_LENGTH));
-              if (ssid.uSSIDLength > 0) {
-                memcpy(ssid.ucSSID, utf8.data(), ssid.uSSIDLength);
+            Log(L"cc", L"wifi click ssid=%s auth=%lu kind=%s", net.ssid.c_str(),
+                static_cast<unsigned long>(net.auth), WifiKindName(net.kind));
+            if (net.has_profile) {
+              ConnectWifiProfile(net.ssid);
+            } else if (net.kind == WifiKind::kOpen) {
+              ConnectWifi(net);
+            } else if (net.kind == WifiKind::kPersonal) {
+              const wchar_t* auth_xml = nullptr;
+              const wchar_t* enc_xml = nullptr;
+              bool wep = false;
+              if (!MapWifiSecurity(net.auth, net.cipher, &auth_xml, &enc_xml, &wep)) {
+                FallbackWifi(net, L"cipher");
+              } else {
+                OpenWifiPassword(i, {});
               }
-              WLAN_CONNECTION_PARAMETERS params{};
-              params.wlanConnectionMode =
-                  net.has_profile ? wlan_connection_mode_profile
-                                  : (net.secure ? wlan_connection_mode_discovery_secure
-                                                : wlan_connection_mode_discovery_unsecure);
-              params.strProfile = net.has_profile ? net.ssid.c_str() : nullptr;
-              params.pDot11Ssid = &ssid;
-              params.dot11BssType = dot11_BSS_type_infrastructure;
-              const DWORD err = WlanConnect(handle, &wifi_iface_, &params, nullptr);
-              Log(L"cc", L"wifi connect %s err=%lu", net.ssid.c_str(), static_cast<unsigned long>(err));
-              WlanCloseHandle(handle, nullptr);
+            } else {
+              FallbackWifi(net, WifiKindName(net.kind));
             }
-            list_due_ = 0;
-            RefreshPageLists(true);
           }
         } else if (page_ == Page::kBluetooth && i >= 0 && i < static_cast<int>(bt_devices_.size())) {
           BtDevice& dev = bt_devices_[static_cast<size_t>(i)];
@@ -1115,7 +2127,7 @@ bool ControlCenterContent::StickyRow(int index) const {
   if (id == kWifi || id == kBluetooth || id == kPageBack || id == kPageToggle) {
     return true;
   }
-  return id >= kPageList && id < kPageAction + kPageListMax;
+  return id >= kPageList && id < kPageList + kWifiListTotalMax;
 }
 
 void ControlCenterContent::StickyInvoke(int index) {

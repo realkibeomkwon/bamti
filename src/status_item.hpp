@@ -28,7 +28,7 @@ enum class VectorIcon : uint8_t {
   kNone = 0,
   kBattery,
   kCpu,
-  kNetwork,
+  kEthernet,
   kVolume,
   kWifi,
   kSearch,

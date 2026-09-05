@@ -73,6 +73,7 @@ class PopupSurface {
   void SetDark(bool dark);
   void Present();
   void SetAllied(PopupSurface* allied) { allied_ = allied; }
+  void SetAlliedHwnd(HWND hwnd);
   void SetAfterTick(void (*fn)(void*), void* ctx) {
     after_tick_ = fn;
     after_tick_ctx_ = ctx;
@@ -94,12 +95,16 @@ class PopupSurface {
   void ArmGuardTimer();
   void Tick(const wchar_t* src);
   void HitTree(POINT screen, bool* in_self, bool* in_allied) const;
+  bool AlliedHwndAlive() const;
+  bool PointInAlliedHwnd(POINT screen) const;
+  bool IsAlliedHwnd(HWND hwnd) const;
   UINT Dpi() const;
 
   HWND hwnd_ = nullptr;
   HWND owner_ = nullptr;
   HWND last_fg_ = nullptr;
   PopupSurface* allied_ = nullptr;
+  HWND allied_hwnd_ = nullptr;
   void (*after_tick_)(void*) = nullptr;
   void* after_tick_ctx_ = nullptr;
   PopupContent* content_ = nullptr;
@@ -114,6 +119,7 @@ class PopupSurface {
   bool presenting_ = false;
   bool dark_ = true;
   bool capture_ = true;
+  bool skip_esc_until_up_ = false;
   int hot_ = -1;
   int drag_index_ = -1;
   unsigned tick_ = 0;

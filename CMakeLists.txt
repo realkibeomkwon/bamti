@@ -34,6 +34,7 @@ add_executable(bamti WIN32
   src/dock.cpp
   src/autostart.cpp
   src/popup_surface.cpp
+  src/wifi_password.cpp
   src/bar_menu.cpp
   src/start_menu.cpp
   src/spotlight.cpp

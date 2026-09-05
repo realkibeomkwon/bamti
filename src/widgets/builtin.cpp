@@ -11,6 +11,7 @@
 #include <ws2ipdef.h>
 #include <appmodel.h>
 #include <iphlpapi.h>
+#include <netioapi.h>
 #include <objbase.h>
 #include <shellapi.h>
 
@@ -24,28 +25,24 @@ namespace {
 
 constexpr char kBatteryId[] = "bamti.widget/battery";
 constexpr char kCpuId[] = "bamti.widget/cpu";
-constexpr char kNetId[] = "bamti.widget/net";
 constexpr char kVolumeId[] = "bamti.widget/volume";
-constexpr char kWifiId[] = "bamti.widget/wifi";
+constexpr char kNetworkId[] = "bamti.widget/network";
 constexpr char kBoardId[] = "bamti.widget/board";
 
 constexpr int kBatteryPriority = 40;
 constexpr int kVolumePriority = 35;
-constexpr int kWifiPriority = 36;
+constexpr int kNetworkPriority = 36;
 constexpr int kCpuPriority = 30;
-constexpr int kNetPriority = 20;
 constexpr int kBoardPriority = 10;
 
 constexpr ULONGLONG kBatteryPeriodMs = 60000;
 constexpr ULONGLONG kCpuPeriodMs = 5000;
-constexpr ULONGLONG kNetPeriodMs = 2000;
 constexpr ULONGLONG kVolumePeriodMs = 1000;
 constexpr ULONGLONG kBrightnessPeriodMs = 2000;
 constexpr ULONGLONG kVolumeRefreshMs = 20000;
 constexpr ULONGLONG kFirstSampleMs = 1000;
 
 // Segoe Fluent Icons가 없을 때 DrawVectorIcon이 되돌리는 문자.
-[[maybe_unused]] constexpr wchar_t kNetGlyph[] = L"⇅";
 [[maybe_unused]] constexpr wchar_t kVolumeGlyph[] = L"♪";
 [[maybe_unused]] constexpr wchar_t kVolumeMuteGlyph[] = L"♪";
 constexpr wchar_t kBoardGlyph[] = L"▤";
@@ -77,47 +74,6 @@ float ClampUnit(double value) {
     return 1.0f;
   }
   return static_cast<float>(value);
-}
-
-enum class ScaleStyle { kCompact, kCompactPerSec, kBytes, kBytesPerSec };
-
-std::wstring FormatScaled(double n, ScaleStyle style) {
-  if (!std::isfinite(n) || n < 0.0) {
-    n = 0.0;
-  }
-  double v = n;
-  int tier = 0;
-  if (v >= 1000000000.0) {
-    v /= 1000000000.0;
-    tier = 3;
-  } else if (v >= 1000000.0) {
-    v /= 1000000.0;
-    tier = 2;
-  } else if (v >= 1000.0) {
-    v /= 1000.0;
-    tier = 1;
-  }
-  wchar_t num[32]{};
-  if (tier != 0 && v < 10.0) {
-    swprintf_s(num, L"%.1f", v);
-  } else {
-    swprintf_s(num, L"%.0f", v);
-  }
-  std::wstring out = num;
-  if (style == ScaleStyle::kCompact || style == ScaleStyle::kCompactPerSec) {
-    static const wchar_t* kSuf[] = {L"", L"K", L"M", L"G"};
-    out += kSuf[tier];
-    if (style == ScaleStyle::kCompactPerSec) {
-      out += L"B/s";
-    }
-  } else {
-    static const wchar_t* kSuf[] = {L" B", L" KB", L" MB", L" GB"};
-    out += kSuf[tier];
-    if (style == ScaleStyle::kBytesPerSec) {
-      out += L"/s";
-    }
-  }
-  return out;
 }
 
 std::wstring PercentText(int pct, bool plus) {
@@ -180,14 +136,6 @@ StatusRow KvRow(std::wstring label, std::wstring value) {
   row.type = RowType::kKeyValue;
   row.label = Truncate(std::move(label), kStatusPanelTextMaxChars);
   row.value_text = Truncate(std::move(value), kStatusPanelTextMaxChars);
-  return row;
-}
-
-StatusRow TextNoteRow(std::wstring text) {
-  StatusRow row;
-  row.type = RowType::kText;
-  row.label = Truncate(std::move(text), kStatusPanelTextMaxChars);
-  row.muted = true;
   return row;
 }
 
@@ -264,69 +212,56 @@ bool ReadCpuTimes(uint64_t* idle, uint64_t* kernel, uint64_t* user) {
   return true;
 }
 
-struct NetSnap {
-  uint64_t in = 0;
-  uint64_t out = 0;
+enum class NetKind { kNone, kWifi, kEthernet };
+
+struct RouteSnap {
+  NetKind kind = NetKind::kNone;
   std::wstring alias;
-  std::wstring kind;
-  double enum_ms = 0.0;
-  bool ok = false;
+  double route_ms = 0.0;
+  double entry_ms = 0.0;
+  DWORD route_err = NO_ERROR;
 };
 
-NetSnap ReadNet() {
-  NetSnap snap;
+RouteSnap ReadDefaultRoute() {
+  RouteSnap snap;
+  SOCKADDR_INET dest{};
+  dest.si_family = AF_INET;
+  dest.Ipv4.sin_family = AF_INET;
+  dest.Ipv4.sin_addr.s_addr = 0;
+
+  MIB_IPFORWARD_ROW2 route{};
+  SOCKADDR_INET source{};
   LARGE_INTEGER freq{};
   LARGE_INTEGER t0{};
   LARGE_INTEGER t1{};
   QueryPerformanceFrequency(&freq);
   QueryPerformanceCounter(&t0);
-  MIB_IF_TABLE2* table = nullptr;
-  const DWORD err = GetIfTable2(&table);
+  snap.route_err = GetBestRoute2(nullptr, 0, nullptr, &dest, 0, &route, &source);
   QueryPerformanceCounter(&t1);
   if (freq.QuadPart != 0) {
-    snap.enum_ms =
-        static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+    snap.route_ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
   }
-  if (err != NO_ERROR || table == nullptr) {
-    if (table != nullptr) {
-      FreeMibTable(table);
-    }
+  if (snap.route_err != NO_ERROR) {
     return snap;
   }
 
-  uint64_t best = 0;
-  for (ULONG i = 0; i < table->NumEntries; ++i) {
-    const MIB_IF_ROW2& row = table->Table[i];
-    if (row.OperStatus != IfOperStatusUp) {
-      continue;
-    }
-    if (row.Type == IF_TYPE_SOFTWARE_LOOPBACK) {
-      continue;
-    }
-    if (row.InterfaceAndOperStatusFlags.FilterInterface) {
-      continue;
-    }
-    const uint64_t in = row.InOctets;
-    const uint64_t out = row.OutOctets;
-    snap.in += in;
-    snap.out += out;
-    const uint64_t total = in + out;
-    if (total >= best) {
-      best = total;
-      snap.alias = row.Alias;
-      if (row.Type == IF_TYPE_IEEE80211 || row.PhysicalMediumType == NdisPhysicalMediumNative802_11) {
-        snap.kind = L"Wi-Fi";
-      } else if (row.Type == IF_TYPE_ETHERNET_CSMACD) {
-        snap.kind = L"이더넷";
-      } else if (!snap.alias.empty()) {
-        snap.kind = snap.alias;
-      } else {
-        snap.kind = L"네트워크";
-      }
-    }
+  MIB_IF_ROW2 row{};
+  row.InterfaceIndex = route.InterfaceIndex;
+  QueryPerformanceCounter(&t0);
+  const DWORD entry_err = GetIfEntry2(&row);
+  QueryPerformanceCounter(&t1);
+  if (freq.QuadPart != 0) {
+    snap.entry_ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
   }
-  FreeMibTable(table);
-  snap.ok = true;
+  if (entry_err != NO_ERROR) {
+    return snap;
+  }
+  snap.alias = row.Alias;
+  if (row.Type == IF_TYPE_IEEE80211 || row.PhysicalMediumType == NdisPhysicalMediumNative802_11) {
+    snap.kind = NetKind::kWifi;
+  } else if (row.Type == IF_TYPE_ETHERNET_CSMACD) {
+    snap.kind = NetKind::kEthernet;
+  }
   return snap;
 }
 
@@ -515,6 +450,8 @@ ControlCenterLive BuiltinWidgets::LiveForControlCenter() const {
   live.brightness = last_brightness_;
   live.wifi_on = last_wifi_on_;
   live.wifi_name = last_wifi_name_;
+  live.eth_on = last_eth_on_;
+  live.eth_name = last_eth_name_;
   return live;
 }
 
@@ -546,9 +483,8 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
     };
     note_drop(prev.battery, next.battery, kBatteryId, &fp_battery_);
     note_drop(prev.cpu, next.cpu, kCpuId, &fp_cpu_);
-    note_drop(prev.network, next.network, kNetId, &fp_net_);
+    note_drop(prev.network, next.network, kNetworkId, &fp_network_);
     note_drop(prev.volume, next.volume, kVolumeId, &fp_volume_);
-    note_drop(prev.wifi, next.wifi, kWifiId, &fp_wifi_);
     note_drop(prev.widget_board, next.widget_board, kBoardId, &fp_board_);
     const ULONGLONG now = GetTickCount64();
     if (!prev.battery && next.battery) {
@@ -560,21 +496,17 @@ void BuiltinWidgets::SetSettings(const WidgetSettings& next) {
       cpu_due_ = now;
     }
     if (!prev.network && next.network) {
-      net_has_baseline_ = false;
-      net_due_ = now;
+      network_due_ = now;
     }
     if (!prev.volume && next.volume) {
       volume_due_ = now;
       volume_refresh_due_ = 0;
       logged_no_volume_ = false;
     }
-    if (!prev.wifi && next.wifi) {
-      wlan_due_ = now;
-    }
     if (!prev.control_center && next.control_center) {
       volume_due_ = now;
       brightness_due_ = now;
-      wlan_due_ = now;
+      network_due_ = now;
     }
     if (next.Any()) {
       StartWorkerLocked();
@@ -727,7 +659,6 @@ void BuiltinWidgets::ResetBaselines() {
   uint64_t kernel = 0;
   uint64_t user = 0;
   const bool cpu_ok = ReadCpuTimes(&idle, &kernel, &user);
-  const NetSnap net = ReadNet();
   const ULONGLONG now = GetTickCount64();
   std::lock_guard lock(mu_);
   cpu_has_baseline_ = cpu_ok;
@@ -736,25 +667,14 @@ void BuiltinWidgets::ResetBaselines() {
     cpu_kernel_ = kernel;
     cpu_user_ = user;
   }
-  net_has_baseline_ = net.ok;
-  if (net.ok) {
-    net_in_ = net.in;
-    net_out_ = net.out;
-    net_tick_ = now;
-  }
   cpu_due_ = now + kFirstSampleMs;
-  net_due_ = now + kFirstSampleMs;
   battery_due_ = now;
   volume_due_ = now;
-  wlan_due_ = now;
-  if (net.enum_ms > 1.0 && !logged_slow_if_) {
-    logged_slow_if_ = true;
-    Log(L"widget", L"GetIfTable2 took %.2f ms", net.enum_ms);
-  }
+  network_due_ = now;
 }
 
 bool BuiltinWidgets::HasSampleDeadlineLocked() const {
-  return settings_.battery || settings_.cpu || settings_.network || settings_.volume || settings_.wifi ||
+  return settings_.battery || settings_.cpu || settings_.network || settings_.volume ||
          settings_.control_center;
 }
 
@@ -767,17 +687,14 @@ ULONGLONG BuiltinWidgets::NextDeadlineLocked(ULONGLONG now) const {
   if (settings_.cpu && cpu_due_ < due) {
     due = cpu_due_;
   }
-  if (settings_.network && net_due_ < due) {
-    due = net_due_;
-  }
   if ((settings_.volume || settings_.control_center) && volume_due_ < due) {
     due = volume_due_;
   }
   if (settings_.control_center && brightness_due_ < due) {
     due = brightness_due_;
   }
-  if ((settings_.wifi || settings_.control_center) && wlan_due_ < due) {
-    due = wlan_due_;
+  if ((settings_.network || settings_.control_center) && network_due_ < due) {
+    due = network_due_;
   }
   return due;
 }
@@ -793,12 +710,10 @@ void BuiltinWidgets::Publish(StatusItem item) {
       slot = &fp_battery_;
     } else if (item.id == kCpuId) {
       slot = &fp_cpu_;
-    } else if (item.id == kNetId) {
-      slot = &fp_net_;
     } else if (item.id == kVolumeId) {
       slot = &fp_volume_;
-    } else if (item.id == kWifiId) {
-      slot = &fp_wifi_;
+    } else if (item.id == kNetworkId) {
+      slot = &fp_network_;
     } else if (item.id == kBoardId) {
       slot = &fp_board_;
     }
@@ -829,12 +744,10 @@ void BuiltinWidgets::DropItem(const char* id) {
       fp_battery_.clear();
     } else if (std::strcmp(id, kCpuId) == 0) {
       fp_cpu_.clear();
-    } else if (std::strcmp(id, kNetId) == 0) {
-      fp_net_.clear();
     } else if (std::strcmp(id, kVolumeId) == 0) {
       fp_volume_.clear();
-    } else if (std::strcmp(id, kWifiId) == 0) {
-      fp_wifi_.clear();
+    } else if (std::strcmp(id, kNetworkId) == 0) {
+      fp_network_.clear();
     } else if (std::strcmp(id, kBoardId) == 0) {
       fp_board_.clear();
     }
@@ -1055,113 +968,6 @@ void BuiltinWidgets::SampleCpu() {
   Publish(std::move(item));
 }
 
-void BuiltinWidgets::SampleNet() {
-  const NetSnap snap = ReadNet();
-  const ULONGLONG now = GetTickCount64();
-  if (snap.enum_ms > 1.0) {
-    std::lock_guard lock(mu_);
-    if (!logged_slow_if_) {
-      logged_slow_if_ = true;
-      Log(L"widget", L"GetIfTable2 took %.2f ms", snap.enum_ms);
-    }
-  }
-  if (!snap.ok) {
-    std::lock_guard lock(mu_);
-    net_due_ = now + kNetPeriodMs;
-    return;
-  }
-
-  double in_bps = 0.0;
-  double out_bps = 0.0;
-  uint64_t session_in = 0;
-  uint64_t session_out = 0;
-  std::wstring alias;
-  std::wstring kind;
-  bool publish = false;
-  {
-    std::lock_guard lock(mu_);
-    if (!net_has_baseline_) {
-      net_in_ = snap.in;
-      net_out_ = snap.out;
-      net_tick_ = now;
-      net_has_baseline_ = true;
-      net_due_ = now + kFirstSampleMs;
-      return;
-    }
-    uint64_t in_d = 0;
-    uint64_t out_d = 0;
-    if (snap.in < net_in_ || snap.out < net_out_) {
-      in_d = 0;
-      out_d = 0;
-    } else {
-      in_d = snap.in - net_in_;
-      out_d = snap.out - net_out_;
-    }
-    const ULONGLONG elapsed = now > net_tick_ ? now - net_tick_ : 0;
-    net_in_ = snap.in;
-    net_out_ = snap.out;
-    net_tick_ = now;
-    session_in_ += in_d;
-    session_out_ += out_d;
-    net_due_ = now + kNetPeriodMs;
-    if (!settings_.network || !active_ || sink_ == nullptr) {
-      return;
-    }
-    if (elapsed > 0) {
-      const double seconds = static_cast<double>(elapsed) / 1000.0;
-      in_bps = static_cast<double>(in_d) / seconds;
-      out_bps = static_cast<double>(out_d) / seconds;
-    }
-    session_in = session_in_;
-    session_out = session_out_;
-    alias = snap.alias;
-    kind = snap.kind;
-    publish = true;
-  }
-  if (!publish) {
-    return;
-  }
-
-  const std::wstring in_c = FormatScaled(in_bps, ScaleStyle::kCompactPerSec);
-  const std::wstring out_c = FormatScaled(out_bps, ScaleStyle::kCompactPerSec);
-  std::wstring text = in_c;
-  text += L" · ";
-  text += out_c;
-
-  std::wstring tip = L"받기 ";
-  tip += FormatScaled(in_bps, ScaleStyle::kBytesPerSec);
-  tip += L" · 보내기 ";
-  tip += FormatScaled(out_bps, ScaleStyle::kBytesPerSec);
-  if (!kind.empty()) {
-    tip += L" · ";
-    tip += kind;
-  }
-
-  std::wstring since = L"누적 받기 ";
-  since += FormatScaled(static_cast<double>(session_in), ScaleStyle::kBytes);
-  since += L" · 보내기 ";
-  since += FormatScaled(static_cast<double>(session_out), ScaleStyle::kBytes);
-
-  StatusItem item;
-  item.id = kNetId;
-  item.priority = kNetPriority;
-  SetVectorIcon(&item, VectorIcon::kNetwork, 0.0f, 0);
-  item.text = Truncate(std::move(text), kStatusTextMaxChars);
-  item.tooltip = Truncate(std::move(tip), kStatusPanelTextMaxChars);
-  item.state = StatusState::kNormal;
-
-  StatusPanel panel;
-  panel.title = L"네트워크";
-  panel.rows.push_back(KvRow(L"받기", FormatScaled(in_bps, ScaleStyle::kBytesPerSec)));
-  panel.rows.push_back(KvRow(L"보내기", FormatScaled(out_bps, ScaleStyle::kBytesPerSec)));
-  panel.rows.push_back(KvRow(L"인터페이스", alias.empty() ? kind : alias));
-  panel.rows.push_back(TextNoteRow(std::move(since)));
-  panel.rows.push_back(SepRow());
-  panel.rows.push_back(ButtonRow("network_settings", L"네트워크 설정 열기"));
-  item.panel = std::move(panel);
-  Publish(std::move(item));
-}
-
 void BuiltinWidgets::SampleVolume() {
   const ULONGLONG now = GetTickCount64();
   bool refresh = false;
@@ -1300,20 +1106,37 @@ void BuiltinWidgets::SampleBrightness() {
   }
 }
 
-void BuiltinWidgets::SampleWlan() {
+void BuiltinWidgets::SampleNetwork() {
   bool enabled = false;
   {
     std::lock_guard lock(mu_);
-    wlan_due_ = GetTickCount64() + kBrightnessPeriodMs;
-    enabled = (settings_.wifi || settings_.control_center) && active_;
+    network_due_ = GetTickCount64() + kBrightnessPeriodMs;
+    enabled = (settings_.network || settings_.control_center) && active_;
   }
   if (!enabled) {
     return;
   }
+  const RouteSnap route = ReadDefaultRoute();
+  static bool logged_ms = false;
+  if (!logged_ms) {
+    logged_ms = true;
+    Log(L"widget", L"GetBestRoute2 took %.2f ms GetIfEntry2 took %.2f ms", route.route_ms, route.entry_ms);
+    if (route.route_ms > 5.0 || route.entry_ms > 5.0) {
+      Log(L"widget", L"route query over 5ms");
+    }
+  }
+  if (route.route_err != NO_ERROR) {
+    std::lock_guard lock(mu_);
+    if (!logged_slow_if_) {
+      logged_slow_if_ = true;
+      Log(L"widget", L"GetBestRoute2 failed err=%lu", static_cast<unsigned long>(route.route_err));
+    }
+  }
+
   const WlanStatus wifi = QueryWlanStatus();
-  static bool logged = false;
-  if (!logged) {
-    logged = true;
+  static bool logged_wlan = false;
+  if (!logged_wlan) {
+    logged_wlan = true;
     Log(L"cc", L"wlan query took %.2f ms", wifi.ms);
     if (wifi.ms > 5.0) {
       Log(L"cc", L"wlan query over 5ms; prefetching on widget worker");
@@ -1324,44 +1147,43 @@ void BuiltinWidgets::SampleWlan() {
     std::lock_guard lock(mu_);
     last_wifi_on_ = wifi.radio || wifi.connected;
     last_wifi_name_ = wifi.connected ? wifi.name : std::wstring(L"연결 안 됨");
-    publish = settings_.wifi && sink_ != nullptr;
+    last_eth_on_ = route.kind == NetKind::kEthernet;
+    last_eth_name_ = route.alias;
+    publish = settings_.network && sink_ != nullptr;
   }
   if (!publish) {
     return;
   }
-  static bool logged_pub = false;
-  if (!logged_pub) {
-    logged_pub = true;
-    Log(L"widget", L"wifi item %s", wifi.connected ? wifi.name.c_str() : L"disconnected");
-  }
 
   StatusItem item;
-  item.id = kWifiId;
-  item.priority = kWifiPriority;
-  SetVectorIcon(&item, VectorIcon::kWifi, wifi.connected ? 1.0f : 0.0f, 0);
-  item.state = wifi.connected ? StatusState::kOn : StatusState::kOff;
-  std::wstring tip = L"Wi-Fi";
-  tip += L" · ";
-  tip += wifi.connected ? wifi.name : std::wstring(L"연결 안 됨");
+  item.id = kNetworkId;
+  item.priority = kNetworkPriority;
+  std::wstring tip;
+  if (route.kind == NetKind::kEthernet) {
+    SetVectorIcon(&item, VectorIcon::kEthernet, 1.0f, 0);
+    item.state = StatusState::kOn;
+    tip = L"이더넷 · ";
+    tip += route.alias.empty() ? std::wstring(L"연결됨") : route.alias;
+  } else if (route.kind == NetKind::kWifi) {
+    SetVectorIcon(&item, VectorIcon::kWifi, 1.0f, 0);
+    item.state = StatusState::kOn;
+    tip = L"Wi-Fi · ";
+    tip += wifi.connected ? wifi.name : std::wstring(L"연결 안 됨");
+  } else {
+    SetVectorIcon(&item, VectorIcon::kWifi, 0.0f, 0);
+    item.state = StatusState::kOff;
+    tip = L"연결 안 됨";
+  }
   item.tooltip = Truncate(std::move(tip), kStatusPanelTextMaxChars);
-
-  StatusPanel panel;
-  panel.title = L"Wi-Fi";
-  panel.rows.push_back(KvRow(L"상태", wifi.connected ? L"연결됨" : L"연결 안 됨"));
-  panel.rows.push_back(KvRow(L"네트워크", wifi.connected ? wifi.name : std::wstring(L"연결 안 됨")));
-  panel.rows.push_back(SepRow());
-  panel.rows.push_back(ButtonRow("wifi_settings", L"Wi-Fi 설정 열기"));
-  item.panel = std::move(panel);
   Publish(std::move(item));
 }
 
 void BuiltinWidgets::SampleDue(ULONGLONG now) {
   bool bat = false;
   bool cpu = false;
-  bool net = false;
   bool volume = false;
   bool brightness = false;
-  bool wlan = false;
+  bool network = false;
   {
     std::lock_guard lock(mu_);
     if (!active_) {
@@ -1369,10 +1191,9 @@ void BuiltinWidgets::SampleDue(ULONGLONG now) {
     }
     bat = settings_.battery && battery_due_ <= now;
     cpu = settings_.cpu && cpu_due_ <= now;
-    net = settings_.network && net_due_ <= now;
     volume = (settings_.volume || settings_.control_center) && volume_due_ <= now;
     brightness = settings_.control_center && brightness_due_ <= now;
-    wlan = (settings_.wifi || settings_.control_center) && wlan_due_ <= now;
+    network = (settings_.network || settings_.control_center) && network_due_ <= now;
   }
   if (bat) {
     SampleBattery();
@@ -1380,17 +1201,14 @@ void BuiltinWidgets::SampleDue(ULONGLONG now) {
   if (cpu) {
     SampleCpu();
   }
-  if (net) {
-    SampleNet();
-  }
   if (volume) {
     SampleVolume();
   }
   if (brightness) {
     SampleBrightness();
   }
-  if (wlan) {
-    SampleWlan();
+  if (network) {
+    SampleNetwork();
   }
 }
 

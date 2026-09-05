@@ -11,6 +11,9 @@
 
 namespace bamti {
 
+inline constexpr float kEthernetIconDip = 20.0f;
+inline constexpr float kEthernetIconHeightDip = 11.0f;
+
 enum class SegmentKind { kStart, kSpotlight, kWarning, kStatus, kOverflow, kControlCenter, kClock };
 
 struct BarSegment {

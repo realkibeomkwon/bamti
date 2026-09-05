@@ -28,10 +28,8 @@ constexpr wchar_t kVolume0Fluent[] = L"\xE992";
 constexpr wchar_t kVolume1Fluent[] = L"\xE993";
 constexpr wchar_t kVolume2Fluent[] = L"\xE994";
 constexpr wchar_t kVolume3Fluent[] = L"\xE995";
-constexpr wchar_t kNetworkFluent[] = L"\xE839";
 constexpr wchar_t kWifiFluent[] = L"\xE701";
 constexpr wchar_t kVolumeFallback[] = L"\x266A";
-constexpr wchar_t kNetFallback[] = L"\x21C5";
 constexpr wchar_t kWifiFallback[] = L"Wi";
 
 float ClampUnit(float value) {
@@ -42,6 +40,50 @@ float ClampUnit(float value) {
     return 1.0f;
   }
   return value;
+}
+
+D2D1_COLOR_F ScaleAlpha(D2D1_COLOR_F color, float mul) {
+  color.a *= mul;
+  return color;
+}
+
+void DrawEthernetIcon(ID2D1RenderTarget* rt, ID2D1Factory* factory, ID2D1SolidColorBrush* brush,
+                      ID2D1StrokeStyle* stroke, const D2D1_RECT_F& box) {
+  if (rt == nullptr || factory == nullptr || brush == nullptr || stroke == nullptr) {
+    return;
+  }
+  const float h = box.bottom - box.top;
+  if (h <= 0.0f) {
+    return;
+  }
+  const float s = h / 11.0f;
+  const float x = box.left;
+  const float y = box.top;
+  const float width = 1.80f * s;
+  auto draw_chevron = [&](D2D1_POINT_2F a, D2D1_POINT_2F b, D2D1_POINT_2F c) {
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
+    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(factory->CreatePathGeometry(path.ReleaseAndGetAddressOf())) ||
+        FAILED(path->Open(sink.GetAddressOf()))) {
+      return;
+    }
+    sink->BeginFigure(a, D2D1_FIGURE_BEGIN_HOLLOW);
+    sink->AddLine(b);
+    sink->AddLine(c);
+    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+    if (SUCCEEDED(sink->Close())) {
+      rt->DrawGeometry(path.Get(), brush, width, stroke);
+    }
+  };
+  draw_chevron(D2D1::Point2F(x + 4.40f * s, y + 0.40f * s), D2D1::Point2F(x + 0.40f * s, y + 5.50f * s),
+               D2D1::Point2F(x + 4.40f * s, y + 10.60f * s));
+  draw_chevron(D2D1::Point2F(x + 15.60f * s, y + 0.40f * s), D2D1::Point2F(x + 19.60f * s, y + 5.50f * s),
+               D2D1::Point2F(x + 15.60f * s, y + 10.60f * s));
+  const float r = 1.00f * s;
+  const float cy = y + 5.50f * s;
+  rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + 6.50f * s, cy), r, r), brush);
+  rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + 10.00f * s, cy), r, r), brush);
+  rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + 13.50f * s, cy), r, r), brush);
 }
 
 D2D1_COLOR_F StatusItemColor(bool dark, uint32_t accent) {
@@ -486,12 +528,14 @@ void ClockRenderer::DrawVectorIcon(ID2D1SolidColorBrush* brush, const StatusIcon
         DrawCpuRing(rt_.Get(), brush, round_stroke_.Get(), box, dark, value);
       }
       break;
-    case VectorIcon::kNetwork:
+    case VectorIcon::kEthernet:
       brush->SetColor(ClockTextColor(dark));
-      DrawFluentOrFallback(brush, box, kNetworkFluent, kNetFallback);
+      if (EnsureStroke() && d2d_) {
+        DrawEthernetIcon(rt_.Get(), d2d_.Get(), brush, round_stroke_.Get(), box);
+      }
       break;
     case VectorIcon::kWifi:
-      brush->SetColor(ClockTextColor(dark));
+      brush->SetColor(value < 0.5f ? ScaleAlpha(ClockTextColor(dark), 0.45f) : ClockTextColor(dark));
       DrawFluentOrFallback(brush, box, kWifiFluent, kWifiFallback);
       break;
     case VectorIcon::kVolume: {
@@ -661,8 +705,14 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
     const float x0 = static_cast<float>(seg.rect.left - client.left) / px;
     float text_x = x0;
     if (vector) {
-      const float icon_w = (seg.icon.vector == VectorIcon::kBattery) ? kBatteryIconDip : 16.0f;
-      const float icon_h = 16.0f;
+      float icon_w = 16.0f;
+      float icon_h = 16.0f;
+      if (seg.icon.vector == VectorIcon::kBattery) {
+        icon_w = kBatteryIconDip;
+      } else if (seg.icon.vector == VectorIcon::kEthernet) {
+        icon_w = kEthernetIconDip;
+        icon_h = kEthernetIconHeightDip;
+      }
       const float icon_top = (height_dip - icon_h) * 0.5f;
       DrawVectorIcon(brush.Get(), seg.icon, D2D1::RectF(x0, icon_top, x0 + icon_w, icon_top + icon_h), dark);
       text_x = x0 + icon_w + 4.0f;

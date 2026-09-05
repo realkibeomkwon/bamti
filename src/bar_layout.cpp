@@ -37,6 +37,9 @@ float StatusIconWidth(const StatusItem& item) {
   if (item.icon.kind == IconKind::kVector && item.icon.vector == VectorIcon::kBattery) {
     return kBatteryIconDip;
   }
+  if (item.icon.kind == IconKind::kVector && item.icon.vector == VectorIcon::kEthernet) {
+    return kEthernetIconDip;
+  }
   return kStatusIconDip;
 }
 

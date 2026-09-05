@@ -136,8 +136,6 @@ std::string FormatSettings(const WidgetSettings& s, std::string_view extra_topba
   out += s.network ? "true" : "false";
   out += ", \"volume\": ";
   out += s.volume ? "true" : "false";
-  out += ", \"wifi\": ";
-  out += s.wifi ? "true" : "false";
   out += ", \"control_center\": ";
   out += s.control_center ? "true" : "false";
   out += ", \"widget_board_button\": ";
@@ -234,9 +232,9 @@ WidgetSettings LoadWidgetSettings() {
   }
   s.battery = json::GetBool(*widgets, "battery").value_or(false);
   s.cpu = json::GetBool(*widgets, "cpu").value_or(false);
-  s.network = json::GetBool(*widgets, "network").value_or(false);
+  s.network = json::GetBool(*widgets, "network").value_or(false) ||
+              json::GetBool(*widgets, "wifi").value_or(false);
   s.volume = json::GetBool(*widgets, "volume").value_or(false);
-  s.wifi = json::GetBool(*widgets, "wifi").value_or(false);
   s.control_center = json::GetBool(*widgets, "control_center").value_or(false);
   if (const auto board = json::GetBool(*widgets, "widget_board_button")) {
     s.widget_board = *board;
@@ -260,6 +258,35 @@ WidgetSettings LoadWidgetSettings() {
   if (s.bar_order.size() > kBarOrderMax) {
     s.bar_order.erase(s.bar_order.begin(),
                       s.bar_order.begin() + static_cast<std::ptrdiff_t>(s.bar_order.size() - kBarOrderMax));
+  }
+
+  bool order_changed = false;
+  bool seen_network = false;
+  std::vector<std::string> order;
+  order.reserve(s.bar_order.size());
+  for (const std::string& id : s.bar_order) {
+    std::string next = id;
+    if (next == "bamti.widget/wifi") {
+      next = "bamti.widget/network";
+      order_changed = true;
+    } else if (next == "bamti.widget/net") {
+      order_changed = true;
+      continue;
+    }
+    if (next == "bamti.widget/network") {
+      if (seen_network) {
+        order_changed = true;
+        continue;
+      }
+      seen_network = true;
+    }
+    order.push_back(std::move(next));
+  }
+  s.bar_order = std::move(order);
+
+  const bool had_wifi_key = json::GetBool(*widgets, "wifi").has_value();
+  if (had_wifi_key || order_changed) {
+    SaveWidgetSettings(s);
   }
   return s;
 }

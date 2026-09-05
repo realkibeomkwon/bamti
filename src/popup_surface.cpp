@@ -273,6 +273,7 @@ bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode,
   saw_mousemove_ = false;
   armed_ = false;
   tick_ = 0;
+  skip_esc_until_up_ = false;
   ApplyChrome();
   // Layered windows paint via UpdateLayeredWindow, not WM_PAINT. Present first
   // so the first visible frame is already filled; then show without activate.
@@ -296,6 +297,36 @@ void PopupSurface::Close() {
   Dismiss(-1, DismissReason::kExplicit);
 }
 
+void PopupSurface::SetAlliedHwnd(HWND hwnd) {
+  allied_hwnd_ = hwnd;
+  if (hwnd != nullptr && hwnd_ != nullptr && GetCapture() == hwnd_) {
+    ReleaseCapture();
+  }
+}
+
+bool PopupSurface::AlliedHwndAlive() const {
+  return allied_hwnd_ != nullptr && IsWindow(allied_hwnd_);
+}
+
+bool PopupSurface::IsAlliedHwnd(HWND hwnd) const {
+  if (!AlliedHwndAlive() || hwnd == nullptr) {
+    return false;
+  }
+  return hwnd == allied_hwnd_ || IsChild(allied_hwnd_, hwnd) != FALSE;
+}
+
+bool PopupSurface::PointInAlliedHwnd(POINT screen) const {
+  if (!AlliedHwndAlive()) {
+    return false;
+  }
+  RECT rc{};
+  if (GetWindowRect(allied_hwnd_, &rc) == FALSE || !PtInRect(&rc, screen)) {
+    return false;
+  }
+  HWND hit = WindowFromPoint(screen);
+  return IsAlliedHwnd(hit);
+}
+
 void PopupSurface::SetDark(bool dark) {
   if (dark_ == dark) {
     return;
@@ -317,6 +348,7 @@ void PopupSurface::Dismiss(int invoke_index, DismissReason reason) {
   if (!open_) {
     return;
   }
+  allied_hwnd_ = nullptr;
   if (allied_ != nullptr && allied_->IsOpen()) {
     Log(L"popup", L"submenu close reason=%s", ReasonName(reason));
     PopupSurface* allied = allied_;
@@ -405,7 +437,8 @@ void PopupSurface::HitTree(POINT screen, bool* in_self, bool* in_allied) const {
     *in_self = PointInWindow(hwnd_, screen);
   }
   if (in_allied != nullptr) {
-    *in_allied = allied_ != nullptr && allied_->IsOpen() && PointInWindow(allied_->hwnd(), screen);
+    const bool popup_allied = allied_ != nullptr && allied_->IsOpen() && PointInWindow(allied_->hwnd(), screen);
+    *in_allied = popup_allied || PointInAlliedHwnd(screen);
   }
 }
 
@@ -452,11 +485,21 @@ void PopupSurface::Tick(const wchar_t* src) {
 
   const AsyncKey esc = ReadAsyncKey(VK_ESCAPE);
   const bool esc_hit = esc.down || esc.pressed_since;
+  if (AlliedHwndAlive()) {
+    skip_esc_until_up_ = true;
+  }
   if (esc_hit && !esc_down_) {
+    if (skip_esc_until_up_ || AlliedHwndAlive()) {
+      esc_down_ = true;
+      return;
+    }
     Dismiss(-1, DismissReason::kEscape);
     return;
   }
   esc_down_ = esc.down;
+  if (!esc.down && !AlliedHwndAlive()) {
+    skip_esc_until_up_ = false;
+  }
 
   const AsyncKey lwin = ReadAsyncKey(VK_LWIN);
   const AsyncKey rwin = ReadAsyncKey(VK_RWIN);
@@ -528,7 +571,7 @@ void PopupSurface::Tick(const wchar_t* src) {
   }
 
   const HWND fg = GetForegroundWindow();
-  if (fg != last_fg_ && fg != nullptr && fg != hwnd_ && !SameProcess(fg)) {
+  if (fg != last_fg_ && fg != nullptr && fg != hwnd_ && !IsAlliedHwnd(fg) && !SameProcess(fg)) {
     Dismiss(-1, DismissReason::kForeground);
     return;
   }
@@ -634,6 +677,16 @@ void PopupSurface::Present() {
     explicit PresentGuard(bool& flag) : busy(flag) {}
     ~PresentGuard() { busy = false; }
   } guard(presenting_);
+  if (open_ && content_ != nullptr && hwnd_ != nullptr) {
+    const SIZE want = content_->Measure(Dpi());
+    RECT client{};
+    GetClientRect(hwnd_, &client);
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    if (want.cx > 0 && want.cy > 0 && (want.cx != width || want.cy != height)) {
+      Place(want, anchor_, mode_);
+    }
+  }
   Render();
   if (hwnd_ == nullptr || mem_dc_ == nullptr || dib_w_ <= 0 || dib_h_ <= 0) {
     return;
@@ -850,7 +903,7 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
       }
-      if (in_allied && allied_ != nullptr) {
+      if (in_allied && allied_ != nullptr && PointInWindow(allied_->hwnd(), screen)) {
         const int row = allied_->HitTestScreen(screen);
         if (row >= 0) {
           Log(L"popup", L"submenu close reason=%s", L"invoke");
@@ -859,6 +912,9 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
           allied_->InvokeRow(row);
           Dismiss(-1, DismissReason::kInvoke);
         }
+        return 0;
+      }
+      if (in_allied) {
         return 0;
       }
       if (!in_self) {
@@ -884,6 +940,9 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_CAPTURECHANGED:
       if (open_ && reinterpret_cast<HWND>(lp) != hwnd_) {
+        if (AlliedHwndAlive() || IsAlliedHwnd(reinterpret_cast<HWND>(lp))) {
+          return 0;
+        }
         Dismiss(-1, DismissReason::kCaptureLost);
       }
       return 0;
