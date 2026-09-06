@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace bamti {
 namespace {
@@ -23,6 +24,9 @@ constexpr int kMenuHoverRadiusDip = 6;
 // 강조 칠이 행을 꽉 채우지 않게 위아래로 물러나는 양.
 // 맥 메뉴는 강조가 행의 70% 정도만 차지한다.
 constexpr int kMenuHoverInsetDip = 4;
+// 재는 폭과 그리는 폭이 정확히 같으면 반올림이 불리하게 떨어질 때
+// 마지막 글자가 생략 부호로 바뀐다. 여유 2 DIP 를 준다.
+constexpr int kMenuTextSlackDip = 2;
 
 int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
@@ -88,9 +92,10 @@ SIZE MeasureMenuRows(const std::vector<MenuRow>& rows, UINT dpi, int max_width_d
     if (row.separator || row.text.empty()) {
       continue;
     }
-    text_w = (std::max)(text_w, static_cast<int>(PopupTextWidth(dpi, row.text) + 0.5f));
+    text_w = (std::max)(text_w, static_cast<int>(std::ceil(PopupTextWidth(dpi, row.text))));
   }
   int width = text_w + m.pad * 2 + m.check_w + m.arrow_w;
+  width += DipToPx(kMenuTextSlackDip, dpi);
   width = (std::max)(width, DipToPx(kMenuMinWidthDip, dpi));
   width = (std::min)(width, DipToPx(max_width_dip, dpi));
   int height = m.pad * 2;

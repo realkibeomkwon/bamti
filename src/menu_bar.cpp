@@ -2186,6 +2186,7 @@ void MenuBar::ShowStartContextMenu(POINT screen) {
   }
   CloseBarSubmenu(L"reopen");
   bar_menu_->Reset(hwnd_, dark_);
+  bar_menu_->SetMaxWidthDip(360);  // Win+X 항목 이름이 길다. 트레이 서브메뉴와 같은 값이다.
   bar_menu_->SetPopup(&status_popup_);
 
   int prev_group = 0;
