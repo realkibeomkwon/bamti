@@ -62,9 +62,11 @@ constexpr UINT kPowerCmdBase = 5200;
 constexpr UINT_PTR kPeekTimerId = 4;
 constexpr UINT kPeekMs = 10000;
 constexpr UINT_PTR kDesktopPeekDwellTimerId = 5;
+constexpr UINT_PTR kTransitionsTimerId = 6;
 constexpr UINT_PTR kCornerWatchTimerId = 7;
 constexpr UINT_PTR kCtrlPollTimerId = 9;
 constexpr UINT kDesktopPeekDwellMs = 120;
+constexpr UINT kTransitionsRestoreMs = 400;
 constexpr UINT kCornerWatchMs = 30;
 constexpr UINT kCtrlPollMs = 200;
 constexpr ULONGLONG kCtrlHookGraceMs = 600;
@@ -484,6 +486,11 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         if (DesktopPeekWanted() && CornerHit()) {
           StartDesktopPeek();
         }
+        return 0;
+      }
+      if (wparam == kTransitionsTimerId) {
+        KillTimer(hwnd_, kTransitionsTimerId);
+        desktop_toggle_.RestoreTransitions();
         return 0;
       }
       if (wparam == kCtrlPollTimerId) {
@@ -1086,8 +1093,10 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kToggleTimerId);
       KillTimer(hwnd_, kPeekTimerId);
       KillTimer(hwnd_, kDesktopPeekDwellTimerId);
+      KillTimer(hwnd_, kTransitionsTimerId);
       KillTimer(hwnd_, kCornerWatchTimerId);
       KillTimer(hwnd_, kCtrlPollTimerId);
+      desktop_toggle_.RestoreTransitions();
       peek_dwell_armed_ = false;
       last_corner_hit_ = false;
       corner_watch_on_ = false;
@@ -2375,6 +2384,9 @@ void MenuBar::StartDesktopPeek() {
     return;
   }
   desktop_toggle_.Toggle();
+  if (hwnd_ != nullptr) {
+    SetTimer(hwnd_, kTransitionsTimerId, kTransitionsRestoreMs, nullptr);
+  }
   peek_latched_ = true;
 }
 

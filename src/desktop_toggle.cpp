@@ -7,34 +7,91 @@
 #include <dwmapi.h>
 
 namespace bamti {
+namespace {
+
+void LogTransitionsBatch(const wchar_t* which, int n, int fail, HRESULT first_fail) {
+  if (fail == 0) {
+    Log(L"peek", L"transitions %s n=%d fail=0", which, n);
+  } else {
+    Log(L"peek", L"transitions %s n=%d fail=%d hr=0x%08lx", which, n, fail,
+        static_cast<unsigned long>(first_fail));
+  }
+}
+
+}  // namespace
 
 bool DesktopToggle::Revealed() {
   return CollectDesktopClearWindows().empty();
 }
 
-void DesktopToggle::SetTransitions(HWND hwnd, bool enabled) {
-  if (hwnd == nullptr || !IsWindow(hwnd)) {
+HRESULT DesktopToggle::SetTransitions(HWND hwnd, bool enabled) {
+  BOOL disable = enabled ? FALSE : TRUE;
+  return DwmSetWindowAttribute(hwnd, dwm::kTransitionsForceDisabled, &disable, sizeof(disable));
+}
+
+void DesktopToggle::DisableTransitions(const std::vector<HWND>& windows) {
+  int n = 0;
+  int fail = 0;
+  HRESULT first_fail = S_OK;
+  for (HWND hwnd : windows) {
+    if (hwnd == nullptr || !IsWindow(hwnd)) {
+      continue;
+    }
+    const HRESULT hr = SetTransitions(hwnd, false);
+    ++n;
+    if (FAILED(hr)) {
+      if (fail == 0) {
+        first_fail = hr;
+      }
+      ++fail;
+    }
+    bool already = false;
+    for (HWND kept : transitions_off_) {
+      if (kept == hwnd) {
+        already = true;
+        break;
+      }
+    }
+    if (!already) {
+      transitions_off_.push_back(hwnd);
+    }
+  }
+  LogTransitionsBatch(L"off", n, fail, first_fail);
+}
+
+void DesktopToggle::RestoreTransitions() {
+  if (transitions_off_.empty()) {
     return;
   }
-  BOOL disable = enabled ? FALSE : TRUE;
-  DwmSetWindowAttribute(hwnd, dwm::kTransitionsForceDisabled, &disable, sizeof(disable));
+  int n = 0;
+  int fail = 0;
+  HRESULT first_fail = S_OK;
+  for (HWND hwnd : transitions_off_) {
+    if (hwnd == nullptr || !IsWindow(hwnd)) {
+      continue;
+    }
+    const HRESULT hr = SetTransitions(hwnd, true);
+    ++n;
+    if (FAILED(hr)) {
+      if (fail == 0) {
+        first_fail = hr;
+      }
+      ++fail;
+    }
+  }
+  transitions_off_.clear();
+  LogTransitionsBatch(L"on", n, fail, first_fail);
 }
 
 DesktopToggle::~DesktopToggle() {
-  for (HWND hwnd : concealed_) {
-    if (IsWindow(hwnd)) {
-      SetTransitions(hwnd, true);
-    }
-  }
+  RestoreTransitions();
 }
 
 void DesktopToggle::Conceal(std::vector<HWND> windows) {
   if (windows.empty()) {
     return;
   }
-  for (HWND hwnd : windows) {
-    SetTransitions(hwnd, false);
-  }
+  DisableTransitions(windows);
   const std::vector<HWND> back_to_front(windows.rbegin(), windows.rend());
   HideHwnds(back_to_front);
   std::vector<HWND> merged;
@@ -69,12 +126,51 @@ void DesktopToggle::Reveal() {
     return;
   }
   const int n = static_cast<int>(concealed_.size());
-  RestoreHwnds(concealed_);
-  for (HWND hwnd : concealed_) {
-    if (IsWindow(hwnd)) {
-      SetTransitions(hwnd, true);
+  DisableTransitions(concealed_);
+  int living = 0;
+  for (auto it = concealed_.rbegin(); it != concealed_.rend(); ++it) {
+    HWND hwnd = *it;
+    if (hwnd == nullptr || !IsWindow(hwnd)) {
+      continue;
+    }
+    if (IsIconic(hwnd)) {
+      ShowWindow(hwnd, SW_RESTORE);
+    } else if (!IsWindowVisible(hwnd)) {
+      ShowWindow(hwnd, SW_SHOW);
+    }
+    ++living;
+  }
+  bool ordered = false;
+  if (living > 0) {
+    HDWP hdwp = BeginDeferWindowPos(living);
+    if (hdwp != nullptr) {
+      for (auto it = concealed_.rbegin(); it != concealed_.rend(); ++it) {
+        HWND hwnd = *it;
+        if (hwnd == nullptr || !IsWindow(hwnd)) {
+          continue;
+        }
+        hdwp = DeferWindowPos(hdwp, hwnd, HWND_TOP, 0, 0, 0, 0,
+                              SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        if (hdwp == nullptr) {
+          break;
+        }
+      }
+      if (hdwp != nullptr) {
+        EndDeferWindowPos(hdwp);
+        ordered = true;
+      }
+    }
+    if (!ordered) {
+      for (auto it = concealed_.rbegin(); it != concealed_.rend(); ++it) {
+        HWND hwnd = *it;
+        if (hwnd == nullptr || !IsWindow(hwnd)) {
+          continue;
+        }
+        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+      }
     }
   }
+  ActivateHwnd(concealed_.front());
   concealed_.clear();
   Log(L"peek", L"reveal n=%d", n);
 }
