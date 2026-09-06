@@ -554,6 +554,16 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         KillTimer(hwnd_, kDesktopIconicTimerId);
         LogDesktopPeekResult(desktop_pending_undo_ ? L"UndoMinimizeALL" : L"MinimizeAll", desktop_hr_,
                              desktop_iconic_before_, IconicOf(desktop_probe_), desktop_fg_before_);
+        if (desktop_pending_undo_ && desktop_hr_ == S_OK) {
+          if (restore_target_ != nullptr && IsWindow(restore_target_) && !IsIconic(restore_target_)) {
+            const BOOL zorder = SetWindowPos(restore_target_, HWND_TOP, 0, 0, 0, 0,
+                                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            const BOOL fg = SetForegroundWindow(restore_target_);
+            Log(L"peek", L"restore hwnd=%p zorder=%d fg=%d", static_cast<void*>(restore_target_), zorder ? 1 : 0,
+                fg ? 1 : 0);
+          }
+          restore_target_ = nullptr;
+        }
         return 0;
       }
       if (wparam == kCornerWatchTimerId) {
@@ -2417,6 +2427,7 @@ void MenuBar::ShowDesktop() {
   desktop_probe_ = desktop_fg_before_;
   desktop_iconic_before_ = IconicOf(desktop_probe_);
   desktop_pending_undo_ = false;
+  restore_target_ = GetForegroundWindow();
   desktop_hr_ = CallShellDesktop(false);
   if (desktop_hr_ == S_OK) {
     desktop_shown_ = true;
