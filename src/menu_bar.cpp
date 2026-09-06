@@ -299,6 +299,15 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
   if (g_menu_bar == nullptr || g_menu_bar->hwnd() == nullptr || !g_menu_bar->win_key_enabled()) {
     return CallNextHookEx(g_key_hook, code, wparam, lparam);
   }
+  if (g_win_held) {
+    const bool win_really_down = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
+                                 (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+    if (!win_really_down) {
+      g_win_held = false;
+      g_win_combo = false;
+      g_win_injected = false;
+    }
+  }
   const bool is_win = vk == VK_LWIN || vk == VK_RWIN;
 
   if (is_win) {
