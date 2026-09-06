@@ -1,7 +1,10 @@
 #include "desktop_toggle.hpp"
 
+#include "dwm.hpp"
 #include "log.hpp"
 #include "task_list.hpp"
+
+#include <dwmapi.h>
 
 namespace bamti {
 
@@ -9,9 +12,28 @@ bool DesktopToggle::Revealed() {
   return CollectDesktopClearWindows().empty();
 }
 
+void DesktopToggle::SetTransitions(HWND hwnd, bool enabled) {
+  if (hwnd == nullptr || !IsWindow(hwnd)) {
+    return;
+  }
+  BOOL disable = enabled ? FALSE : TRUE;
+  DwmSetWindowAttribute(hwnd, dwm::kTransitionsForceDisabled, &disable, sizeof(disable));
+}
+
+DesktopToggle::~DesktopToggle() {
+  for (HWND hwnd : concealed_) {
+    if (IsWindow(hwnd)) {
+      SetTransitions(hwnd, true);
+    }
+  }
+}
+
 void DesktopToggle::Conceal(std::vector<HWND> windows) {
   if (windows.empty()) {
     return;
+  }
+  for (HWND hwnd : windows) {
+    SetTransitions(hwnd, false);
   }
   const std::vector<HWND> back_to_front(windows.rbegin(), windows.rend());
   HideHwnds(back_to_front);
@@ -48,6 +70,11 @@ void DesktopToggle::Reveal() {
   }
   const int n = static_cast<int>(concealed_.size());
   RestoreHwnds(concealed_);
+  for (HWND hwnd : concealed_) {
+    if (IsWindow(hwnd)) {
+      SetTransitions(hwnd, true);
+    }
+  }
   concealed_.clear();
   Log(L"peek", L"reveal n=%d", n);
 }

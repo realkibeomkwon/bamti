@@ -4,6 +4,7 @@
 
 namespace bamti::dwm {
 
+inline constexpr DWORD kTransitionsForceDisabled = 3;
 inline constexpr DWORD kUseImmersiveDarkMode = 20;
 inline constexpr DWORD kWindowCornerPreference = 33;
 inline constexpr DWORD kSystemBackdropType = 38;

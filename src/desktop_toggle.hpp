@@ -20,9 +20,15 @@ class DesktopToggle {
   // 창이 하나도 떠 있지 않은가.
   static bool Revealed();
 
+  ~DesktopToggle();
+
  private:
   void Conceal(std::vector<HWND> windows);
   void Reveal();
+  // 창 하나의 DWM 전환 효과를 끄거나 되돌린다.
+  // 다른 프로세스의 창에도 걸린다. 실패는 무시한다. 효과가 남아 있어도
+  // 동작에는 지장이 없고, 창이 이미 사라진 뒤일 수 있다.
+  void SetTransitions(HWND hwnd, bool enabled);
 
   // Conceal 이 최소화한 창. Z 순서 앞에서 뒤 순서로 담는다.
   std::vector<HWND> concealed_;
