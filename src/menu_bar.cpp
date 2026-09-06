@@ -71,6 +71,64 @@ void LogDesktopPeekResult(const wchar_t* op, HRESULT hr, int iconic_before, int 
       static_cast<void*>(fg_after), cls);
 }
 
+volatile UINT g_hook_key_count = 0;
+
+int KeyDownBit(SHORT state) {
+  return (state & 0x8000) ? 1 : 0;
+}
+
+struct CtrlProbeSnap {
+  UINT hook = 0;
+  int async_c = 0;
+  int async_l = 0;
+  int async_r = 0;
+  int keystate_c = 0;
+  int lbtn = 0;
+  HWND capture = nullptr;
+  DWORD guiflags = 0;
+  HWND fg = nullptr;
+};
+
+bool SameCtrlProbe(const CtrlProbeSnap& a, const CtrlProbeSnap& b) {
+  return a.hook == b.hook && a.async_c == b.async_c && a.async_l == b.async_l && a.async_r == b.async_r &&
+         a.keystate_c == b.keystate_c && a.lbtn == b.lbtn && a.capture == b.capture && a.guiflags == b.guiflags &&
+         a.fg == b.fg;
+}
+
+void LogCtrlProbeIfChanged() {
+  CtrlProbeSnap now;
+  now.hook = g_hook_key_count;
+  now.async_c = KeyDownBit(GetAsyncKeyState(VK_CONTROL));
+  now.async_l = KeyDownBit(GetAsyncKeyState(VK_LCONTROL));
+  now.async_r = KeyDownBit(GetAsyncKeyState(VK_RCONTROL));
+  now.keystate_c = KeyDownBit(GetKeyState(VK_CONTROL));
+  now.lbtn = KeyDownBit(GetAsyncKeyState(VK_LBUTTON));
+  GUITHREADINFO gti{};
+  gti.cbSize = sizeof(gti);
+  if (GetGUIThreadInfo(0, &gti) != FALSE) {
+    now.capture = gti.hwndCapture;
+    now.guiflags = gti.flags;
+  }
+  now.fg = GetForegroundWindow();
+  DWORD lastinput = 0;
+  LASTINPUTINFO lii{};
+  lii.cbSize = sizeof(lii);
+  if (GetLastInputInfo(&lii) != FALSE) {
+    lastinput = lii.dwTime;
+  }
+  static CtrlProbeSnap prev{};
+  static bool have_prev = false;
+  if (have_prev && SameCtrlProbe(now, prev)) {
+    return;
+  }
+  have_prev = true;
+  prev = now;
+  Log(L"peek",
+      L"probe hook=%u async_c=%d async_l=%d async_r=%d keystate_c=%d lbtn=%d capture=%p guiflags=0x%08lx fg=%p lastinput=%lu",
+      now.hook, now.async_c, now.async_l, now.async_r, now.keystate_c, now.lbtn, static_cast<void*>(now.capture),
+      static_cast<unsigned long>(now.guiflags), static_cast<void*>(now.fg), static_cast<unsigned long>(lastinput));
+}
+
 HRESULT CallShellDesktop(bool undo) {
   ComScope com;
   if (!com.ok) {
@@ -281,6 +339,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
   if (info == nullptr || (info->flags & LLKHF_INJECTED) != 0) {
     return CallNextHookEx(g_key_hook, code, wparam, lparam);
   }
+  ++g_hook_key_count;
 
   const bool down = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
   const bool up = wparam == WM_KEYUP || wparam == WM_SYSKEYUP;
@@ -570,6 +629,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         return 0;
       }
       if (wparam == kCtrlPollTimerId) {
+        LogCtrlProbeIfChanged();
         if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 && !corner_watch_on_) {
           StartCornerWatch();
         }
