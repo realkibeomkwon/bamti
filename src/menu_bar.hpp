@@ -220,6 +220,7 @@ class MenuBar {
   int desktop_iconic_before_ = 0;
   bool desktop_pending_undo_ = false;
   bool peek_dwell_armed_ = false;
+  bool last_corner_hit_ = false;
   bool corner_watch_on_ = false;
   int wheel_accum_ = 0;
 };

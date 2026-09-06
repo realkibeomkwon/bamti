@@ -120,8 +120,8 @@ constexpr UINT kPeekMs = 10000;
 constexpr UINT_PTR kDesktopPeekDwellTimerId = 5;
 constexpr UINT_PTR kCornerWatchTimerId = 7;
 constexpr UINT_PTR kDesktopIconicTimerId = 8;
-constexpr UINT kDesktopPeekDwellMs = 300;
-constexpr UINT kCornerWatchMs = 60;
+constexpr UINT kDesktopPeekDwellMs = 120;
+constexpr UINT kCornerWatchMs = 30;
 constexpr UINT kDesktopIconicMs = 200;
 constexpr int kPeekZoneDip = 8;
 constexpr char kSpotlightItemId[] = "bamti.widget/spotlight";
@@ -272,11 +272,12 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
   const bool up = wparam == WM_KEYUP || wparam == WM_SYSKEYUP;
   const DWORD vk = info->vkCode;
   const bool is_ctrl = vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL;
-  if (is_ctrl && g_menu_bar != nullptr && g_menu_bar->hwnd() != nullptr) {
-    if (down) {
+  if (is_ctrl && (down || up)) {
+    Log(L"peek", L"ctrl vk=%lu wparam=0x%08lx flags=0x%08lx async=0x%04x", vk,
+        static_cast<unsigned long>(wparam), info->flags,
+        static_cast<unsigned>(static_cast<USHORT>(GetAsyncKeyState(VK_CONTROL))));
+    if (down && g_menu_bar != nullptr && g_menu_bar->hwnd() != nullptr) {
       PostMessageW(g_menu_bar->hwnd(), kCornerWatchMsg, 1, 0);
-    } else if (up) {
-      PostMessageW(g_menu_bar->hwnd(), kCornerWatchMsg, 0, 0);
     }
   }
   if (g_menu_bar == nullptr || g_menu_bar->hwnd() == nullptr || !g_menu_bar->win_key_enabled()) {
@@ -518,6 +519,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (wparam == kDesktopPeekDwellTimerId) {
         KillTimer(hwnd_, kDesktopPeekDwellTimerId);
         peek_dwell_armed_ = false;
+        Log(L"peek", L"dwell fire");
         if (DesktopPeekWanted() && CornerHit()) {
           StartDesktopPeek();
         }
@@ -532,10 +534,19 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         return 0;
       }
       if (wparam == kCornerWatchTimerId) {
+        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0) {
+          StopCornerWatch();
+          return 0;
+        }
         POINT pt{};
         RECT rc{};
-        if (GetCursorPos(&pt) != FALSE && GetWindowRect(hwnd_, &rc) != FALSE && PtInRect(&rc, pt) != FALSE &&
-            pt.x >= rc.right - DipToPx(kPeekZoneDip, Dpi())) {
+        const bool hit = GetCursorPos(&pt) != FALSE && GetWindowRect(hwnd_, &rc) != FALSE &&
+                         PtInRect(&rc, pt) != FALSE && pt.x >= rc.right - DipToPx(kPeekZoneDip, Dpi());
+        if (hit != last_corner_hit_) {
+          last_corner_hit_ = hit;
+          Log(L"peek", L"corner in=%d x=%ld y=%ld right=%ld", hit ? 1 : 0, pt.x, pt.y, rc.right);
+        }
+        if (hit) {
           UpdateDesktopPeek();
         } else {
           if (hwnd_ != nullptr) {
@@ -566,11 +577,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     case kCornerWatchMsg:
-      if (wparam != 0) {
-        StartCornerWatch();
-      } else {
-        StopCornerWatch();
-      }
+      StartCornerWatch();
       return 0;
     case kFullscreenWatchMsg:
       RefreshFullscreenState();
@@ -1121,6 +1128,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kCornerWatchTimerId);
       KillTimer(hwnd_, kDesktopIconicTimerId);
       peek_dwell_armed_ = false;
+      last_corner_hit_ = false;
       corner_watch_on_ = false;
       StopDesktopPeek(L"destroy");
       StopFullscreenWatch(hwnd_);
@@ -2373,6 +2381,7 @@ void MenuBar::UpdateDesktopPeek() {
   }
   peek_dwell_armed_ = true;
   SetTimer(hwnd_, kDesktopPeekDwellTimerId, kDesktopPeekDwellMs, nullptr);
+  Log(L"peek", L"dwell arm");
 }
 
 void MenuBar::ShowDesktop() {
@@ -2450,6 +2459,7 @@ void MenuBar::StopCornerWatch() {
   }
   const bool was_on = corner_watch_on_;
   corner_watch_on_ = false;
+  last_corner_hit_ = false;
   peek_dwell_armed_ = false;
   StopDesktopPeek(L"ctrl-up");
   if (was_on) {
