@@ -635,6 +635,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
             Log(L"peek", L"restore hwnd=%p zorder=%d fg=%d", static_cast<void*>(restore_target_), zorder ? 1 : 0,
                 fg ? 1 : 0);
           }
+          restore_target_ = nullptr;
         }
         return 0;
       }
@@ -2599,7 +2600,6 @@ void MenuBar::StopCornerWatch() {
   last_corner_hit_ = false;
   peek_dwell_armed_ = false;
   StopDesktopPeek(L"ctrl-up");
-  restore_target_ = nullptr;
   if (was_on) {
     Log(L"peek", L"watch on=0");
   }
