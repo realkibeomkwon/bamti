@@ -2557,7 +2557,7 @@ void MenuBar::HideDesktop() {
 }
 
 void MenuBar::StartDesktopPeek() {
-  if (peek_latched_) {
+  if (peek_latched_ || peek_toggled_in_hold_) {
     return;
   }
   wchar_t cls[256]{};
@@ -2572,6 +2572,7 @@ void MenuBar::StartDesktopPeek() {
     ShowDesktop();
   }
   peek_latched_ = true;
+  peek_toggled_in_hold_ = true;
 }
 
 void MenuBar::StopDesktopPeek(const wchar_t* reason) {
@@ -2599,6 +2600,7 @@ void MenuBar::StopCornerWatch() {
   corner_watch_on_ = false;
   last_corner_hit_ = false;
   peek_dwell_armed_ = false;
+  peek_toggled_in_hold_ = false;
   StopDesktopPeek(L"ctrl-up");
   if (was_on) {
     Log(L"peek", L"watch on=0");
