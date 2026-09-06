@@ -131,9 +131,11 @@ constexpr UINT kPeekMs = 10000;
 constexpr UINT_PTR kDesktopPeekDwellTimerId = 5;
 constexpr UINT_PTR kCornerWatchTimerId = 7;
 constexpr UINT_PTR kDesktopIconicTimerId = 8;
+constexpr UINT_PTR kCtrlPollTimerId = 9;
 constexpr UINT kDesktopPeekDwellMs = 120;
 constexpr UINT kCornerWatchMs = 30;
 constexpr UINT kDesktopIconicMs = 200;
+constexpr UINT kCtrlPollMs = 200;
 constexpr int kPeekZoneDip = 14;  // bar_layout.cpp의 kPadRightDip과 같다.
 constexpr char kSpotlightItemId[] = "bamti.widget/spotlight";
 constexpr char kControlCenterItemId[] = "bamti.widget/control_center";
@@ -473,6 +475,7 @@ bool MenuBar::Create(HINSTANCE instance) {
   spotlight_.Warmup(hwnd_, dark_);
   InstallWinHook();
   SetTimer(hwnd_, kClockTimerId, 1000, nullptr);
+  SetTimer(hwnd_, kCtrlPollTimerId, kCtrlPollMs, nullptr);
   StartFullscreenWatch(hwnd_, kFullscreenWatchMsg);
   RefreshFullscreenState();
   return true;
@@ -566,8 +569,15 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         return 0;
       }
+      if (wparam == kCtrlPollTimerId) {
+        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 && !corner_watch_on_) {
+          StartCornerWatch();
+        }
+        return 0;
+      }
       if (wparam == kCornerWatchTimerId) {
         if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0) {
+          g_ctrl_held = false;
           StopCornerWatch();
           return 0;
         }
@@ -1161,6 +1171,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kDesktopPeekDwellTimerId);
       KillTimer(hwnd_, kCornerWatchTimerId);
       KillTimer(hwnd_, kDesktopIconicTimerId);
+      KillTimer(hwnd_, kCtrlPollTimerId);
       peek_dwell_armed_ = false;
       last_corner_hit_ = false;
       corner_watch_on_ = false;
