@@ -81,6 +81,14 @@ bool BarMenuContent::StickyRow(int index) const {
   return rows_[static_cast<size_t>(index)].submenu;
 }
 
+bool BarMenuContent::Selectable(int index) const {
+  if (index < 0 || index >= static_cast<int>(rows_.size())) {
+    return false;
+  }
+  const MenuRow& row = rows_[static_cast<size_t>(index)];
+  return !row.separator && row.enabled;
+}
+
 SIZE BarMenuContent::Measure(UINT dpi) {
   return MeasureMenuRows(rows_, dpi, max_width_dip_);
 }

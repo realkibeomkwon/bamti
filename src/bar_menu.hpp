@@ -25,6 +25,7 @@ class BarMenuContent : public PopupContent {
   int CornerDip() const override { return kMenuCornerDip; }
   int RowCount() const override;
   bool StickyRow(int index) const override;
+  bool Selectable(int index) const override;
   SIZE Measure(UINT dpi) override;
   void Render(ID2D1RenderTarget* target, UINT dpi, int hot_index) override;
   int HitTest(POINT client, UINT dpi) const override;

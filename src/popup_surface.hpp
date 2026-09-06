@@ -27,6 +27,7 @@ class PopupContent {
   virtual bool DragRow(int /*index*/) const { return false; }
   virtual void DragTo(int /*index*/, POINT /*client*/, UINT /*dpi*/) {}
   virtual void DragEnd(int /*index*/) {}
+  virtual bool Selectable(int /*index*/) const { return true; }
   // 참이면 PopupSurface가 배경 둥근 사각형을 그리지 않는다. 내용이 카드 여러 장을 직접 그린다.
   virtual bool PaintsOwnChrome() const { return false; }
   // 이 콘텐츠를 담는 창의 곡률 계층. 기본은 떠 있는 창이다.
@@ -81,6 +82,7 @@ class PopupSurface {
   int HitTestScreen(POINT screen) const;
   void TrackHotScreen(POINT screen);
   void InvokeRow(int index);
+  void SetHot(int index);
   void Tick();
 
  private:
@@ -94,6 +96,7 @@ class PopupSurface {
   void ApplyChrome();
   void ArmGuardTimer();
   void Tick(const wchar_t* src);
+  void MoveHot(int delta);
   void HitTree(POINT screen, bool* in_self, bool* in_allied) const;
   bool AlliedHwndAlive() const;
   bool PointInAlliedHwnd(POINT screen) const;
@@ -111,6 +114,9 @@ class PopupSurface {
   bool open_ = false;
   bool esc_down_ = false;
   bool win_down_ = false;
+  bool down_down_ = false;
+  bool up_down_ = false;
+  bool return_down_ = false;
   bool mouse_down_ = false;
   bool press_inside_ = false;
   bool saw_mousemove_ = false;

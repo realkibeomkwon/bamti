@@ -7,7 +7,6 @@
 #include "pipe_server.hpp"
 #include "popup_surface.hpp"
 #include "spotlight.hpp"
-#include "start_menu.hpp"
 #include "status_item.hpp"
 #include "status_panel.hpp"
 #include "status_registry.hpp"
@@ -174,7 +173,7 @@ class MenuBar {
   BuiltinWidgets widgets_;
   StatusRegistry status_;
   TaskbarController taskbar_;
-  StartMenu start_menu_;
+  bool start_popup_open_ = false;
   Spotlight spotlight_;
   PopupSurface status_popup_;
   std::unique_ptr<BarMenuContent> bar_menu_;

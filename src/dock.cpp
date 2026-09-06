@@ -923,6 +923,14 @@ class DockMenuContent : public PopupContent {
     return rows_[static_cast<size_t>(index)].id == kOptionsCommand;
   }
 
+  bool Selectable(int index) const override {
+    if (index < 0 || index >= static_cast<int>(rows_.size())) {
+      return false;
+    }
+    const MenuRow& row = rows_[static_cast<size_t>(index)];
+    return !row.separator && row.enabled;
+  }
+
   int OptionsIndex() const {
     for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
       if (rows_[static_cast<size_t>(i)].id == kOptionsCommand) {
@@ -1015,6 +1023,14 @@ class DockSubmenuContent : public PopupContent {
   bool empty() const { return rows_.empty(); }
   int RowCount() const override { return static_cast<int>(rows_.size()); }
   int CornerDip() const override { return kMenuCornerDip; }
+
+  bool Selectable(int index) const override {
+    if (index < 0 || index >= static_cast<int>(rows_.size())) {
+      return false;
+    }
+    const MenuRow& row = rows_[static_cast<size_t>(index)];
+    return !row.separator && row.enabled;
+  }
 
   SIZE Measure(UINT dpi) override { return MeasureMenuRows(rows_, dpi); }
 

@@ -265,6 +265,9 @@ bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode,
   last_fg_ = GetForegroundWindow();
   esc_down_ = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
   win_down_ = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+  down_down_ = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
+  up_down_ = (GetAsyncKeyState(VK_UP) & 0x8000) != 0;
+  return_down_ = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
   // Seed from the live button state so the guard timer does not read the press
   // that opened this popup as an outside click.
   mouse_down_ = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 ||
@@ -467,6 +470,41 @@ void PopupSurface::InvokeRow(int index) {
   Dismiss(index, DismissReason::kInvoke);
 }
 
+void PopupSurface::SetHot(int index) {
+  hot_ = index;
+  Present();
+}
+
+void PopupSurface::MoveHot(int delta) {
+  if (content_ == nullptr || delta == 0) {
+    return;
+  }
+  const int n = content_->RowCount();
+  if (n <= 0) {
+    return;
+  }
+  int next = hot_;
+  for (int tried = 0; tried < n; ++tried) {
+    if (next < 0) {
+      next = delta > 0 ? 0 : n - 1;
+    } else {
+      next += delta;
+      if (next >= n) {
+        next = 0;
+      } else if (next < 0) {
+        next = n - 1;
+      }
+    }
+    if (content_->Selectable(next)) {
+      if (next != hot_) {
+        hot_ = next;
+        Present();
+      }
+      return;
+    }
+  }
+}
+
 void PopupSurface::Tick() {
   Tick(L"owner");
 }
@@ -509,6 +547,25 @@ void PopupSurface::Tick(const wchar_t* src) {
     return;
   }
   win_down_ = lwin.down || rwin.down;
+
+  const AsyncKey arrow_down = ReadAsyncKey(VK_DOWN);
+  if (arrow_down.down && !down_down_) {
+    MoveHot(1);
+  }
+  down_down_ = arrow_down.down;
+
+  const AsyncKey up = ReadAsyncKey(VK_UP);
+  if (up.down && !up_down_) {
+    MoveHot(-1);
+  }
+  up_down_ = up.down;
+
+  const AsyncKey enter = ReadAsyncKey(VK_RETURN);
+  if (enter.down && !return_down_ && hot_ >= 0) {
+    InvokeRow(hot_);
+    return;
+  }
+  return_down_ = enter.down;
 
   // Capture on a WS_EX_NOACTIVATE popup only delivers messages while the
   // cursor is over that window. Poll dismisses outside clicks and keeps hover

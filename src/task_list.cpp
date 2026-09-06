@@ -65,7 +65,6 @@ bool SkipClass(const wchar_t* cls) {
       L"bamti.MenuBar",
       L"bamti.Dock",
       L"bamti.DockHot",
-      L"bamti.StartMenu",
       L"bamti.Spotlight",
       L"IME",
       L"MSCTFIME UI",

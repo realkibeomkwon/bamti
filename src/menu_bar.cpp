@@ -9,6 +9,7 @@
 #include "settings.hpp"
 #include "theme.hpp"
 #include "tray_popup_guard.hpp"
+#include "start_menu.hpp"
 #include "watchdog.hpp"
 #include "winx_menu.hpp"
 
@@ -55,6 +56,13 @@ constexpr UINT kTrayPeekCmd = 24;
 constexpr UINT kSettingsCmd = 25;
 constexpr UINT kMenuWidgetsSubCmd = 30;
 constexpr UINT kMenuTraySubCmd = 31;
+// 값 순서는 StartAction과 같아야 한다.
+constexpr UINT kStartExplorerCmd = 40;
+constexpr UINT kStartSettingsCmd = 41;
+constexpr UINT kStartRunCmd = 42;
+constexpr UINT kStartSleepCmd = 43;
+constexpr UINT kStartRestartCmd = 44;
+constexpr UINT kStartShutdownCmd = 45;
 constexpr UINT kTrayItemCmdBase = 4000;
 constexpr UINT kWinXCmdBase = 5000;
 constexpr UINT kPowerSubCmd = 5199;
@@ -320,7 +328,11 @@ MenuBar::MenuBar()
 MenuBar::~MenuBar() {
   RemoveWinHook();
   status_.StopAll();
-  start_menu_.Hide();
+  if (start_popup_open_) {
+    start_popup_open_ = false;
+    status_popup_.Close();
+    InvalidateArea(hwnd_, StartRect());
+  }
   spotlight_.Hide();
   status_popup_.Destroy();
   bar_submenu_popup_.Destroy();
@@ -406,7 +418,6 @@ bool MenuBar::Create(HINSTANCE instance) {
   ShowWindow(hwnd_, SW_SHOWNA);
   taskbar_.Hide();
   Log(L"bar", L"ready hwnd=%p taskbar_hidden=%d", hwnd_, taskbar_.hidden() ? 1 : 0);
-  start_menu_.Warmup(hwnd_, dark_);
   spotlight_.Warmup(hwnd_, dark_);
   InstallWinHook();
   SetTimer(hwnd_, kClockTimerId, 1000, nullptr);
@@ -535,6 +546,11 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         cc_open_ = false;
         clock_open_ = false;
+        const bool start_was_open = start_popup_open_;
+        start_popup_open_ = false;
+        if (start_was_open) {
+          InvalidateArea(hwnd_, StartRect());
+        }
         if (!open_panel_id_.empty()) {
           StatusEvent ev;
           ev.id = std::move(open_panel_id_);
@@ -671,8 +687,10 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           }
         }
       }
-      if (start_menu_.visible()) {
-        start_menu_.Hide();
+      if (start_popup_open_) {
+        start_popup_open_ = false;
+        status_popup_.Close();
+        InvalidateArea(hwnd_, StartRect());
       }
       break;
     }
@@ -1012,6 +1030,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         // TODO: 설정 페이지
         Log(L"bar", L"settings page not implemented yet");
       }
+      if (cmd >= kStartExplorerCmd && cmd <= kStartShutdownCmd) {
+        InvokeStartAction(static_cast<StartAction>(cmd - kStartExplorerCmd));
+      }
       if (cmd >= kWinXCmdBase && cmd < kPowerSubCmd) {
         const size_t idx = static_cast<size_t>(cmd - kWinXCmdBase);
         if (idx < winx_entries_.size()) {
@@ -1346,7 +1367,7 @@ void MenuBar::Paint() {
       DrawTimings draw{};
       QueryPerformanceCounter(&t0);
       clock_.Draw(buffer_dc, client, dirty, dark_, layout_.last(), &layout_,
-                  start_hot_ || start_menu_.visible(), start_pressed_ || start_menu_.visible(), &draw);
+                  start_hot_ || start_popup_open_, start_pressed_ || start_popup_open_, &draw);
       QueryPerformanceCounter(&t1);
       const double draw_ms = QpcMs(t0, t1);
 
@@ -1605,8 +1626,9 @@ void MenuBar::OpenOverflow() {
   if (overflow_panel_ == nullptr || hwnd_ == nullptr || layout_.last().overflow.empty()) {
     return;
   }
-  if (start_menu_.visible()) {
-    start_menu_.Hide();
+  if (start_popup_open_) {
+    start_popup_open_ = false;
+    status_popup_.Close();
     InvalidateArea(hwnd_, StartRect());
   }
   if (spotlight_.visible()) {
@@ -1683,19 +1705,49 @@ void MenuBar::ToggleStartMenu(bool from_keyboard) {
   if (fullscreen_occluded_) {
     return;
   }
-  status_popup_.Close();
+  if (start_popup_open_) {
+    if (status_popup_.IsOpen()) {
+      status_popup_.Close();
+    }
+    start_popup_open_ = false;
+    InvalidateArea(hwnd_, StartRect());
+    return;
+  }
   if (spotlight_.visible()) {
     spotlight_.Hide();
   }
-  RECT start = StartRect();
-  if (start.right <= start.left) {
-    RECT client{};
-    GetClientRect(hwnd_, &client);
-    start = client;
-    start.right = start.left + DipToPx(34, Dpi());
+  if (!bar_menu_) {
+    bar_menu_ = std::make_unique<BarMenuContent>();
   }
-  MapWindowPoints(hwnd_, nullptr, reinterpret_cast<LPPOINT>(&start), 2);
-  start_menu_.Toggle(hwnd_, start, dark_, from_keyboard);
+  CloseBarSubmenu(L"reopen");
+  bar_menu_->Reset(hwnd_, dark_);
+  bar_menu_->SetPopup(&status_popup_);
+  bar_menu_->Add(kStartExplorerCmd, L"파일 탐색기");
+  bar_menu_->Add(kStartSettingsCmd, L"설정");
+  bar_menu_->Add(kStartRunCmd, L"실행");
+  bar_menu_->AddSeparator();
+  bar_menu_->Add(kStartSleepCmd, L"절전");
+  bar_menu_->Add(kStartRestartCmd, L"다시 시작");
+  bar_menu_->Add(kStartShutdownCmd, L"시스템 종료");
+
+  RECT start = StartRect();
+  POINT anchor{start.left, start.bottom};
+  ClientToScreen(hwnd_, &anchor);
+
+  cc_open_ = false;
+  clock_open_ = false;
+  open_panel_id_.clear();
+  status_popup_.SetDark(dark_);
+  status_popup_.SetAfterTick(&MenuBar::AfterBarPopupTick, this);
+  if (!status_popup_.Open(bar_menu_.get(), anchor, PopupSurface::Anchor::BelowAt)) {
+    Log(L"bar", L"start menu open failed err=%lu", GetLastError());
+    InvalidateArea(hwnd_, StartRect());
+    return;
+  }
+  start_popup_open_ = true;
+  if (from_keyboard) {
+    status_popup_.SetHot(0);
+  }
   InvalidateArea(hwnd_, StartRect());
 }
 
@@ -1705,8 +1757,9 @@ void MenuBar::ToggleSpotlight() {
   }
   status_popup_.Close();
   cc_open_ = false;
-  if (start_menu_.visible()) {
-    start_menu_.Hide();
+  if (start_popup_open_) {
+    start_popup_open_ = false;
+    status_popup_.Close();
     InvalidateArea(hwnd_, StartRect());
   }
   spotlight_.Toggle(hwnd_, dark_);
@@ -1716,8 +1769,9 @@ bool MenuBar::ShowControlCenter(const RECT& item_rect, ControlCenterPage page) {
   if (fullscreen_occluded_ || cc_panel_ == nullptr) {
     return false;
   }
-  if (start_menu_.visible()) {
-    start_menu_.Hide();
+  if (start_popup_open_) {
+    start_popup_open_ = false;
+    status_popup_.Close();
     InvalidateArea(hwnd_, StartRect());
   }
   if (spotlight_.visible()) {
@@ -1792,8 +1846,9 @@ bool MenuBar::ShowClockFlyout() {
   if (fullscreen_occluded_ || clock_panel_ == nullptr) {
     return false;
   }
-  if (start_menu_.visible()) {
-    start_menu_.Hide();
+  if (start_popup_open_) {
+    start_popup_open_ = false;
+    status_popup_.Close();
     InvalidateArea(hwnd_, StartRect());
   }
   if (spotlight_.visible()) {
@@ -1821,8 +1876,9 @@ void MenuBar::ShowClockMenu() {
   if (fullscreen_occluded_ || clock_menu_ == nullptr) {
     return;
   }
-  if (start_menu_.visible()) {
-    start_menu_.Hide();
+  if (start_popup_open_) {
+    start_popup_open_ = false;
+    status_popup_.Close();
     InvalidateArea(hwnd_, StartRect());
   }
   if (spotlight_.visible()) {
@@ -1880,8 +1936,9 @@ void MenuBar::OpenStatusPanel(const StatusHit& hit) {
   if (found == nullptr || !found->panel) {
     return;
   }
-  if (start_menu_.visible()) {
-    start_menu_.Hide();
+  if (start_popup_open_) {
+    start_popup_open_ = false;
+    status_popup_.Close();
     InvalidateArea(hwnd_, StartRect());
   }
   if (spotlight_.visible()) {
@@ -2171,8 +2228,9 @@ void MenuBar::ShowStartContextMenu(POINT screen) {
   if (fullscreen_occluded_) {
     return;
   }
-  if (start_menu_.visible()) {
-    start_menu_.Hide();
+  if (start_popup_open_) {
+    start_popup_open_ = false;
+    status_popup_.Close();
     InvalidateArea(hwnd_, StartRect());
   }
   winx_entries_ = LoadWinXEntries();
@@ -2481,7 +2539,11 @@ void MenuBar::SetFullscreenOccluded(bool occluded) {
   fullscreen_occluded_ = occluded;
   UpdateProviderActive();
   if (occluded) {
-    start_menu_.Hide();
+    if (start_popup_open_) {
+      start_popup_open_ = false;
+      status_popup_.Close();
+      InvalidateArea(hwnd_, StartRect());
+    }
     spotlight_.Hide();
     status_popup_.Close();
     UnregisterAppBar();
