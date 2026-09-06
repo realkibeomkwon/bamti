@@ -67,6 +67,7 @@ constexpr UINT_PTR kCtrlPollTimerId = 9;
 constexpr UINT kDesktopPeekDwellMs = 120;
 constexpr UINT kCornerWatchMs = 30;
 constexpr UINT kCtrlPollMs = 200;
+constexpr ULONGLONG kCtrlHookGraceMs = 600;
 constexpr int kPeekZoneDip = 14;  // bar_layout.cpp의 kPadRightDip과 같다.
 constexpr int kPeekRearmZoneDip = 96;  // 걸쇠를 다시 걸 수 있게 되는 거리.
 constexpr char kSpotlightItemId[] = "bamti.widget/spotlight";
@@ -486,14 +487,13 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         return 0;
       }
       if (wparam == kCtrlPollTimerId) {
-        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 && !corner_watch_on_) {
+        if (CtrlHeld() && !corner_watch_on_) {
           StartCornerWatch();
         }
         return 0;
       }
       if (wparam == kCornerWatchTimerId) {
-        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0) {
-          g_ctrl_held = false;
+        if (!CtrlHeld()) {
           StopCornerWatch();
           return 0;
         }
@@ -2319,14 +2319,38 @@ bool MenuBar::CornerHit() const {
   return pt.x >= rc.right - DipToPx(kPeekZoneDip, Dpi());
 }
 
-bool MenuBar::DesktopPeekWanted() const {
+bool MenuBar::DesktopPeekWanted() {
   if (fullscreen_occluded_ || reorder_active_) {
     return false;
   }
   if (status_popup_.IsOpen() || bar_submenu_popup_.IsOpen()) {
     return false;
   }
-  return (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+  return CtrlHeld();
+}
+
+bool MenuBar::CtrlHeld() {
+  const bool async = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+  if (async) {
+    ctrl_hook_only_since_ = 0;
+    return true;
+  }
+  if (!g_ctrl_held) {
+    ctrl_hook_only_since_ = 0;
+    return false;
+  }
+  if (ctrl_hook_only_since_ == 0) {
+    ctrl_hook_only_since_ = GetTickCount64();
+    const int lbtn = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 ? 1 : 0;
+    Log(L"peek", L"ctrl split async=0 hook=1 lbtn=%d", lbtn);
+  }
+  if (GetTickCount64() - ctrl_hook_only_since_ >= kCtrlHookGraceMs) {
+    g_ctrl_held = false;
+    ctrl_hook_only_since_ = 0;
+    Log(L"peek", L"ctrl hook stale");
+    return false;
+  }
+  return true;
 }
 
 void MenuBar::UpdateDesktopPeek() {

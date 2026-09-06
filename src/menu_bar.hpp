@@ -67,7 +67,14 @@ class MenuBar {
   void StartTrayPeek();
   void EndTrayPeek();
   bool CornerHit() const;
-  bool DesktopPeekWanted() const;
+  bool DesktopPeekWanted();
+  // Ctrl 이 눌려 있는가.
+  //
+  // 관측자가 둘이고 서로 반대 방향으로 틀린다. 훅은 키 뗌을 놓치면 참인 채로
+  // 굳고, GetAsyncKeyState 는 눌려 있는데도 0 을 돌려주는 순간이 있다.
+  // 그래서 합집합으로 보되, 훅만 참인 상태가 오래 이어지면 굳은 것으로 보고
+  // 훅 쪽을 버린다.
+  bool CtrlHeld();
   void UpdateDesktopPeek();
   void StartDesktopPeek();
   void StopDesktopPeek(const wchar_t* reason);
@@ -217,6 +224,7 @@ class MenuBar {
   bool peek_dwell_armed_ = false;
   bool last_corner_hit_ = false;
   bool corner_watch_on_ = false;
+  ULONGLONG ctrl_hook_only_since_ = 0;
   int wheel_accum_ = 0;
 };
 
