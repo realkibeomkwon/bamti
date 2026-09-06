@@ -14,13 +14,10 @@
 
 #include <commctrl.h>
 #include <dwmapi.h>
-#include <objbase.h>
 #include <shellapi.h>
-#include <shldisp.h>
 #include <uxtheme.h>
 #include <windowsx.h>
 #include <wtsapi32.h>
-#include <wrl/client.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -29,136 +26,6 @@
 
 namespace bamti {
 namespace {
-
-struct ComScope {
-  bool ok = false;
-  bool uninit = false;
-
-  ComScope() {
-    const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if (hr == S_OK) {
-      ok = true;
-      uninit = true;
-    } else if (hr == S_FALSE || hr == RPC_E_CHANGED_MODE) {
-      ok = true;
-    } else {
-      Log(L"peek", L"CoInitializeEx hr=0x%08lx", static_cast<unsigned long>(hr));
-    }
-  }
-
-  ~ComScope() {
-    if (uninit) {
-      CoUninitialize();
-    }
-  }
-
-  ComScope(const ComScope&) = delete;
-  ComScope& operator=(const ComScope&) = delete;
-};
-
-int IconicOf(HWND hwnd) {
-  return (hwnd != nullptr && IsIconic(hwnd)) ? 1 : 0;
-}
-
-void LogDesktopPeekResult(const wchar_t* op, HRESULT hr, int iconic_before, int iconic_after, HWND fg_before) {
-  const HWND fg_after = GetForegroundWindow();
-  wchar_t cls[256]{};
-  if (fg_after != nullptr) {
-    GetClassNameW(fg_after, cls, 256);
-  }
-  Log(L"peek", L"%s hr=0x%08lx iconic_before=%d iconic_after=%d fg_before=%p fg_after=%p cls=%s", op,
-      static_cast<unsigned long>(hr), iconic_before, iconic_after, static_cast<void*>(fg_before),
-      static_cast<void*>(fg_after), cls);
-}
-
-volatile UINT g_hook_key_count = 0;
-volatile DWORD g_hook_last_vk = 0;
-volatile UINT g_hook_last_msg = 0;
-
-int KeyDownBit(SHORT state) {
-  return (state & 0x8000) ? 1 : 0;
-}
-
-struct CtrlProbeSnap {
-  UINT hook = 0;
-  DWORD last_vk = 0;
-  UINT last_msg = 0;
-  int async_c = 0;
-  int async_l = 0;
-  int async_r = 0;
-  int keystate_c = 0;
-  int lbtn = 0;
-  HWND capture = nullptr;
-  DWORD guiflags = 0;
-  HWND fg = nullptr;
-};
-
-bool SameCtrlProbe(const CtrlProbeSnap& a, const CtrlProbeSnap& b) {
-  return a.hook == b.hook && a.last_vk == b.last_vk && a.last_msg == b.last_msg && a.async_c == b.async_c &&
-         a.async_l == b.async_l && a.async_r == b.async_r && a.keystate_c == b.keystate_c && a.lbtn == b.lbtn &&
-         a.capture == b.capture && a.guiflags == b.guiflags && a.fg == b.fg;
-}
-
-void LogCtrlProbeIfChanged() {
-  CtrlProbeSnap now;
-  now.hook = g_hook_key_count;
-  now.last_vk = g_hook_last_vk;
-  now.last_msg = g_hook_last_msg;
-  now.async_c = KeyDownBit(GetAsyncKeyState(VK_CONTROL));
-  now.async_l = KeyDownBit(GetAsyncKeyState(VK_LCONTROL));
-  now.async_r = KeyDownBit(GetAsyncKeyState(VK_RCONTROL));
-  now.keystate_c = KeyDownBit(GetKeyState(VK_CONTROL));
-  now.lbtn = KeyDownBit(GetAsyncKeyState(VK_LBUTTON));
-  GUITHREADINFO gti{};
-  gti.cbSize = sizeof(gti);
-  if (GetGUIThreadInfo(0, &gti) != FALSE) {
-    now.capture = gti.hwndCapture;
-    now.guiflags = gti.flags;
-  }
-  now.fg = GetForegroundWindow();
-  DWORD lastinput = 0;
-  LASTINPUTINFO lii{};
-  lii.cbSize = sizeof(lii);
-  if (GetLastInputInfo(&lii) != FALSE) {
-    lastinput = lii.dwTime;
-  }
-  static CtrlProbeSnap prev{};
-  static bool have_prev = false;
-  if (have_prev && SameCtrlProbe(now, prev) && now.lbtn == 0) {
-    return;
-  }
-  have_prev = true;
-  prev = now;
-  Log(L"peek",
-      L"probe hook=%u lastvk=%lu lastmsg=0x%08x async_c=%d async_l=%d async_r=%d keystate_c=%d lbtn=%d capture=%p "
-      L"guiflags=0x%08lx fg=%p lastinput=%lu",
-      now.hook, static_cast<unsigned long>(now.last_vk), now.last_msg, now.async_c, now.async_l, now.async_r,
-      now.keystate_c, now.lbtn, static_cast<void*>(now.capture), static_cast<unsigned long>(now.guiflags),
-      static_cast<void*>(now.fg), static_cast<unsigned long>(lastinput));
-}
-
-HRESULT CallShellDesktop(bool undo) {
-  ComScope com;
-  if (!com.ok) {
-    return E_FAIL;
-  }
-  Microsoft::WRL::ComPtr<IDispatch> shell;
-  HRESULT hr = CoCreateInstance(CLSID_Shell, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&shell));
-  if (FAILED(hr) || shell == nullptr) {
-    Log(L"peek", L"CoCreateInstance Shell hr=0x%08lx", static_cast<unsigned long>(hr));
-    return hr;
-  }
-  Microsoft::WRL::ComPtr<IShellDispatch> dispatch;
-  hr = shell.As(&dispatch);
-  if (FAILED(hr) || dispatch == nullptr) {
-    Log(L"peek", L"IShellDispatch hr=0x%08lx", static_cast<unsigned long>(hr));
-    return hr;
-  }
-  if (undo) {
-    return dispatch->UndoMinimizeALL();
-  }
-  return dispatch->MinimizeAll();
-}
 
 constexpr UINT kAppBarCallback = WM_APP + 1;
 constexpr UINT kToggleStartMsg = WM_APP + 7;
@@ -196,11 +63,9 @@ constexpr UINT_PTR kPeekTimerId = 4;
 constexpr UINT kPeekMs = 10000;
 constexpr UINT_PTR kDesktopPeekDwellTimerId = 5;
 constexpr UINT_PTR kCornerWatchTimerId = 7;
-constexpr UINT_PTR kDesktopIconicTimerId = 8;
 constexpr UINT_PTR kCtrlPollTimerId = 9;
 constexpr UINT kDesktopPeekDwellMs = 120;
 constexpr UINT kCornerWatchMs = 30;
-constexpr UINT kDesktopIconicMs = 200;
 constexpr UINT kCtrlPollMs = 200;
 constexpr int kPeekZoneDip = 14;  // bar_layout.cpp의 kPadRightDip과 같다.
 constexpr int kPeekRearmZoneDip = 96;  // 걸쇠를 다시 걸 수 있게 되는 거리.
@@ -348,9 +213,6 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
   if (info == nullptr || (info->flags & LLKHF_INJECTED) != 0) {
     return CallNextHookEx(g_key_hook, code, wparam, lparam);
   }
-  ++g_hook_key_count;
-  g_hook_last_vk = info->vkCode;
-  g_hook_last_msg = static_cast<UINT>(wparam);
 
   const bool down = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
   const bool up = wparam == WM_KEYUP || wparam == WM_SYSKEYUP;
@@ -623,24 +485,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         return 0;
       }
-      if (wparam == kDesktopIconicTimerId) {
-        KillTimer(hwnd_, kDesktopIconicTimerId);
-        LogDesktopPeekResult(desktop_pending_undo_ ? L"UndoMinimizeALL" : L"MinimizeAll", desktop_hr_,
-                             desktop_iconic_before_, IconicOf(desktop_probe_), desktop_fg_before_);
-        if (desktop_pending_undo_ && desktop_hr_ == S_OK) {
-          if (restore_target_ != nullptr && IsWindow(restore_target_) && !IsIconic(restore_target_)) {
-            const BOOL zorder = SetWindowPos(restore_target_, HWND_TOP, 0, 0, 0, 0,
-                                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            const BOOL fg = SetForegroundWindow(restore_target_);
-            Log(L"peek", L"restore hwnd=%p zorder=%d fg=%d", static_cast<void*>(restore_target_), zorder ? 1 : 0,
-                fg ? 1 : 0);
-          }
-          restore_target_ = nullptr;
-        }
-        return 0;
-      }
       if (wparam == kCtrlPollTimerId) {
-        LogCtrlProbeIfChanged();
         if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 && !corner_watch_on_) {
           StartCornerWatch();
         }
@@ -1242,7 +1087,6 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kPeekTimerId);
       KillTimer(hwnd_, kDesktopPeekDwellTimerId);
       KillTimer(hwnd_, kCornerWatchTimerId);
-      KillTimer(hwnd_, kDesktopIconicTimerId);
       KillTimer(hwnd_, kCtrlPollTimerId);
       peek_dwell_armed_ = false;
       last_corner_hit_ = false;
@@ -2502,75 +2346,11 @@ void MenuBar::UpdateDesktopPeek() {
   Log(L"peek", L"dwell arm");
 }
 
-void MenuBar::ShowDesktop() {
-  if (hwnd_ != nullptr) {
-    KillTimer(hwnd_, kDesktopIconicTimerId);
-  }
-  desktop_fg_before_ = GetForegroundWindow();
-  desktop_probe_ = desktop_fg_before_;
-  desktop_iconic_before_ = IconicOf(desktop_probe_);
-  desktop_pending_undo_ = false;
-  if (restore_target_ == nullptr || IsWindow(restore_target_) == FALSE) {
-    const HWND fg = GetForegroundWindow();
-    wchar_t cls[256]{};
-    if (fg != nullptr) {
-      GetClassNameW(fg, cls, 256);
-    }
-    if (fg == nullptr || fg == hwnd_ || lstrcmpiW(cls, L"Progman") == 0 || lstrcmpiW(cls, L"WorkerW") == 0) {
-      restore_target_ = nullptr;
-    } else {
-      restore_target_ = fg;
-    }
-  }
-  desktop_hr_ = CallShellDesktop(false);
-  if (desktop_hr_ == S_OK) {
-    desktop_shown_ = true;
-  }
-  if (hwnd_ != nullptr) {
-    SetTimer(hwnd_, kDesktopIconicTimerId, kDesktopIconicMs, nullptr);
-  } else {
-    LogDesktopPeekResult(L"MinimizeAll", desktop_hr_, desktop_iconic_before_, IconicOf(desktop_probe_),
-                         desktop_fg_before_);
-  }
-}
-
-void MenuBar::HideDesktop() {
-  if (hwnd_ != nullptr) {
-    KillTimer(hwnd_, kDesktopIconicTimerId);
-  }
-  desktop_fg_before_ = GetForegroundWindow();
-  if (desktop_probe_ == nullptr || IsWindow(desktop_probe_) == FALSE) {
-    desktop_probe_ = desktop_fg_before_;
-  }
-  desktop_iconic_before_ = IconicOf(desktop_probe_);
-  desktop_pending_undo_ = true;
-  desktop_hr_ = CallShellDesktop(true);
-  if (desktop_hr_ == S_OK) {
-    desktop_shown_ = false;
-  }
-  if (hwnd_ != nullptr) {
-    SetTimer(hwnd_, kDesktopIconicTimerId, kDesktopIconicMs, nullptr);
-  } else {
-    LogDesktopPeekResult(L"UndoMinimizeALL", desktop_hr_, desktop_iconic_before_, IconicOf(desktop_probe_),
-                         desktop_fg_before_);
-  }
-}
-
 void MenuBar::StartDesktopPeek() {
   if (peek_latched_) {
     return;
   }
-  wchar_t cls[256]{};
-  if (restore_target_ != nullptr) {
-    GetClassNameW(restore_target_, cls, 256);
-  }
-  Log(L"peek", L"toggle shown=%d target=%p cls=%s", desktop_shown_ ? 1 : 0, static_cast<void*>(restore_target_),
-      cls);
-  if (desktop_shown_) {
-    HideDesktop();
-  } else {
-    ShowDesktop();
-  }
+  desktop_toggle_.Toggle();
   peek_latched_ = true;
 }
 

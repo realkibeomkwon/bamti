@@ -40,6 +40,8 @@ bool LaunchDockApp(const DockApp& app);
 std::wstring DockLaunchCommandLine(const DockApp& app);
 void RestoreHwnds(const std::vector<HWND>& windows);
 void HideHwnds(const std::vector<HWND>& windows);
+// 바탕 화면을 드러내려면 치워야 하는 창. Z 순서 앞에서 뒤 순서다.
+std::vector<HWND> CollectDesktopClearWindows();
 void CloseHwnds(const std::vector<HWND>& windows);
 
 DockApp MakeSpotlightDockApp();

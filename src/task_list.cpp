@@ -1700,6 +1700,27 @@ bool LaunchDockApp(const DockApp& app) {
   return TryDockLaunch(app, LaunchAumid, LaunchCommandLine, LaunchExe);
 }
 
+std::vector<HWND> CollectDesktopClearWindows() {
+  struct EnumCtx {
+    std::vector<HWND>* windows = nullptr;
+    IVirtualDesktopManager* vdm = nullptr;
+  } ctx;
+  std::vector<HWND> windows;
+  ctx.windows = &windows;
+  ctx.vdm = DesktopManager();
+  EnumWindows(
+      [](HWND hwnd, LPARAM lp) -> BOOL {
+        auto* ctx = reinterpret_cast<EnumCtx*>(lp);
+        if (!IsTaskWindow(hwnd) || IsIconic(hwnd) || !IsWindowVisible(hwnd) || !OnCurrentDesktop(ctx->vdm, hwnd)) {
+          return TRUE;
+        }
+        ctx->windows->push_back(hwnd);
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&ctx));
+  return windows;
+}
+
 void RestoreHwnds(const std::vector<HWND>& windows) {
   HWND focus = nullptr;
   for (auto it = windows.rbegin(); it != windows.rend(); ++it) {

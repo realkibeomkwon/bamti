@@ -90,6 +90,7 @@
     <ClCompile Include="src\log.cpp" />
     <ClCompile Include="src\watchdog.cpp" />
     <ClCompile Include="src\menu_bar.cpp" />
+    <ClCompile Include="src\desktop_toggle.cpp" />
     <ClCompile Include="src\clock_renderer.cpp" />
     <ClCompile Include="src\theme.cpp" />
     <ClCompile Include="src\pipe_server.cpp" />
@@ -121,6 +122,7 @@
     <ClInclude Include="src\log.hpp" />
     <ClInclude Include="src\watchdog.hpp" />
     <ClInclude Include="src\menu_bar.hpp" />
+    <ClInclude Include="src\desktop_toggle.hpp" />
     <ClInclude Include="src\clock_renderer.hpp" />
     <ClInclude Include="src\theme.hpp" />
     <ClInclude Include="src\dwm.hpp" />

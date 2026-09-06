@@ -12,6 +12,7 @@
 #include "status_panel.hpp"
 #include "status_registry.hpp"
 #include "control_center.hpp"
+#include "desktop_toggle.hpp"
 #include "taskbar_controller.hpp"
 #include "tray_mirror.hpp"
 #include "widgets/builtin.hpp"
@@ -70,8 +71,6 @@ class MenuBar {
   void UpdateDesktopPeek();
   void StartDesktopPeek();
   void StopDesktopPeek(const wchar_t* reason);
-  void ShowDesktop();
-  void HideDesktop();
   void StartCornerWatch();
   void StopCornerWatch();
   void RefreshFullscreenState();
@@ -213,14 +212,8 @@ class MenuBar {
   std::vector<uint64_t> tray_menu_keys_;
   std::vector<WinXEntry> winx_entries_;
   UINT open_submenu_cmd_ = 0;
+  DesktopToggle desktop_toggle_;
   bool peek_latched_ = false;
-  bool desktop_shown_ = false;
-  HWND desktop_probe_ = nullptr;
-  HWND restore_target_ = nullptr;
-  HWND desktop_fg_before_ = nullptr;
-  HRESULT desktop_hr_ = E_FAIL;
-  int desktop_iconic_before_ = 0;
-  bool desktop_pending_undo_ = false;
   bool peek_dwell_armed_ = false;
   bool last_corner_hit_ = false;
   bool corner_watch_on_ = false;

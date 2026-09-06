@@ -20,6 +20,7 @@ add_executable(bamti WIN32
   src/log.cpp
   src/watchdog.cpp
   src/menu_bar.cpp
+  src/desktop_toggle.cpp
   src/clock_renderer.cpp
   src/clock_flyout.cpp
   src/bar_layout.cpp
