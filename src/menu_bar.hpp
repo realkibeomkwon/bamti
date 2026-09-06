@@ -51,6 +51,9 @@ class MenuBar {
   void Layout();
   void ApplyBackdrop();
   void Paint();
+  void Present();
+  void EnsureLayeredTarget();
+  void ReleaseLayeredTarget();
   void RefreshLayout();
   void ArmRepaint();
   void NotePerf(double compute_ms, double draw_ms, const RECT& dirty, const RECT& client, const DrawTimings& draw,
@@ -123,6 +126,12 @@ class MenuBar {
 
   HWND hwnd_ = nullptr;
   HWND tooltip_ = nullptr;
+  HDC mem_dc_ = nullptr;
+  HBITMAP dib_ = nullptr;
+  HGDIOBJ old_dib_ = nullptr;
+  int dib_w_ = 0;
+  int dib_h_ = 0;
+  bool presenting_ = false;
   bool appbar_registered_ = false;
   bool fullscreen_occluded_ = false;
   bool session_locked_ = false;

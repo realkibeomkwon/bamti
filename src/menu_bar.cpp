@@ -79,6 +79,70 @@ constexpr UINT kCornerWatchMs = 30;
 constexpr UINT kCtrlPollMs = 200;
 constexpr ULONGLONG kCtrlHookGraceMs = 600;
 constexpr int kPeekZoneDip = 14;  // bar_layout.cpp의 kPadRightDip과 같다.
+
+enum AccentState : DWORD {
+  kAccentDisabled = 0,
+  kAccentEnableGradient = 1,
+  kAccentEnableTransparentGradient = 2,
+  kAccentEnableBlurBehind = 3,
+  kAccentEnableAcrylicBlurBehind = 4,
+  kAccentEnableHostBackdrop = 5,
+};
+
+// 화면이 검으면 실패다. 4 → 3 → 2 순으로 시험한다.
+constexpr DWORD kBarAccentState = kAccentEnableAcrylicBlurBehind;
+
+struct AccentPolicy {
+  DWORD state;
+  DWORD flags;
+  DWORD gradient_color;  // AABBGGRR 이다. RGB 가 아니라 BGR 순서인 것에 주의한다.
+  DWORD animation_id;
+};
+
+struct WindowCompositionAttributeData {
+  DWORD attrib;  // 19 = WCA_ACCENT_POLICY
+  PVOID data;
+  SIZE_T size;
+};
+
+using SetWindowCompositionAttributeFn = BOOL(WINAPI*)(HWND, WindowCompositionAttributeData*);
+
+SetWindowCompositionAttributeFn LoadSetWindowCompositionAttribute() {
+  static const SetWindowCompositionAttributeFn fn = []() -> SetWindowCompositionAttributeFn {
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32 == nullptr) {
+      Log(L"bar", L"composition user32 missing err=%lu", GetLastError());
+      return nullptr;
+    }
+    auto found = reinterpret_cast<SetWindowCompositionAttributeFn>(
+        GetProcAddress(user32, "SetWindowCompositionAttribute"));
+    Log(L"bar", L"composition GetProcAddress %s err=%lu", found != nullptr ? L"ok" : L"failed",
+        found != nullptr ? 0ul : GetLastError());
+    return found;
+  }();
+  return fn;
+}
+
+void ApplyAccentPolicy(HWND hwnd, bool dark) {
+  const auto fn = LoadSetWindowCompositionAttribute();
+  if (fn == nullptr) {
+    return;
+  }
+  AccentPolicy policy{};
+  policy.state = kBarAccentState;
+  policy.flags = 0;
+  policy.gradient_color = dark ? 0x99000000u : 0x99FFFFFFu;
+  policy.animation_id = 0;
+  WindowCompositionAttributeData data{};
+  data.attrib = 19;
+  data.data = &policy;
+  data.size = sizeof(policy);
+  SetLastError(ERROR_SUCCESS);
+  const BOOL ok = fn(hwnd, &data);
+  const DWORD err = GetLastError();
+  Log(L"bar", L"composition set ok=%d err=%lu state=%lu color=0x%08lx", ok ? 1 : 0, err, policy.state,
+      policy.gradient_color);
+}
 constexpr int kPeekRearmZoneDip = 96;  // 걸쇠를 다시 걸 수 있게 되는 거리.
 constexpr char kSpotlightItemId[] = "bamti.widget/spotlight";
 constexpr char kControlCenterItemId[] = "bamti.widget/control_center";
@@ -301,9 +365,7 @@ int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
 }
 
-void InvalidateArea(HWND hwnd, RECT rc) {
-  InvalidateRect(hwnd, &rc, FALSE);
-}
+
 
 double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
   static LARGE_INTEGER freq{};
@@ -331,11 +393,11 @@ MenuBar::~MenuBar() {
   if (start_popup_open_) {
     start_popup_open_ = false;
     status_popup_.Close();
-    InvalidateArea(hwnd_, StartRect());
   }
   spotlight_.Hide();
   status_popup_.Destroy();
   bar_submenu_popup_.Destroy();
+  ReleaseLayeredTarget();
   if (hwnd_) {
     DestroyWindow(hwnd_);
     hwnd_ = nullptr;
@@ -354,7 +416,7 @@ bool MenuBar::Create(HINSTANCE instance) {
   wc.lpfnWndProc = WndProc;
   wc.hInstance = instance;
   wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-  wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+  wc.hbrBackground = nullptr;
   wc.lpszClassName = kMenuBarClass;
   if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
     return false;
@@ -366,8 +428,8 @@ bool MenuBar::Create(HINSTANCE instance) {
 
   dark_ = ShellUsesDarkMode();
 
-  hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, kMenuBarClass, L"bamti", WS_POPUP, 0, 0,
-                          0, 0, nullptr, nullptr, instance, this);
+  hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_LAYERED, kMenuBarClass, L"bamti",
+                          WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance, this);
   if (!hwnd_) {
     return false;
   }
@@ -416,6 +478,8 @@ bool MenuBar::Create(HINSTANCE instance) {
   Layout();
   taskbar_.Restore();
   ShowWindow(hwnd_, SW_SHOWNA);
+  ApplyBackdrop();
+  Present();
   taskbar_.Hide();
   Log(L"bar", L"ready hwnd=%p taskbar_hidden=%d", hwnd_, taskbar_.hidden() ? 1 : 0);
   spotlight_.Warmup(hwnd_, dark_);
@@ -549,7 +613,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         const bool start_was_open = start_popup_open_;
         start_popup_open_ = false;
         if (start_was_open) {
-          InvalidateArea(hwnd_, StartRect());
+          Present();
         }
         if (!open_panel_id_.empty()) {
           StatusEvent ev;
@@ -577,7 +641,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       clock_.SetDpi(HIWORD(wparam));
       ApplyBackdrop();
       Layout();
-      InvalidateRect(hwnd_, nullptr, FALSE);
+      Present();
       return 0;
     case WM_DISPLAYCHANGE:
     case WM_SETTINGCHANGE:
@@ -601,7 +665,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       layout_.SetDpi(Dpi());
       clock_.SetDpi(Dpi());
       Layout();
-      InvalidateRect(hwnd_, nullptr, FALSE);
+      Present();
       return 0;
     case WM_WINDOWPOSCHANGED: {
       APPBARDATA abd{};
@@ -659,7 +723,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (start_hot_ || start_pressed_) {
         start_hot_ = false;
         start_pressed_ = false;
-        InvalidateArea(hwnd_, StartRect());
+        Present();
       }
       return 0;
     case WM_LBUTTONDOWN: {
@@ -668,7 +732,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         status_popup_.Close();
         start_pressed_ = true;
         SetCapture(hwnd_);
-        InvalidateArea(hwnd_, StartRect());
+        Present();
         return 0;
       }
       if (HitClock(pt)) {
@@ -690,14 +754,14 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (start_popup_open_) {
         start_popup_open_ = false;
         status_popup_.Close();
-        InvalidateArea(hwnd_, StartRect());
+        Present();
       }
       break;
     }
     case WM_CAPTURECHANGED:
       if (start_pressed_) {
         start_pressed_ = false;
-        InvalidateArea(hwnd_, StartRect());
+        Present();
       }
       if (reorder_active_ && reinterpret_cast<HWND>(lparam) != hwnd_) {
         CancelReorder();
@@ -737,7 +801,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (start_pressed_) {
         start_pressed_ = false;
         ReleaseCapture();
-        InvalidateArea(hwnd_, StartRect());
+        Present();
       }
       if (start_click) {
         ToggleStartMenu();
@@ -1213,19 +1277,18 @@ void MenuBar::ApplyBackdrop() {
   }
 
   const BOOL dark = dark_ ? TRUE : FALSE;
-  const HRESULT hr_dark = DwmSetWindowAttribute(hwnd_, dwm::kUseImmersiveDarkMode, &dark, sizeof(dark));
+  DwmSetWindowAttribute(hwnd_, dwm::kUseImmersiveDarkMode, &dark, sizeof(dark));
 
-  const int backdrop = dwm::kBackdropTransientWindow;
-  const HRESULT hr_type = DwmSetWindowAttribute(hwnd_, dwm::kSystemBackdropType, &backdrop, sizeof(backdrop));
+  const int backdrop = dwm::kBackdropNone;
+  DwmSetWindowAttribute(hwnd_, dwm::kSystemBackdropType, &backdrop, sizeof(backdrop));
 
   const int corner = dwm::kCornerDoNotRound;
-  const HRESULT hr_corner = DwmSetWindowAttribute(hwnd_, dwm::kWindowCornerPreference, &corner, sizeof(corner));
+  DwmSetWindowAttribute(hwnd_, dwm::kWindowCornerPreference, &corner, sizeof(corner));
 
-  const MARGINS margins{-1, -1, -1, -1};
-  const HRESULT hr_extend = DwmExtendFrameIntoClientArea(hwnd_, &margins);
-  Log(L"bar", L"backdrop dark=0x%08lx type=0x%08lx corner=0x%08lx extend=0x%08lx value=%d",
-      static_cast<unsigned long>(hr_dark), static_cast<unsigned long>(hr_type),
-      static_cast<unsigned long>(hr_corner), static_cast<unsigned long>(hr_extend), backdrop);
+  const MARGINS margins{0, 0, 0, 0};
+  DwmExtendFrameIntoClientArea(hwnd_, &margins);
+
+  ApplyAccentPolicy(hwnd_, dark_);
 }
 
 void MenuBar::ArmRepaint() {
@@ -1251,21 +1314,21 @@ void MenuBar::RefreshLayout() {
   QueryPerformanceCounter(&t1);
   last_compute_ms_ = QpcMs(t0, t1);
 
-  if (before.segments.size() != after.segments.size() || before.dpi != after.dpi ||
-      EqualRect(&before.client, &after.client) == FALSE) {
-    InvalidateRect(hwnd_, nullptr, FALSE);
-    return;
+  bool changed = before.segments.size() != after.segments.size() || before.dpi != after.dpi ||
+                 EqualRect(&before.client, &after.client) == FALSE;
+  if (!changed) {
+    for (size_t i = 0; i < after.segments.size(); ++i) {
+      const BarSegment& a = before.segments[i];
+      const BarSegment& b = after.segments[i];
+      if (a.kind != b.kind || a.id != b.id || EqualRect(&a.rect, &b.rect) == FALSE || a.text != b.text ||
+          a.accent != b.accent || a.icon_key != b.icon_key) {
+        changed = true;
+        break;
+      }
+    }
   }
-  for (size_t i = 0; i < after.segments.size(); ++i) {
-    const BarSegment& a = before.segments[i];
-    const BarSegment& b = after.segments[i];
-    if (a.kind != b.kind || a.id != b.id || EqualRect(&a.rect, &b.rect) == FALSE) {
-      InvalidateRect(hwnd_, nullptr, FALSE);
-      return;
-    }
-    if (a.text != b.text || a.accent != b.accent || a.icon_key != b.icon_key) {
-      InvalidateRect(hwnd_, &b.rect, FALSE);
-    }
+  if (changed) {
+    Present();
   }
 }
 
@@ -1336,51 +1399,127 @@ void MenuBar::NotePerf(double compute_ms, double draw_ms, const RECT& dirty, con
 }
 
 void MenuBar::Paint() {
-  WatchdogStage(L"bar.paint");
   PAINTSTRUCT ps{};
-  const HDC hdc = BeginPaint(hwnd_, &ps);
+  BeginPaint(hwnd_, &ps);
+  EndPaint(hwnd_, &ps);
+}
+
+void MenuBar::ReleaseLayeredTarget() {
+  if (mem_dc_ != nullptr && old_dib_ != nullptr) {
+    SelectObject(mem_dc_, old_dib_);
+    old_dib_ = nullptr;
+  }
+  if (dib_ != nullptr) {
+    DeleteObject(dib_);
+    dib_ = nullptr;
+  }
+  if (mem_dc_ != nullptr) {
+    DeleteDC(mem_dc_);
+    mem_dc_ = nullptr;
+  }
+  dib_w_ = 0;
+  dib_h_ = 0;
+}
+
+void MenuBar::EnsureLayeredTarget() {
+  if (hwnd_ == nullptr) {
+    return;
+  }
   RECT client{};
   GetClientRect(hwnd_, &client);
+  const int width = (std::max)(0L, client.right - client.left);
+  const int height = (std::max)(0L, client.bottom - client.top);
+  if (width == 0 || height == 0) {
+    return;
+  }
+  if (dib_ != nullptr && mem_dc_ != nullptr && dib_w_ == width && dib_h_ == height) {
+    return;
+  }
+  ReleaseLayeredTarget();
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = width;
+  bmi.bmiHeader.biHeight = -height;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  void* bits = nullptr;
+  mem_dc_ = CreateCompatibleDC(nullptr);
+  if (mem_dc_ == nullptr) {
+    return;
+  }
+  dib_ = CreateDIBSection(mem_dc_, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  if (dib_ == nullptr) {
+    DeleteDC(mem_dc_);
+    mem_dc_ = nullptr;
+    return;
+  }
+  old_dib_ = SelectObject(mem_dc_, dib_);
+  dib_w_ = width;
+  dib_h_ = height;
+}
 
-  RECT dirty = ps.rcPaint;
-  if (IsRectEmpty(&dirty) == FALSE) {
-    if (layout_.last().dpi != Dpi() || EqualRect(&layout_.last().client, &client) == FALSE) {
-      layout_.SetDpi(Dpi());
-      LARGE_INTEGER t0{};
-      LARGE_INTEGER t1{};
-      QueryPerformanceCounter(&t0);
-      layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), OrderedItems());
-      QueryPerformanceCounter(&t1);
-      last_compute_ms_ = QpcMs(t0, t1);
-    }
+void MenuBar::Present() {
+  WatchdogStage(L"bar.present");
+  if (presenting_ || hwnd_ == nullptr || fullscreen_occluded_) {
+    return;
+  }
+  presenting_ = true;
+  struct PresentGuard {
+    bool& busy;
+    explicit PresentGuard(bool& flag) : busy(flag) {}
+    ~PresentGuard() { busy = false; }
+  } guard(presenting_);
 
-    BP_PAINTPARAMS params{};
-    params.cbSize = sizeof(params);
-    params.dwFlags = BPPF_ERASE;
-    HDC buffer_dc = nullptr;
+  RECT client{};
+  GetClientRect(hwnd_, &client);
+  if (client.right <= client.left || client.bottom <= client.top) {
+    return;
+  }
+  if (layout_.last().dpi != Dpi() || EqualRect(&layout_.last().client, &client) == FALSE) {
+    layout_.SetDpi(Dpi());
     LARGE_INTEGER t0{};
     LARGE_INTEGER t1{};
     QueryPerformanceCounter(&t0);
-    const HPAINTBUFFER buffer = BeginBufferedPaint(hdc, &dirty, BPBF_TOPDOWNDIB, &params, &buffer_dc);
-    if (buffer != nullptr && buffer_dc != nullptr) {
-      BufferedPaintClear(buffer, &dirty);
-      QueryPerformanceCounter(&t1);
-      const double bpbegin_ms = QpcMs(t0, t1);
-
-      DrawTimings draw{};
-      QueryPerformanceCounter(&t0);
-      clock_.Draw(buffer_dc, client, dirty, dark_, layout_.last(), &layout_,
-                  start_hot_ || start_popup_open_, start_pressed_ || start_popup_open_, &draw);
-      QueryPerformanceCounter(&t1);
-      const double draw_ms = QpcMs(t0, t1);
-
-      QueryPerformanceCounter(&t0);
-      EndBufferedPaint(buffer, TRUE);
-      QueryPerformanceCounter(&t1);
-      NotePerf(last_compute_ms_, draw_ms, dirty, client, draw, bpbegin_ms, QpcMs(t0, t1));
-    }
+    layout_.Compute(client, clock_.CurrentTimeText(), taskbar_.warning(), OrderedItems());
+    QueryPerformanceCounter(&t1);
+    last_compute_ms_ = QpcMs(t0, t1);
   }
-  EndPaint(hwnd_, &ps);
+
+  LARGE_INTEGER t0{};
+  LARGE_INTEGER t1{};
+  QueryPerformanceCounter(&t0);
+  EnsureLayeredTarget();
+  QueryPerformanceCounter(&t1);
+  const double bpbegin_ms = QpcMs(t0, t1);
+  if (mem_dc_ == nullptr || dib_w_ <= 0 || dib_h_ <= 0) {
+    return;
+  }
+
+  DrawTimings draw{};
+  QueryPerformanceCounter(&t0);
+  clock_.Draw(mem_dc_, client, client, dark_, layout_.last(), &layout_, start_hot_ || start_popup_open_,
+              start_pressed_ || start_popup_open_, &draw);
+  QueryPerformanceCounter(&t1);
+  const double draw_ms = QpcMs(t0, t1);
+
+  BLENDFUNCTION blend{};
+  blend.BlendOp = AC_SRC_OVER;
+  blend.SourceConstantAlpha = 255;
+  blend.AlphaFormat = AC_SRC_ALPHA;
+  POINT src{0, 0};
+  SIZE size{dib_w_, dib_h_};
+  QueryPerformanceCounter(&t0);
+  const BOOL ok = UpdateLayeredWindow(hwnd_, nullptr, nullptr, &size, mem_dc_, &src, 0, &blend, ULW_ALPHA);
+  QueryPerformanceCounter(&t1);
+  const double ulw_ms = QpcMs(t0, t1);
+  NotePerf(last_compute_ms_, draw_ms, client, client, draw, bpbegin_ms, ulw_ms);
+  static unsigned layered_first = 0;
+  if (layered_first < 3) {
+    ++layered_first;
+    Log(L"perf", L"layered present n=%u ok=%d end=%.2f ulw=%.2f %dx%d", layered_first, ok ? 1 : 0, draw.end_ms, ulw_ms,
+        dib_w_, dib_h_);
+  }
 }
 
 RECT MenuBar::StartRect() const {
@@ -1632,7 +1771,7 @@ void MenuBar::OpenOverflow() {
   if (start_popup_open_) {
     start_popup_open_ = false;
     status_popup_.Close();
-    InvalidateArea(hwnd_, StartRect());
+    Present();
   }
   if (spotlight_.visible()) {
     spotlight_.Hide();
@@ -1692,7 +1831,7 @@ void MenuBar::UpdateChrome(POINT client) {
   const bool start_hot = HitStart(client);
   if (start_hot_ != start_hot) {
     start_hot_ = start_hot;
-    InvalidateArea(hwnd_, StartRect());
+    Present();
   }
 }
 
@@ -1713,7 +1852,7 @@ void MenuBar::ToggleStartMenu(bool from_keyboard) {
       status_popup_.Close();
     }
     start_popup_open_ = false;
-    InvalidateArea(hwnd_, StartRect());
+    Present();
     return;
   }
   if (spotlight_.visible()) {
@@ -1744,14 +1883,14 @@ void MenuBar::ToggleStartMenu(bool from_keyboard) {
   status_popup_.SetAfterTick(&MenuBar::AfterBarPopupTick, this);
   if (!status_popup_.Open(bar_menu_.get(), anchor, PopupSurface::Anchor::BelowAt)) {
     Log(L"bar", L"start menu open failed err=%lu", GetLastError());
-    InvalidateArea(hwnd_, StartRect());
+    Present();
     return;
   }
   start_popup_open_ = true;
   if (from_keyboard) {
     status_popup_.SetHot(0);
   }
-  InvalidateArea(hwnd_, StartRect());
+  Present();
 }
 
 void MenuBar::ToggleSpotlight() {
@@ -1763,7 +1902,7 @@ void MenuBar::ToggleSpotlight() {
   if (start_popup_open_) {
     start_popup_open_ = false;
     status_popup_.Close();
-    InvalidateArea(hwnd_, StartRect());
+    Present();
   }
   spotlight_.Toggle(hwnd_, dark_);
 }
@@ -1775,7 +1914,7 @@ bool MenuBar::ShowControlCenter(const RECT& item_rect, ControlCenterPage page) {
   if (start_popup_open_) {
     start_popup_open_ = false;
     status_popup_.Close();
-    InvalidateArea(hwnd_, StartRect());
+    Present();
   }
   if (spotlight_.visible()) {
     spotlight_.Hide();
@@ -1819,7 +1958,7 @@ void MenuBar::ToggleControlCenter() {
   if (cc_open_ && status_popup_.IsOpen()) {
     status_popup_.Close();
     cc_open_ = false;
-    InvalidateArea(hwnd_, ControlCenterRect());
+    Present();
     return;
   }
   LARGE_INTEGER t0{};
@@ -1830,7 +1969,7 @@ void MenuBar::ToggleControlCenter() {
   }
   QueryPerformanceCounter(&t1);
   Log(L"cc", L"open to present %.2f ms", QpcMs(t0, t1));
-  InvalidateArea(hwnd_, ControlCenterRect());
+  Present();
 }
 
 void MenuBar::ToggleClockFlyout() {
@@ -1852,7 +1991,7 @@ bool MenuBar::ShowClockFlyout() {
   if (start_popup_open_) {
     start_popup_open_ = false;
     status_popup_.Close();
-    InvalidateArea(hwnd_, StartRect());
+    Present();
   }
   if (spotlight_.visible()) {
     spotlight_.Hide();
@@ -1882,7 +2021,7 @@ void MenuBar::ShowClockMenu() {
   if (start_popup_open_) {
     start_popup_open_ = false;
     status_popup_.Close();
-    InvalidateArea(hwnd_, StartRect());
+    Present();
   }
   if (spotlight_.visible()) {
     spotlight_.Hide();
@@ -1942,7 +2081,7 @@ void MenuBar::OpenStatusPanel(const StatusHit& hit) {
   if (start_popup_open_) {
     start_popup_open_ = false;
     status_popup_.Close();
-    InvalidateArea(hwnd_, StartRect());
+    Present();
   }
   if (spotlight_.visible()) {
     spotlight_.Hide();
@@ -2234,7 +2373,7 @@ void MenuBar::ShowStartContextMenu(POINT screen) {
   if (start_popup_open_) {
     start_popup_open_ = false;
     status_popup_.Close();
-    InvalidateArea(hwnd_, StartRect());
+    Present();
   }
   winx_entries_ = LoadWinXEntries();
   if (winx_entries_.empty()) {
@@ -2545,7 +2684,7 @@ void MenuBar::SetFullscreenOccluded(bool occluded) {
     if (start_popup_open_) {
       start_popup_open_ = false;
       status_popup_.Close();
-      InvalidateArea(hwnd_, StartRect());
+      Present();
     }
     spotlight_.Hide();
     status_popup_.Close();
@@ -2555,6 +2694,7 @@ void MenuBar::SetFullscreenOccluded(bool occluded) {
     RegisterAppBar();
     ShowWindow(hwnd_, SW_SHOWNA);
     Layout();
+    Present();
   }
 }
 

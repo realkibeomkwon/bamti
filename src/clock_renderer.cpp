@@ -715,7 +715,7 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
 
   QueryPerformanceCounter(&t0);
   rt_->BeginDraw();
-  rt_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+  rt_->Clear(BarFillColor(dark));
   rt_->SetTransform(D2D1::Matrix3x2F::Translation(-static_cast<float>(dirty.left - client.left) / px,
                                                   -static_cast<float>(dirty.top - client.top) / px));
   QueryPerformanceCounter(&t1);

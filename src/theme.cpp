@@ -50,6 +50,13 @@ D2D1_COLOR_F DockFillColor(bool dark) {
   return D2D1::ColorF(0.98f, 0.98f, 0.98f, 0.82f);
 }
 
+D2D1_COLOR_F BarFillColor(bool dark) {
+  if (dark) {
+    return D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.78f);
+  }
+  return D2D1::ColorF(0.98f, 0.98f, 0.98f, 0.82f);
+}
+
 D2D1_COLOR_F DockStrokeColor(bool dark) {
   if (dark) {
     return D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.14f);
