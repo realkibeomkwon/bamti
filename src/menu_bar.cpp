@@ -203,6 +203,7 @@ constexpr UINT kCornerWatchMs = 30;
 constexpr UINT kDesktopIconicMs = 200;
 constexpr UINT kCtrlPollMs = 200;
 constexpr int kPeekZoneDip = 14;  // bar_layout.cpp의 kPadRightDip과 같다.
+constexpr int kPeekRearmZoneDip = 96;  // 걸쇠를 다시 걸 수 있게 되는 거리.
 constexpr char kSpotlightItemId[] = "bamti.widget/spotlight";
 constexpr char kControlCenterItemId[] = "bamti.widget/control_center";
 constexpr char kNetworkItemId[] = "bamti.widget/network";
@@ -634,7 +635,6 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
             Log(L"peek", L"restore hwnd=%p zorder=%d fg=%d", static_cast<void*>(restore_target_), zorder ? 1 : 0,
                 fg ? 1 : 0);
           }
-          restore_target_ = nullptr;
         }
         return 0;
       }
@@ -653,8 +653,8 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         POINT pt{};
         RECT rc{};
-        const bool hit = GetCursorPos(&pt) != FALSE && GetWindowRect(hwnd_, &rc) != FALSE &&
-                         PtInRect(&rc, pt) != FALSE && pt.x >= rc.right - DipToPx(kPeekZoneDip, Dpi());
+        const bool got = GetCursorPos(&pt) != FALSE && GetWindowRect(hwnd_, &rc) != FALSE;
+        const bool hit = got && PtInRect(&rc, pt) != FALSE && pt.x >= rc.right - DipToPx(kPeekZoneDip, Dpi());
         if (hit != last_corner_hit_) {
           last_corner_hit_ = hit;
           Log(L"peek", L"corner in=%d x=%ld y=%ld right=%ld", hit ? 1 : 0, pt.x, pt.y, rc.right);
@@ -666,7 +666,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
             KillTimer(hwnd_, kDesktopPeekDwellTimerId);
           }
           peek_dwell_armed_ = false;
-          StopDesktopPeek(L"corner-left");
+          if (got && pt.x < rc.right - DipToPx(kPeekRearmZoneDip, Dpi())) {
+            StopDesktopPeek(L"corner-left");
+          }
         }
         return 0;
       }
@@ -781,7 +783,6 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       return 0;
     }
     case WM_MOUSELEAVE:
-      StopDesktopPeek(L"mouse-leave");
       if (hwnd_ != nullptr) {
         KillTimer(hwnd_, kDesktopPeekDwellTimerId);
       }
@@ -2508,7 +2509,18 @@ void MenuBar::ShowDesktop() {
   desktop_probe_ = desktop_fg_before_;
   desktop_iconic_before_ = IconicOf(desktop_probe_);
   desktop_pending_undo_ = false;
-  restore_target_ = GetForegroundWindow();
+  if (restore_target_ == nullptr || IsWindow(restore_target_) == FALSE) {
+    const HWND fg = GetForegroundWindow();
+    wchar_t cls[256]{};
+    if (fg != nullptr) {
+      GetClassNameW(fg, cls, 256);
+    }
+    if (fg == nullptr || fg == hwnd_ || lstrcmpiW(cls, L"Progman") == 0 || lstrcmpiW(cls, L"WorkerW") == 0) {
+      restore_target_ = nullptr;
+    } else {
+      restore_target_ = fg;
+    }
+  }
   desktop_hr_ = CallShellDesktop(false);
   if (desktop_hr_ == S_OK) {
     desktop_shown_ = true;
@@ -2547,6 +2559,12 @@ void MenuBar::StartDesktopPeek() {
   if (peek_latched_) {
     return;
   }
+  wchar_t cls[256]{};
+  if (restore_target_ != nullptr) {
+    GetClassNameW(restore_target_, cls, 256);
+  }
+  Log(L"peek", L"toggle shown=%d target=%p cls=%s", desktop_shown_ ? 1 : 0, static_cast<void*>(restore_target_),
+      cls);
   if (desktop_shown_) {
     HideDesktop();
   } else {
@@ -2581,6 +2599,7 @@ void MenuBar::StopCornerWatch() {
   last_corner_hit_ = false;
   peek_dwell_armed_ = false;
   StopDesktopPeek(L"ctrl-up");
+  restore_target_ = nullptr;
   if (was_on) {
     Log(L"peek", L"watch on=0");
   }
