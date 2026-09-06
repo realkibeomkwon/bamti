@@ -72,6 +72,8 @@ void LogDesktopPeekResult(const wchar_t* op, HRESULT hr, int iconic_before, int 
 }
 
 volatile UINT g_hook_key_count = 0;
+volatile DWORD g_hook_last_vk = 0;
+volatile UINT g_hook_last_msg = 0;
 
 int KeyDownBit(SHORT state) {
   return (state & 0x8000) ? 1 : 0;
@@ -79,6 +81,8 @@ int KeyDownBit(SHORT state) {
 
 struct CtrlProbeSnap {
   UINT hook = 0;
+  DWORD last_vk = 0;
+  UINT last_msg = 0;
   int async_c = 0;
   int async_l = 0;
   int async_r = 0;
@@ -90,14 +94,16 @@ struct CtrlProbeSnap {
 };
 
 bool SameCtrlProbe(const CtrlProbeSnap& a, const CtrlProbeSnap& b) {
-  return a.hook == b.hook && a.async_c == b.async_c && a.async_l == b.async_l && a.async_r == b.async_r &&
-         a.keystate_c == b.keystate_c && a.lbtn == b.lbtn && a.capture == b.capture && a.guiflags == b.guiflags &&
-         a.fg == b.fg;
+  return a.hook == b.hook && a.last_vk == b.last_vk && a.last_msg == b.last_msg && a.async_c == b.async_c &&
+         a.async_l == b.async_l && a.async_r == b.async_r && a.keystate_c == b.keystate_c && a.lbtn == b.lbtn &&
+         a.capture == b.capture && a.guiflags == b.guiflags && a.fg == b.fg;
 }
 
 void LogCtrlProbeIfChanged() {
   CtrlProbeSnap now;
   now.hook = g_hook_key_count;
+  now.last_vk = g_hook_last_vk;
+  now.last_msg = g_hook_last_msg;
   now.async_c = KeyDownBit(GetAsyncKeyState(VK_CONTROL));
   now.async_l = KeyDownBit(GetAsyncKeyState(VK_LCONTROL));
   now.async_r = KeyDownBit(GetAsyncKeyState(VK_RCONTROL));
@@ -118,15 +124,17 @@ void LogCtrlProbeIfChanged() {
   }
   static CtrlProbeSnap prev{};
   static bool have_prev = false;
-  if (have_prev && SameCtrlProbe(now, prev)) {
+  if (have_prev && SameCtrlProbe(now, prev) && now.lbtn == 0) {
     return;
   }
   have_prev = true;
   prev = now;
   Log(L"peek",
-      L"probe hook=%u async_c=%d async_l=%d async_r=%d keystate_c=%d lbtn=%d capture=%p guiflags=0x%08lx fg=%p lastinput=%lu",
-      now.hook, now.async_c, now.async_l, now.async_r, now.keystate_c, now.lbtn, static_cast<void*>(now.capture),
-      static_cast<unsigned long>(now.guiflags), static_cast<void*>(now.fg), static_cast<unsigned long>(lastinput));
+      L"probe hook=%u lastvk=%lu lastmsg=0x%08x async_c=%d async_l=%d async_r=%d keystate_c=%d lbtn=%d capture=%p "
+      L"guiflags=0x%08lx fg=%p lastinput=%lu",
+      now.hook, static_cast<unsigned long>(now.last_vk), now.last_msg, now.async_c, now.async_l, now.async_r,
+      now.keystate_c, now.lbtn, static_cast<void*>(now.capture), static_cast<unsigned long>(now.guiflags),
+      static_cast<void*>(now.fg), static_cast<unsigned long>(lastinput));
 }
 
 HRESULT CallShellDesktop(bool undo) {
@@ -340,6 +348,8 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
     return CallNextHookEx(g_key_hook, code, wparam, lparam);
   }
   ++g_hook_key_count;
+  g_hook_last_vk = info->vkCode;
+  g_hook_last_msg = static_cast<UINT>(wparam);
 
   const bool down = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
   const bool up = wparam == WM_KEYUP || wparam == WM_SYSKEYUP;
