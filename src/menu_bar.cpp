@@ -60,6 +60,17 @@ int IconicOf(HWND hwnd) {
   return (hwnd != nullptr && IsIconic(hwnd)) ? 1 : 0;
 }
 
+void LogDesktopPeekResult(const wchar_t* op, HRESULT hr, int iconic_before, int iconic_after, HWND fg_before) {
+  const HWND fg_after = GetForegroundWindow();
+  wchar_t cls[256]{};
+  if (fg_after != nullptr) {
+    GetClassNameW(fg_after, cls, 256);
+  }
+  Log(L"peek", L"%s hr=0x%08lx iconic_before=%d iconic_after=%d fg_before=%p fg_after=%p cls=%s", op,
+      static_cast<unsigned long>(hr), iconic_before, iconic_after, static_cast<void*>(fg_before),
+      static_cast<void*>(fg_after), cls);
+}
+
 HRESULT CallShellDesktop(bool undo) {
   ComScope com;
   if (!com.ok) {
@@ -169,6 +180,7 @@ bool g_win_held = false;
 bool g_win_combo = false;
 bool g_win_injected = false;
 bool g_swallow_space = false;
+bool g_ctrl_held = false;
 DWORD g_win_vk = VK_LWIN;
 
 std::vector<RowType> PanelRowTypes(const StatusPanel& panel) {
@@ -272,12 +284,16 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
   const bool up = wparam == WM_KEYUP || wparam == WM_SYSKEYUP;
   const DWORD vk = info->vkCode;
   const bool is_ctrl = vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL;
-  if (is_ctrl && (down || up)) {
-    Log(L"peek", L"ctrl vk=%lu wparam=0x%08lx flags=0x%08lx async=0x%04x", vk,
-        static_cast<unsigned long>(wparam), info->flags,
-        static_cast<unsigned>(static_cast<USHORT>(GetAsyncKeyState(VK_CONTROL))));
-    if (down && g_menu_bar != nullptr && g_menu_bar->hwnd() != nullptr) {
-      PostMessageW(g_menu_bar->hwnd(), kCornerWatchMsg, 1, 0);
+  if (is_ctrl) {
+    if (down) {
+      if (!g_ctrl_held) {
+        g_ctrl_held = true;
+        if (g_menu_bar != nullptr && g_menu_bar->hwnd() != nullptr) {
+          PostMessageW(g_menu_bar->hwnd(), kCornerWatchMsg, 1, 0);
+        }
+      }
+    } else if (up) {
+      g_ctrl_held = false;
     }
   }
   if (g_menu_bar == nullptr || g_menu_bar->hwnd() == nullptr || !g_menu_bar->win_key_enabled()) {
@@ -527,10 +543,8 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       if (wparam == kDesktopIconicTimerId) {
         KillTimer(hwnd_, kDesktopIconicTimerId);
-        const int after = IconicOf(desktop_probe_);
-        Log(L"peek", L"%s hr=0x%08lx iconic_before=%d iconic_after=%d",
-            desktop_pending_undo_ ? L"UndoMinimizeALL" : L"MinimizeAll", static_cast<unsigned long>(desktop_hr_),
-            desktop_iconic_before_, after);
+        LogDesktopPeekResult(desktop_pending_undo_ ? L"UndoMinimizeALL" : L"MinimizeAll", desktop_hr_,
+                             desktop_iconic_before_, IconicOf(desktop_probe_), desktop_fg_before_);
         return 0;
       }
       if (wparam == kCornerWatchTimerId) {
@@ -577,6 +591,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     case kCornerWatchMsg:
+      Log(L"peek", L"watch msg");
       StartCornerWatch();
       return 0;
     case kFullscreenWatchMsg:
@@ -2077,6 +2092,7 @@ void MenuBar::RemoveWinHook() {
   g_win_combo = false;
   g_win_injected = false;
   g_swallow_space = false;
+  g_ctrl_held = false;
 }
 
 void MenuBar::AfterBarPopupTick(void* ctx) {
@@ -2388,7 +2404,8 @@ void MenuBar::ShowDesktop() {
   if (hwnd_ != nullptr) {
     KillTimer(hwnd_, kDesktopIconicTimerId);
   }
-  desktop_probe_ = GetForegroundWindow();
+  desktop_fg_before_ = GetForegroundWindow();
+  desktop_probe_ = desktop_fg_before_;
   desktop_iconic_before_ = IconicOf(desktop_probe_);
   desktop_pending_undo_ = false;
   desktop_hr_ = CallShellDesktop(false);
@@ -2398,8 +2415,8 @@ void MenuBar::ShowDesktop() {
   if (hwnd_ != nullptr) {
     SetTimer(hwnd_, kDesktopIconicTimerId, kDesktopIconicMs, nullptr);
   } else {
-    Log(L"peek", L"MinimizeAll hr=0x%08lx iconic_before=%d iconic_after=%d",
-        static_cast<unsigned long>(desktop_hr_), desktop_iconic_before_, IconicOf(desktop_probe_));
+    LogDesktopPeekResult(L"MinimizeAll", desktop_hr_, desktop_iconic_before_, IconicOf(desktop_probe_),
+                         desktop_fg_before_);
   }
 }
 
@@ -2407,8 +2424,9 @@ void MenuBar::HideDesktop() {
   if (hwnd_ != nullptr) {
     KillTimer(hwnd_, kDesktopIconicTimerId);
   }
+  desktop_fg_before_ = GetForegroundWindow();
   if (desktop_probe_ == nullptr || IsWindow(desktop_probe_) == FALSE) {
-    desktop_probe_ = GetForegroundWindow();
+    desktop_probe_ = desktop_fg_before_;
   }
   desktop_iconic_before_ = IconicOf(desktop_probe_);
   desktop_pending_undo_ = true;
@@ -2419,8 +2437,8 @@ void MenuBar::HideDesktop() {
   if (hwnd_ != nullptr) {
     SetTimer(hwnd_, kDesktopIconicTimerId, kDesktopIconicMs, nullptr);
   } else {
-    Log(L"peek", L"UndoMinimizeALL hr=0x%08lx iconic_before=%d iconic_after=%d",
-        static_cast<unsigned long>(desktop_hr_), desktop_iconic_before_, IconicOf(desktop_probe_));
+    LogDesktopPeekResult(L"UndoMinimizeALL", desktop_hr_, desktop_iconic_before_, IconicOf(desktop_probe_),
+                         desktop_fg_before_);
   }
 }
 

@@ -216,6 +216,7 @@ class MenuBar {
   bool peek_latched_ = false;
   bool desktop_shown_ = false;
   HWND desktop_probe_ = nullptr;
+  HWND desktop_fg_before_ = nullptr;
   HRESULT desktop_hr_ = E_FAIL;
   int desktop_iconic_before_ = 0;
   bool desktop_pending_undo_ = false;
