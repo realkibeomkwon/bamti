@@ -1213,16 +1213,19 @@ void MenuBar::ApplyBackdrop() {
   }
 
   const BOOL dark = dark_ ? TRUE : FALSE;
-  DwmSetWindowAttribute(hwnd_, dwm::kUseImmersiveDarkMode, &dark, sizeof(dark));
+  const HRESULT hr_dark = DwmSetWindowAttribute(hwnd_, dwm::kUseImmersiveDarkMode, &dark, sizeof(dark));
 
-  const int backdrop = dwm::kBackdropMainWindow;
-  DwmSetWindowAttribute(hwnd_, dwm::kSystemBackdropType, &backdrop, sizeof(backdrop));
+  const int backdrop = dwm::kBackdropTransientWindow;
+  const HRESULT hr_type = DwmSetWindowAttribute(hwnd_, dwm::kSystemBackdropType, &backdrop, sizeof(backdrop));
 
   const int corner = dwm::kCornerDoNotRound;
-  DwmSetWindowAttribute(hwnd_, dwm::kWindowCornerPreference, &corner, sizeof(corner));
+  const HRESULT hr_corner = DwmSetWindowAttribute(hwnd_, dwm::kWindowCornerPreference, &corner, sizeof(corner));
 
   const MARGINS margins{-1, -1, -1, -1};
-  DwmExtendFrameIntoClientArea(hwnd_, &margins);
+  const HRESULT hr_extend = DwmExtendFrameIntoClientArea(hwnd_, &margins);
+  Log(L"bar", L"backdrop dark=0x%08lx type=0x%08lx corner=0x%08lx extend=0x%08lx value=%d",
+      static_cast<unsigned long>(hr_dark), static_cast<unsigned long>(hr_type),
+      static_cast<unsigned long>(hr_corner), static_cast<unsigned long>(hr_extend), backdrop);
 }
 
 void MenuBar::ArmRepaint() {
