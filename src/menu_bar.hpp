@@ -214,7 +214,6 @@ class MenuBar {
   std::vector<WinXEntry> winx_entries_;
   UINT open_submenu_cmd_ = 0;
   bool peek_latched_ = false;
-  bool peek_toggled_in_hold_ = false;
   bool desktop_shown_ = false;
   HWND desktop_probe_ = nullptr;
   HWND restore_target_ = nullptr;
