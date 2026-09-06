@@ -21,7 +21,7 @@ class DesktopToggle {
   static bool Revealed();
 
  private:
-  void Conceal();
+  void Conceal(std::vector<HWND> windows);
   void Reveal();
 
   // Conceal 이 최소화한 창. Z 순서 앞에서 뒤 순서로 담는다.
