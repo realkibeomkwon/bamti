@@ -26,6 +26,9 @@
 
 namespace bamti {
 
+// 앞선 실행이 비정상 종료해 강제된 작업 영역이 남아 있으면 되돌린다.
+void ReleaseLeftoverWorkArea();
+
 inline constexpr wchar_t kMenuBarClass[] = L"bamti.MenuBar";
 inline constexpr UINT kToggleSpotlightMsg = WM_APP + 8;
 inline constexpr UINT kCornerWatchMsg = WM_APP + 10;

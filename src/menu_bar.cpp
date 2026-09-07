@@ -6,6 +6,7 @@
 #include "dwm.hpp"
 #include "fullscreen.hpp"
 #include "log.hpp"
+#include "paths.hpp"
 #include "settings.hpp"
 #include "theme.hpp"
 #include "tray_popup_guard.hpp"
@@ -203,6 +204,36 @@ std::vector<std::string> ApplyVisiblePermutation(const std::vector<std::string>&
   return out;
 }
 
+// 작업 영역을 강제했다는 사실을 파일로 남긴다.
+// 프로세스가 비정상 종료해도 이 파일은 남으므로, 다음 실행이 보고 되돌린다.
+void WriteWorkAreaGuard() {
+  const std::wstring path = WorkAreaGuardPath();
+  if (path.empty()) {
+    return;
+  }
+  const HANDLE file =
+      CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    return;
+  }
+  const char body[] = "v=1\n";
+  DWORD written = 0;
+  WriteFile(file, body, static_cast<DWORD>(sizeof(body) - 1), &written, nullptr);
+  CloseHandle(file);
+}
+
+void DeleteWorkAreaGuard() {
+  const std::wstring path = WorkAreaGuardPath();
+  if (!path.empty()) {
+    DeleteFileW(path.c_str());
+  }
+}
+
+bool WorkAreaGuardExists() {
+  const std::wstring path = WorkAreaGuardPath();
+  return !path.empty() && GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
 void InjectWinKey(DWORD vk, bool up) {
   INPUT in{};
   in.type = INPUT_KEYBOARD;
@@ -390,6 +421,15 @@ int RemaximizeOverlapping(HWND self, HMONITOR monitor, const RECT& work) {
 
 }  // namespace
 
+void ReleaseLeftoverWorkArea() {
+  if (!WorkAreaGuardExists()) {
+    return;
+  }
+  SystemParametersInfoW(SPI_SETWORKAREA, 0, nullptr, SPIF_SENDCHANGE);
+  DeleteWorkAreaGuard();
+  Log(L"bar", L"workarea guard released");
+}
+
 MenuBar::MenuBar()
     : status_panel_(std::make_unique<StatusPanelContent>()),
       overflow_panel_(std::make_unique<OverflowContent>()),
@@ -448,6 +488,7 @@ bool MenuBar::Create(HINSTANCE instance) {
   clock_.SetDpi(Dpi());
   clock_.WarmTarget();  // SetDpi가 렌더 타깃을 버리므로 반드시 그 뒤에서 부른다
   ApplyBackdrop();
+  ReleaseLeftoverWorkArea();
   if (!RegisterAppBar()) {
     return false;
   }
@@ -1239,6 +1280,7 @@ void MenuBar::UnregisterAppBar() {
     work_area_forced_ = false;
     SystemParametersInfoW(SPI_SETWORKAREA, 0, nullptr, SPIF_SENDCHANGE);
   }
+  DeleteWorkAreaGuard();
   if (!appbar_registered_ || hwnd_ == nullptr) {
     appbar_registered_ = false;
     return;
@@ -1303,7 +1345,10 @@ void MenuBar::ReserveWorkArea() {
       RECT work = info.rcWork;
       work.top = want;  // ABM_SETPOS is often ignored; keep left/right/bottom.
       if (SystemParametersInfoW(SPI_SETWORKAREA, 0, &work, SPIF_SENDCHANGE) != FALSE) {
-        work_area_forced_ = true;
+        if (!work_area_forced_) {
+          work_area_forced_ = true;
+          WriteWorkAreaGuard();
+        }
         GetMonitorInfoW(monitor, &info);
       }
     }

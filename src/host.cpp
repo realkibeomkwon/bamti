@@ -293,6 +293,7 @@ int Run(HINSTANCE instance) {
     Log(L"host", L"restore-taskbar");
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     TaskbarController::ForceRestore();
+    ReleaseLeftoverWorkArea();
     if (SUCCEEDED(com)) {
       CoUninitialize();
     }

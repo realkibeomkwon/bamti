@@ -93,6 +93,14 @@ std::wstring TaskbarGuardPath() {
   return JoinPath(dir, L"taskbar.guard");
 }
 
+std::wstring WorkAreaGuardPath() {
+  const std::wstring dir = DataDir();
+  if (dir.empty()) {
+    return {};
+  }
+  return JoinPath(dir, L"workarea.guard");
+}
+
 std::wstring LogFilePath() {
   const std::wstring dir = DataDir();
   if (dir.empty()) {
