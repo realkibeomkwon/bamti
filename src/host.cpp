@@ -324,6 +324,8 @@ int Run(HINSTANCE instance) {
       if (bar.taskbar_hidden()) {
         if (!dock.Create(instance, bar.hwnd())) {
           Log(L"host", L"dock create failed");
+        } else {
+          dock.SetTrayInvoke([&bar](const std::wstring& exe) { return bar.tray().InvokeByExe(exe); });
         }
       }
       MSG msg{};

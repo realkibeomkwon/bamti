@@ -1374,6 +1374,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         RaiseOverlays();
       }
       g_tray_posted = false;
+      ScheduleRebuild();
       return 0;
     case kFullscreenMsg:
       NotePostedStorm(L"fullscreen", g_fullscreen_msg_count, g_fullscreen_msg_window);
@@ -1489,16 +1490,16 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       RenderLayered();
       if (index >= 0 && index == pressed && index < static_cast<int>(items_.size())) {
         const DockApp app = items_[static_cast<size_t>(index)];
-        Log(L"dock", L"click index=%d running=%d hwnd=%p name=%s", index, app.running ? 1 : 0, app.hwnd,
-            app.display_name.c_str());
         if (app.kind == DockItemKind::kSpotlight) {
+          Log(L"dock", L"click index=%d running=%d hwnd=%p name=%s", index, app.running ? 1 : 0, app.hwnd,
+              app.display_name.c_str());
           if (bar_hwnd_ != nullptr) {
             PostMessageW(bar_hwnd_, kToggleSpotlightMsg, 0, 0);
           }
-        } else if (app.running && app.hwnd != nullptr) {
-          ActivateHwnd(app.hwnd);
         } else {
-          LaunchDockApp(app);
+          const wchar_t* route = RevealDockApp(app);
+          Log(L"dock", L"click index=%d running=%d hwnd=%p name=%s route=%s", index, app.running ? 1 : 0, app.hwnd,
+              app.display_name.c_str(), route);
         }
       }
       if (pending_rebuild_) {
@@ -1580,12 +1581,23 @@ void Dock::Rebuild() {
     Log(L"perf", L"rebuild fingerprint %ums", fp_ms);
   }
   if (!force_collect_ && fp == last_window_fp_ && !items_.empty()) {
-    if (warming_up_) {
-      warmup_collect_ms_ = 0;
-      warmup_icons_ms_ = 0;
+    const bool process_due =
+        NeedProcessRecheck() && (last_process_recheck_ == 0 || GetTickCount64() - last_process_recheck_ >= 1000);
+    if (!process_due) {
+      if (warming_up_) {
+        warmup_collect_ms_ = 0;
+        warmup_icons_ms_ = 0;
+      }
+      Log(L"perf", L"rebuild skip fingerprint items=%zu %ums", items_.size(), fp_ms);
+      return;
     }
-    Log(L"perf", L"rebuild skip fingerprint items=%zu %ums", items_.size(), fp_ms);
-    return;
+  }
+  if (force_collect_ || NeedProcessRecheck()) {
+    const ULONGLONG now = GetTickCount64();
+    if (force_collect_ || last_process_recheck_ == 0 || now - last_process_recheck_ >= 1000) {
+      InvalidateLiveProcessCache();
+      last_process_recheck_ = now;
+    }
   }
   force_collect_ = false;
   last_window_fp_ = fp;
@@ -2149,7 +2161,11 @@ void Dock::ShowPill() {
   CancelHideTimer();
   if (!shown_) {
     shown_ = true;
-    if (pending_rebuild_) {
+    if (NeedProcessRecheck()) {
+      force_collect_ = true;
+      InvalidateLiveProcessCache();
+    }
+    if (pending_rebuild_ || force_collect_) {
       Rebuild();
     }
     if (!shown_ || items_.empty()) {
@@ -2271,6 +2287,13 @@ void Dock::PollPointer() {
     CancelHideTimer();
     if (PointerOverHotEdge() || shown_) {
       ShowPill();
+    }
+    if (shown_ && NeedProcessRecheck()) {
+      const ULONGLONG now = GetTickCount64();
+      if (last_process_recheck_ == 0 || now - last_process_recheck_ >= 1000) {
+        force_collect_ = true;
+        ScheduleRebuild();
+      }
     }
   } else if (shown_ && !Busy()) {
     StartHideTimer();
@@ -2473,8 +2496,16 @@ void Dock::ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND
     force_collect_ = true;
   } else if (cmd == kQuitCommand) {
     CloseHwnds(app.windows);
-  } else if (cmd == kNewWindowCommand || cmd == kOpenCommand) {
+  } else if (cmd == kNewWindowCommand) {
     if (!LaunchDockApp(app)) {
+      Log(L"dock", L"%s failed name=%s", MenuCmdName(cmd), app.display_name.c_str());
+    }
+  } else if (cmd == kOpenCommand) {
+    bool launched = true;
+    const wchar_t* route = RevealDockApp(app, &launched);
+    Log(L"dock", L"menu cmd=%u %s name=%s windows=%zu route=%s", cmd, MenuCmdName(cmd), app.display_name.c_str(),
+        app.windows.size(), route);
+    if (!launched) {
       Log(L"dock", L"%s failed name=%s", MenuCmdName(cmd), app.display_name.c_str());
     }
   } else if (cmd == kToggleLoginCommand) {
@@ -2537,6 +2568,33 @@ void Dock::ScheduleRebuild() {
     return;
   }
   SetTimer(hwnd_, kRebuildTimerId, kRebuildDelayMs, nullptr);
+}
+
+bool Dock::NeedProcessRecheck() const {
+  for (const auto& app : items_) {
+    if (app.kind != DockItemKind::kSpotlight && app.running && app.hwnd == nullptr) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const wchar_t* Dock::RevealDockApp(const DockApp& app, bool* launched) {
+  if (launched != nullptr) {
+    *launched = true;
+  }
+  if (app.running && app.hwnd != nullptr) {
+    ActivateHwnd(app.hwnd);
+    return L"activate";
+  }
+  if (app.running && tray_invoke_ && tray_invoke_(app.exe_path)) {
+    return L"tray";
+  }
+  const bool ok = LaunchDockApp(app);
+  if (launched != nullptr) {
+    *launched = ok;
+  }
+  return L"launch";
 }
 
 bool Dock::Busy() const {

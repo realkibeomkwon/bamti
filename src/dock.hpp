@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <wrl/client.h>
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -30,6 +31,7 @@ class Dock {
   ~Dock();
 
   bool Create(HINSTANCE instance, HWND bar_hwnd);
+  void SetTrayInvoke(std::function<bool(const std::wstring&)> fn) { tray_invoke_ = std::move(fn); }
 
  private:
   friend class DockMenuContent;
@@ -76,6 +78,8 @@ class Dock {
   void ArmMouseLeave();
   void ArmHotMouseLeave();
   void UpdateIdleTimer();
+  bool NeedProcessRecheck() const;
+  const wchar_t* RevealDockApp(const DockApp& app, bool* launched = nullptr);
   void SetOverlaysTopmost(bool topmost);
   void SanitizePins();
   void EnsureSpotlightPin();
@@ -104,6 +108,7 @@ class Dock {
 
   HWND hwnd_ = nullptr;
   HWND bar_hwnd_ = nullptr;
+  std::function<bool(const std::wstring&)> tray_invoke_;
   HWND hot_hwnd_ = nullptr;
   bool shown_ = false;
   bool fullscreen_occluded_ = false;
@@ -146,6 +151,7 @@ class Dock {
   std::unique_ptr<DockSubmenuContent> submenu_content_;
   std::wstring last_collect_snap_;
   uint64_t last_window_fp_ = 0;
+  ULONGLONG last_process_recheck_ = 0;
   ULONGLONG last_menu_open_ = 0;
   ULONGLONG last_popup_tick_ = 0;
   UINT drag_logs_ = 0;
