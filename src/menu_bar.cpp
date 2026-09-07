@@ -37,6 +37,9 @@ constexpr UINT_PTR kRepaintTimerId = 2;
 constexpr UINT_PTR kToggleTimerId = 3;
 constexpr UINT kRepaintCoalesceMs = 16;
 constexpr UINT kToggleTimeoutMs = 2000;
+// Win 을 누른 채 조합키를 치기까지 걸리는 시간은 길어야 몇 초다.
+// 이 시간을 넘기면 뗌 이벤트를 놓친 것으로 보고 기억을 만료시킨다.
+constexpr ULONGLONG kWinHeldMaxMs = 10000;
 constexpr int kBarHeightDip = 32;
 constexpr UINT kExitCommand = 1;
 constexpr UINT kWidgetBatteryCmd = 10;
@@ -123,6 +126,10 @@ ULONGLONG g_toggle_start_window = 0;
 UINT g_toggle_spotlight_count = 0;
 ULONGLONG g_toggle_spotlight_window = 0;
 bool g_win_held = false;
+ULONGLONG g_win_down_tick = 0;
+bool g_win_expired = false;
+UINT g_win_stale_count = 0;
+UINT g_win_stale_logged = 0;
 bool g_win_combo = false;
 bool g_win_injected = false;
 bool g_swallow_space = false;
@@ -263,6 +270,27 @@ bool InjectWinCombo(DWORD win_vk, const KBDLLHOOKSTRUCT& key) {
   return SendInput(2, in, sizeof(INPUT)) == 2;
 }
 
+// 훅이 기억하는 Win 눌림을 풀고, 주입해 둔 Win 누름이 있으면 함께 되돌린다.
+void ReleaseHeldWin() {
+  if (g_win_combo && g_win_injected) {
+    InjectWinKey(g_win_vk, true);
+  }
+  g_win_held = false;
+  g_win_combo = false;
+  g_win_injected = false;
+}
+
+// 뗌을 놓쳐 굳은 상태를 시간으로 판정한다. 만료시켰으면 참을 돌려준다.
+bool ExpireStaleWin() {
+  if (!g_win_held || GetTickCount64() - g_win_down_tick <= kWinHeldMaxMs) {
+    return false;
+  }
+  ReleaseHeldWin();
+  g_win_expired = true;
+  ++g_win_stale_count;
+  return true;
+}
+
 LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
   if (code != HC_ACTION) {
     return CallNextHookEx(g_key_hook, code, wparam, lparam);
@@ -288,6 +316,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
       g_ctrl_held = false;
     }
   }
+  ExpireStaleWin();
   if (g_menu_bar == nullptr || g_menu_bar->hwnd() == nullptr || !g_menu_bar->win_key_enabled()) {
     return CallNextHookEx(g_key_hook, code, wparam, lparam);
   }
@@ -295,6 +324,10 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
 
   if (is_win) {
     if (down) {
+      if (!g_win_held) {
+        g_win_down_tick = GetTickCount64();
+        g_win_expired = false;
+      }
       g_win_held = true;
       g_win_combo = false;
       g_win_injected = false;
@@ -302,6 +335,10 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
       return 1;
     }
     if (up) {
+      if (g_win_expired) {
+        g_win_expired = false;
+        return 1;
+      }
       g_win_held = false;
       if (g_win_combo) {
         if (g_win_injected) {
@@ -599,6 +636,10 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         taskbar_.EnsureHidden();
         RefreshLayout();
         RefreshOpenPanel();
+        if (g_win_stale_count != g_win_stale_logged) {
+          g_win_stale_logged = g_win_stale_count;
+          Log(L"bar", L"win stale expired count=%u", g_win_stale_count);
+        }
       }
       if (wparam == kToggleTimerId) {
         OnToggleTimeout();
@@ -1201,9 +1242,11 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_WTSSESSION_CHANGE:
       if (wparam == WTS_SESSION_LOCK) {
         session_locked_ = true;
+        ReleaseHeldWin();
         UpdateProviderActive();
       } else if (wparam == WTS_SESSION_UNLOCK) {
         session_locked_ = false;
+        ReleaseHeldWin();
         UpdateProviderActive();
       }
       return 0;
@@ -2333,6 +2376,8 @@ void MenuBar::RemoveWinHook() {
   g_win_held = false;
   g_win_combo = false;
   g_win_injected = false;
+  g_win_down_tick = 0;
+  g_win_expired = false;
   g_swallow_space = false;
   g_ctrl_held = false;
 }
