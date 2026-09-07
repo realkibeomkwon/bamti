@@ -78,6 +78,8 @@ constexpr UINT_PTR kTransitionsTimerId = 6;
 constexpr UINT_PTR kCornerWatchTimerId = 7;
 constexpr UINT_PTR kCtrlPollTimerId = 9;
 constexpr UINT_PTR kWorkAreaRecheckTimerId = 10;
+constexpr UINT kWorkAreaRetryMs = 300;
+constexpr unsigned kWorkAreaRetryMax = 10;
 constexpr UINT kDesktopPeekDwellMs = 120;
 constexpr UINT kTransitionsRestoreMs = 400;
 constexpr UINT kCornerWatchMs = 30;
@@ -711,7 +713,8 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         LONG mi_top = -1;
         LONG spi_top = -1;
         ReadWorkAreaTop(hwnd_, &mi_top, &spi_top);
-        Log(L"bar", L"workarea recheck mi=%ld spi=%ld", mi_top, spi_top);
+        Log(L"bar", L"workarea retry n=%u mi=%ld spi=%ld", work_area_retry_, mi_top, spi_top);
+        ReserveWorkArea(true);
         return 0;
       }
       if (wparam == kToggleTimerId) {
@@ -1453,9 +1456,12 @@ void MenuBar::Layout() {
   }
 }
 
-void MenuBar::ReserveWorkArea() {
+void MenuBar::ReserveWorkArea(bool from_retry) {
   if (hwnd_ == nullptr || fullscreen_occluded_ || !appbar_registered_ || reserving_work_area_) {
     return;
+  }
+  if (!from_retry) {
+    work_area_retry_ = 0;  // 새로운 계기이므로 재시도 기회를 되살린다.
   }
   reserving_work_area_ = true;
   Layout();
@@ -1471,29 +1477,36 @@ void MenuBar::ReserveWorkArea() {
       LONG pre_spi = -1;
       ReadWorkAreaTop(hwnd_, &pre_mi, &pre_spi);
       RECT work = info.rcWork;
-      work.top = want;  // ABM_SETPOS is often ignored; keep left/right/bottom.
+      work.top = want;  // SPI_SETWORKAREA is often ignored here; keep left/right/bottom.
       SetLastError(0);
       const BOOL ok = SystemParametersInfoW(SPI_SETWORKAREA, 0, &work, SPIF_SENDCHANGE);
       const DWORD err = ok != FALSE ? 0 : GetLastError();
       LONG post_mi = -1;
       LONG post_spi = -1;
       ReadWorkAreaTop(hwnd_, &post_mi, &post_spi);
-      Log(L"bar", L"workarea set want=%ld pre_mi=%ld pre_spi=%ld ok=%d err=%lu post_mi=%ld post_spi=%ld", want,
-          pre_mi, pre_spi, ok != FALSE ? 1 : 0, err, post_mi, post_spi);
-      if (ok != FALSE) {
+      // 반환값은 적용을 뜻하지 않는다. 실제로 잡혔을 때에만 되돌릴 책임을 진다.
+      const bool applied = post_spi >= want;
+      Log(L"bar", L"workarea set want=%ld pre_mi=%ld pre_spi=%ld ok=%d err=%lu post_mi=%ld post_spi=%ld applied=%d",
+          want, pre_mi, pre_spi, ok != FALSE ? 1 : 0, err, post_mi, post_spi, applied ? 1 : 0);
+      if (applied) {
         if (!work_area_forced_) {
           work_area_forced_ = true;
           WriteWorkAreaGuard();
         }
         GetMonitorInfoW(monitor, &info);
       }
-      SetTimer(hwnd_, kWorkAreaRecheckTimerId, 300, nullptr);
     }
     if (info.rcWork.top >= want) {
       moved = RemaximizeOverlapping(hwnd_, monitor, info.rcWork);
+      work_area_retry_ = 0;
+    } else if (work_area_retry_ < kWorkAreaRetryMax) {
+      ++work_area_retry_;
+      SetTimer(hwnd_, kWorkAreaRecheckTimerId, kWorkAreaRetryMs, nullptr);
+    } else {
+      Log(L"bar", L"workarea retry giveup n=%u top=%ld want=%ld", work_area_retry_, info.rcWork.top, want);
     }
-    Log(L"bar", L"workarea top=%ld want=%ld forced=%d moved=%d", info.rcWork.top, want, work_area_forced_ ? 1 : 0,
-        moved);
+    Log(L"bar", L"workarea top=%ld want=%ld forced=%d moved=%d retry=%u", info.rcWork.top, want,
+        work_area_forced_ ? 1 : 0, moved, work_area_retry_);
   }
   reserving_work_area_ = false;
 }
