@@ -80,6 +80,7 @@ constexpr UINT_PTR kCtrlPollTimerId = 9;
 constexpr UINT_PTR kWorkAreaRecheckTimerId = 10;
 constexpr UINT kWorkAreaRetryMs = 300;
 constexpr unsigned kWorkAreaRetryMax = 10;
+constexpr unsigned kWorkAreaSpiGiveUp = 3;
 constexpr UINT kDesktopPeekDwellMs = 120;
 constexpr UINT kTransitionsRestoreMs = 400;
 constexpr UINT kCornerWatchMs = 30;
@@ -714,7 +715,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         LONG spi_top = -1;
         ReadWorkAreaTop(hwnd_, &mi_top, &spi_top);
         Log(L"bar", L"workarea retry n=%u mi=%ld spi=%ld", work_area_retry_, mi_top, spi_top);
-        ReserveWorkArea(true);
+        ReserveWorkArea();
         return 0;
       }
       if (wparam == kToggleTimerId) {
@@ -1456,12 +1457,9 @@ void MenuBar::Layout() {
   }
 }
 
-void MenuBar::ReserveWorkArea(bool from_retry) {
+void MenuBar::ReserveWorkArea() {
   if (hwnd_ == nullptr || fullscreen_occluded_ || !appbar_registered_ || reserving_work_area_) {
     return;
-  }
-  if (!from_retry) {
-    work_area_retry_ = 0;  // 새로운 계기이므로 재시도 기회를 되살린다.
   }
   reserving_work_area_ = true;
   Layout();
@@ -1472,7 +1470,13 @@ void MenuBar::ReserveWorkArea(bool from_retry) {
   int moved = 0;
   if (GetMonitorInfoW(monitor, &info)) {
     const LONG want = info.rcMonitor.top + BarHeightPx();
-    if (info.rcWork.top < want) {
+    if (want != work_area_want_) {
+      // 해상도나 DPI가 바뀌었다. 앞서 배운 실패는 더 이상 근거가 되지 못한다.
+      work_area_want_ = want;
+      work_area_retry_ = 0;
+      work_area_spi_fail_ = 0;
+    }
+    if (info.rcWork.top < want && work_area_spi_fail_ < kWorkAreaSpiGiveUp) {
       LONG pre_mi = -1;
       LONG pre_spi = -1;
       ReadWorkAreaTop(hwnd_, &pre_mi, &pre_spi);
@@ -1489,12 +1493,16 @@ void MenuBar::ReserveWorkArea(bool from_retry) {
       Log(L"bar", L"workarea set want=%ld pre_mi=%ld pre_spi=%ld ok=%d err=%lu post_mi=%ld post_spi=%ld applied=%d",
           want, pre_mi, pre_spi, ok != FALSE ? 1 : 0, err, post_mi, post_spi, applied ? 1 : 0);
       if (applied) {
+        work_area_spi_fail_ = 0;
         if (!work_area_forced_) {
           work_area_forced_ = true;
           WriteWorkAreaGuard();
         }
-        GetMonitorInfoW(monitor, &info);
+      } else if (++work_area_spi_fail_ == kWorkAreaSpiGiveUp) {
+        Log(L"bar", L"workarea spi giveup n=%u", work_area_spi_fail_);
       }
+      // 표식을 남겼는지와 무관하게 다시 읽는다. 이 호출이 셸을 깨워 잡혔을 수 있다.
+      GetMonitorInfoW(monitor, &info);
     }
     if (info.rcWork.top >= want) {
       moved = RemaximizeOverlapping(hwnd_, monitor, info.rcWork);
@@ -1505,8 +1513,8 @@ void MenuBar::ReserveWorkArea(bool from_retry) {
     } else {
       Log(L"bar", L"workarea retry giveup n=%u top=%ld want=%ld", work_area_retry_, info.rcWork.top, want);
     }
-    Log(L"bar", L"workarea top=%ld want=%ld forced=%d moved=%d retry=%u", info.rcWork.top, want,
-        work_area_forced_ ? 1 : 0, moved, work_area_retry_);
+    Log(L"bar", L"workarea top=%ld want=%ld forced=%d moved=%d retry=%u spi_fail=%u", info.rcWork.top, want,
+        work_area_forced_ ? 1 : 0, moved, work_area_retry_, work_area_spi_fail_);
   }
   reserving_work_area_ = false;
 }
