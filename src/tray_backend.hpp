@@ -70,6 +70,8 @@ class TrayBackend {
   }
   // 셸이 재시작했다. 기본 구현은 아무 일도 하지 않는다.
   virtual void OnShellRestart() {}
+  // 시작 직후 재브로드캐스트가 있으면 횟수를 돌려주고 소비한다.
+  virtual int TakeStartupFillPulse() { return 0; }
 };
 
 std::unique_ptr<TrayBackend> MakeUiaTrayBackend();

@@ -41,6 +41,7 @@ class MenuBar {
   HWND hwnd() const { return hwnd_; }
   bool taskbar_hidden() const { return taskbar_.hidden(); }
   bool win_key_enabled() const { return !fullscreen_occluded_; }
+  TrayMirror& tray() { return tray_; }
 
  private:
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);

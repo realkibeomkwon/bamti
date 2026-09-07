@@ -32,6 +32,7 @@ constexpr wchar_t kSpyClass[] = L"Shell_TrayWnd";
 constexpr UINT kStopMsg = WM_APP + 40;
 constexpr UINT kShellRestartMsg = WM_APP + 41;
 constexpr UINT kPrioTimerId = 1;
+constexpr UINT kStartupRebroadcastTimerId = 2;
 constexpr UINT kPrioTimerFastMs = 100;
 constexpr UINT kPrioTimerSlowMs = 1000;
 // 부팅 직후에는 explorer가 셸을 초기화하면서 Shell_TrayWnd를 여러 번 다시 만든다.
@@ -48,6 +49,7 @@ constexpr DWORD kCopyDataMax = 65536;
 constexpr ULONGLONG kSelfBroadcastSuppressMs = 2000;
 constexpr ULONGLONG kRebroadcastWindowMs = 60000;
 constexpr int kRebroadcastMax = 3;
+constexpr UINT kStartupRebroadcastDelaysMs[] = {2000, 6000, 15000};
 
 std::unique_ptr<TrayBackend> g_prestarted;
 ULONGLONG g_prestart_tick = 0;
@@ -261,24 +263,6 @@ bool EncodePng(const BgraImage& image, std::vector<uint8_t>* out) {
   return !out->empty() && out->size() <= kStatusIconPngMaxBytes;
 }
 
-bool IconToPng(HICON icon, std::vector<uint8_t>* out) {
-  if (icon == nullptr || out == nullptr) {
-    return false;
-  }
-  HBITMAP src = BitmapFromIcon(icon, kIconPx);
-  if (src == nullptr) {
-    return false;
-  }
-  BgraImage image;
-  const bool ok = BitmapToBgra(src, image);
-  DeleteObject(src);
-  if (!ok) {
-    return false;
-  }
-  PremulToStraight(image);
-  return EncodePng(image, out);
-}
-
 const wchar_t* NotifyEventName(UINT event) {
   switch (event) {
     case WM_LBUTTONDOWN:
@@ -452,6 +436,10 @@ class TrayBackendIntercept final : public TrayBackend {
 
   bool ParseLive() const override { return parse_enabled_; }
 
+  int TakeStartupFillPulse() override {
+    return fill_pulse_.exchange(0, std::memory_order_acq_rel);
+  }
+
   void SetRectLookup(std::function<bool(uint64_t key, RECT* screen)> lookup) override {
     std::lock_guard lock(mu_);
     rect_lookup_ = std::move(lookup);
@@ -611,7 +599,11 @@ class TrayBackendIntercept final : public TrayBackend {
     if (created != 0) {
       NoteSelfBroadcast();
       SendNotifyMessageW(HWND_BROADCAST, created, 0, 0);
+      fill_pulse_.fetch_add(1, std::memory_order_release);
+      Log(L"tray", L"intercept startup rebroadcast delay_ms=0 elapsed_ms=%llu",
+          started_at_ == 0 ? 0 : GetTickCount64() - started_at_);
     }
+    ScheduleNextStartupRebroadcast(spy);
     EnterFast(spy);
 
     MSG msg{};
@@ -621,6 +613,7 @@ class TrayBackendIntercept final : public TrayBackend {
     }
 
     KillTimer(spy, kPrioTimerId);
+    KillTimer(spy, kStartupRebroadcastTimerId);
     {
       std::lock_guard lock(mu_);
       spy_ = nullptr;
@@ -659,12 +652,17 @@ class TrayBackendIntercept final : public TrayBackend {
   LRESULT Handle(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == kStopMsg) {
       KillTimer(hwnd, kPrioTimerId);
+      KillTimer(hwnd, kStartupRebroadcastTimerId);
       DestroyWindow(hwnd);
       PostQuitMessage(0);
       return 0;
     }
     if (msg == kShellRestartMsg) {
       HandleShellRestart(hwnd);
+      return 0;
+    }
+    if (msg == WM_TIMER && wp == kStartupRebroadcastTimerId) {
+      HandleStartupRebroadcast(hwnd);
       return 0;
     }
     if (msg == WM_TIMER && wp == kPrioTimerId) {
@@ -771,6 +769,48 @@ class TrayBackendIntercept final : public TrayBackend {
     } else {
       ++rebroadcast_count_;
     }
+  }
+
+  void ScheduleNextStartupRebroadcast(HWND spy) {
+    constexpr int kStartupExtra = static_cast<int>(sizeof(kStartupRebroadcastDelaysMs) / sizeof(kStartupRebroadcastDelaysMs[0]));
+    if (startup_rebroadcast_index_ >= kStartupExtra) {
+      KillTimer(spy, kStartupRebroadcastTimerId);
+      return;
+    }
+    const ULONGLONG elapsed = started_at_ == 0 ? 0 : GetTickCount64() - started_at_;
+    const ULONGLONG next = kStartupRebroadcastDelaysMs[startup_rebroadcast_index_];
+    const UINT due = next > elapsed ? static_cast<UINT>(next - elapsed) : 1;
+    if (SetTimer(spy, kStartupRebroadcastTimerId, due, nullptr) == 0) {
+      Log(L"tray", L"intercept startup rebroadcast timer failed err=%lu", GetLastError());
+    }
+  }
+
+  void HandleStartupRebroadcast(HWND spy) {
+    constexpr int kStartupExtra =
+        static_cast<int>(sizeof(kStartupRebroadcastDelaysMs) / sizeof(kStartupRebroadcastDelaysMs[0]));
+    if (startup_rebroadcast_index_ >= kStartupExtra) {
+      KillTimer(spy, kStartupRebroadcastTimerId);
+      return;
+    }
+    const UINT created = RegisterWindowMessageW(L"TaskbarCreated");
+    if (created != 0) {
+      NoteSelfBroadcast();
+      SendNotifyMessageW(HWND_BROADCAST, created, 0, 0);
+    }
+    const UINT delay = kStartupRebroadcastDelaysMs[startup_rebroadcast_index_];
+    Log(L"tray", L"intercept startup rebroadcast delay_ms=%u elapsed_ms=%llu", delay,
+        started_at_ == 0 ? 0 : GetTickCount64() - started_at_);
+    fill_pulse_.fetch_add(1, std::memory_order_release);
+    std::function<void()> sink;
+    {
+      std::lock_guard lock(mu_);
+      sink = on_change_;
+    }
+    if (sink) {
+      sink();
+    }
+    ++startup_rebroadcast_index_;
+    ScheduleNextStartupRebroadcast(spy);
   }
 
   bool RebroadcastThrottled() const {
@@ -1192,12 +1232,32 @@ class TrayBackendIntercept final : public TrayBackend {
   std::atomic<ULONGLONG> last_self_broadcast_{0};
   ULONGLONG rebroadcast_window_start_ = 0;
   int rebroadcast_count_ = 0;
+  int startup_rebroadcast_index_ = 0;
+  std::atomic<int> fill_pulse_{0};
   std::unordered_set<uint64_t> item_logged_;
   std::unordered_set<uint64_t> version_logged_;
   std::unordered_map<uint64_t, UINT> pending_version_;
 };
 
 }  // namespace
+
+bool IconToPng(HICON icon, std::vector<uint8_t>* out) {
+  if (icon == nullptr || out == nullptr) {
+    return false;
+  }
+  HBITMAP src = BitmapFromIcon(icon, kIconPx);
+  if (src == nullptr) {
+    return false;
+  }
+  BgraImage image;
+  const bool ok = BitmapToBgra(src, image);
+  DeleteObject(src);
+  if (!ok) {
+    return false;
+  }
+  PremulToStraight(image);
+  return EncodePng(image, out);
+}
 
 std::unique_ptr<TrayBackend> MakeInterceptTrayBackend() {
   return std::make_unique<TrayBackendIntercept>();

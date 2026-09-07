@@ -13,4 +13,6 @@ void PrestartInterceptTrayBackend();
 // 선기동한 인스턴스의 소유권을 넘긴다. 선기동하지 않았으면 nullptr.
 std::unique_ptr<TrayBackend> TakePrestartedInterceptTrayBackend();
 
+bool IconToPng(HICON icon, std::vector<uint8_t>* out);
+
 }  // namespace bamti

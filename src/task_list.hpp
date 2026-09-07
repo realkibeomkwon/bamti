@@ -32,6 +32,7 @@ size_t RepairDockPins(std::vector<std::wstring>& pins);
 
 std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_paths);
 uint64_t TaskWindowFingerprint();
+void InvalidateLiveProcessCache();
 void ForgetCachedWindow(HWND hwnd);
 
 bool ActivateHwnd(HWND hwnd);
@@ -52,6 +53,7 @@ std::wstring DockPinCompareForm(const std::wstring& pin);
 void ResetPinCmpLog();
 
 std::wstring CanonicalPath(const std::wstring& path);
+std::wstring WindowExePath(HWND hwnd);
 std::wstring WindowTitle(HWND hwnd);
 bool IsSelfExecutable(const std::wstring& path);
 

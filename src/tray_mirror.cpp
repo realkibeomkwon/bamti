@@ -1,9 +1,11 @@
 #include "tray_mirror.hpp"
 
 #include "log.hpp"
+#include "task_list.hpp"
 #include "tray_intercept.hpp"
 
 #include <objbase.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <atomic>
@@ -11,6 +13,7 @@
 #include <cstdlib>
 #include <iterator>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -23,7 +26,64 @@ std::unordered_set<uint64_t> g_live_keys;
 constexpr int kTrayPriorityBase = 5;
 constexpr ULONGLONG kPerfLogMs = 300000;
 constexpr UINT kSlowEnumMs = 200;
+constexpr int kFillIconPx = 32;
+constexpr size_t kFillOwnerMax = 256;
+constexpr int kFillUiaKeyProbeRounds = 6;
 constexpr size_t kTrayMenuLabelMax = 40;
+constexpr wchar_t kTaskMgrTipHead[] = L"작업 관리자";
+
+struct FillUiaKeyProbe {
+  int rounds = 0;
+  std::unordered_set<uint64_t> keys;
+  std::unordered_map<uint64_t, int> seen;
+  std::unordered_set<uint64_t> tm_keys;
+  std::unordered_set<std::wstring> tm_tips;
+  bool done = false;
+};
+
+FillUiaKeyProbe g_fill_uia_key_probe;
+
+bool FillCandidate(const TrayIconInfo& icon);
+
+void ResetFillUiaKeyProbe() {
+  g_fill_uia_key_probe = {};
+}
+
+bool TipLooksLikeTaskMgr(const std::wstring& tip) {
+  const size_t n = sizeof(kTaskMgrTipHead) / sizeof(kTaskMgrTipHead[0]) - 1;
+  return tip.size() >= n && tip.compare(0, n, kTaskMgrTipHead) == 0;
+}
+
+void NoteFillUiaKeyProbe(const std::vector<TrayIconInfo>& icons) {
+  FillUiaKeyProbe& p = g_fill_uia_key_probe;
+  if (p.done) {
+    return;
+  }
+  for (const TrayIconInfo& icon : icons) {
+    if (!FillCandidate(icon)) {
+      continue;
+    }
+    p.keys.insert(icon.key);
+    ++p.seen[icon.key];
+    if (TipLooksLikeTaskMgr(icon.tip)) {
+      p.tm_keys.insert(icon.key);
+      p.tm_tips.insert(icon.tip);
+    }
+  }
+  ++p.rounds;
+  if (p.rounds < kFillUiaKeyProbeRounds) {
+    return;
+  }
+  p.done = true;
+  int persistent = 0;
+  for (const auto& kv : p.seen) {
+    if (kv.second == p.rounds) {
+      ++persistent;
+    }
+  }
+  Log(L"tray", L"fill uia key probe rounds=%d unique=%zu persistent=%d tm_keys=%zu tm_tips=%zu tm_stable=%d",
+      p.rounds, p.keys.size(), persistent, p.tm_keys.size(), p.tm_tips.size(), p.tm_keys.size() <= 1 ? 1 : 0);
+}
 
 uint64_t ParseKeyText(const std::string& one) {
   if (one.size() >= 2 && one[0] == '0' && (one[1] == 'x' || one[1] == 'X')) {
@@ -131,6 +191,7 @@ constexpr UINT kEventMinIntervalMs = 1000;
 constexpr UINT kSafetyIntervalMs = 5000;
 constexpr ULONGLONG kDiagWindowMs = 180000;
 constexpr ULONGLONG kDiagEnumMinMs = 5000;
+constexpr ULONGLONG kFillRefreshMs = 5000;
 constexpr UINT kFloodWindowMs = 10000;
 constexpr long kFloodMaxEnums = 8;
 constexpr ULONGLONG kFloodRetryMs = 300000;
@@ -203,6 +264,45 @@ void LogDiagRosters(TrayBackend* intercept, TrayBackend* uia) {
   LogRoster(L"uia", uia_icons);
 }
 
+bool FillCandidate(const TrayIconInfo& icon) {
+  return !icon.system_icon && icon.automation_id == L"NotifyItemIcon" && !icon.tip.empty();
+}
+
+bool SameFillItem(const TrayIconInfo& intercept, const TrayIconInfo& uia) {
+  if (intercept.tip.empty() || uia.tip.empty()) {
+    return false;
+  }
+  if (intercept.tip != uia.tip) {
+    return false;
+  }
+  if (!intercept.owner_exe.empty() && !uia.owner_exe.empty() &&
+      _wcsicmp(intercept.owner_exe.c_str(), uia.owner_exe.c_str()) != 0) {
+    return false;
+  }
+  return true;
+}
+
+bool InterceptOwns(const std::vector<TrayIconInfo>& intercept, const TrayIconInfo& uia) {
+  for (const TrayIconInfo& one : intercept) {
+    if (one.key != 0 && one.key == uia.key) {
+      return true;
+    }
+    if (SameFillItem(one, uia)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void LogUiaDetails(const std::vector<TrayIconInfo>& icons) {
+  for (const TrayIconInfo& icon : icons) {
+    const std::wstring tip = SanitizeTipForLog(icon.tip);
+    Log(L"tray", L"uia detail key=0x%llX autoid=%s class=%s offscreen=%d tip=\"%s\"",
+        static_cast<unsigned long long>(icon.key), icon.automation_id.c_str(), icon.class_name.c_str(),
+        icon.offscreen ? 1 : 0, tip.empty() ? L"(no tip)" : tip.c_str());
+  }
+}
+
 int OverflowOrder(const std::vector<TrayIconInfo>& icons) {
   // 오버플로 단추는 가장 왼쪽 SystemTrayIcon 중
   // ClassName이 NormalButton이면서 자식 Image가 없는 버튼이다.
@@ -255,6 +355,12 @@ bool TrayMirror::Start(StatusSink* sink) {
     key_round_n_ = 0;
     use_runtime_id_ = true;
     items_.clear();
+    fill_icons_.clear();
+    fill_keys_.clear();
+    fill_logged_.clear();
+    fill_skip_unknown_.clear();
+    fill_detail_logged_ = false;
+    ResetFillUiaKeyProbe();
     if (!settings_.tray_mirror) {
       Log(L"tray", L"disabled");
     }
@@ -478,7 +584,9 @@ void TrayMirror::DropAll() {
       ids.push_back(pair.second.id);
     }
     items_.clear();
+    fill_keys_.clear();
   }
+  fill_icons_.clear();
   if (sink != nullptr) {
     for (const std::string& id : ids) {
       sink->Remove(id);
@@ -599,6 +707,66 @@ bool TrayMirror::KeyHidden(uint64_t key, const std::vector<std::string>& hidden)
   return false;
 }
 
+bool TrayMirror::InvokeByExe(const std::wstring& exe_path) {
+  if (exe_path.empty()) {
+    return false;
+  }
+  std::vector<std::pair<uint64_t, DWORD>> candidates;
+  {
+    std::lock_guard lock(mu_);
+    if (!settings_.tray_mirror || stopped_slow_ || !worker_.joinable()) {
+      return false;
+    }
+    candidates.reserve(items_.size());
+    for (const auto& [key, st] : items_) {
+      if (st.owner_pid != 0) {
+        candidates.emplace_back(key, st.owner_pid);
+      }
+    }
+  }
+  uint64_t match = 0;
+  for (const auto& [key, pid] : candidates) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (process == nullptr) {
+      continue;
+    }
+    wchar_t buf[MAX_PATH]{};
+    DWORD n = MAX_PATH;
+    std::wstring image;
+    if (QueryFullProcessImageNameW(process, 0, buf, &n) != FALSE && n > 0) {
+      image.assign(buf, n);
+    } else {
+      std::wstring grow(32768, L'\0');
+      n = static_cast<DWORD>(grow.size());
+      if (QueryFullProcessImageNameW(process, 0, grow.data(), &n) != FALSE) {
+        grow.resize(n);
+        image = std::move(grow);
+      }
+    }
+    CloseHandle(process);
+    if (!image.empty() && SameDockPin(exe_path, image)) {
+      match = key;
+      break;
+    }
+  }
+  if (match == 0) {
+    return false;
+  }
+  {
+    std::lock_guard lock(mu_);
+    if (!settings_.tray_mirror || stopped_slow_ || !worker_.joinable()) {
+      return false;
+    }
+    pending_invoke_ = match;
+    pending_right_ = false;
+    pending_dblclk_ = true;
+  }
+  if (wake_event_ != nullptr) {
+    SetEvent(wake_event_);
+  }
+  return true;
+}
+
 void TrayMirror::OnEvent(const StatusEvent& ev) {
   const bool dblclk = ev.event == "dblclick";
   if ((!dblclk && ev.event != "click") || (ev.button != "left" && ev.button != "right")) {
@@ -619,10 +787,11 @@ void TrayMirror::OnEvent(const StatusEvent& ev) {
   }
 }
 
-void TrayMirror::DrainInvoke(TrayBackend* backend) {
+void TrayMirror::DrainInvoke(TrayBackend* backend, TrayBackend* fill_uia) {
   uint64_t key = 0;
   bool right = false;
   bool dblclk = false;
+  bool fill = false;
   {
     std::lock_guard lock(mu_);
     key = pending_invoke_;
@@ -631,18 +800,26 @@ void TrayMirror::DrainInvoke(TrayBackend* backend) {
     pending_right_ = false;
     dblclk = pending_dblclk_;
     pending_dblclk_ = false;
+    fill = fill_keys_.count(key) != 0;
   }
-  if (key == 0 || backend == nullptr) {
+  if (key == 0) {
     return;
   }
   TrayIconInfo icon;
   icon.key = key;
-  if (backend->Invoke(icon, right, dblclk)) {
+  TrayBackend* target = backend;
+  if (fill && fill_uia != nullptr) {
+    target = fill_uia;
+  }
+  if (target == nullptr) {
+    return;
+  }
+  if (target->Invoke(icon, right, dblclk)) {
     return;
   }
   HRESULT hr = E_FAIL;
   const char* pattern = "none";
-  backend->LastInvokeError(&hr, &pattern);
+  target->LastInvokeError(&hr, &pattern);
   Log(L"tray", L"invoke fail pattern=%hs hr=0x%08X", pattern, static_cast<unsigned>(hr));
 }
 
@@ -732,7 +909,206 @@ void TrayMirror::Publish(const TrayIconInfo& icon, int order) {
   }
 }
 
-void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
+void TrayMirror::RememberFillOwners(const std::vector<TrayIconInfo>& intercept) {
+  for (const TrayIconInfo& icon : intercept) {
+    if (icon.owner == nullptr || icon.tip.empty() || IsWindow(icon.owner) == FALSE) {
+      continue;
+    }
+    DWORD pid = 0;
+    GetWindowThreadProcessId(icon.owner, &pid);
+    if (pid == 0) {
+      continue;
+    }
+    std::wstring path;
+    const auto exe_it = fill_exe_by_owner_.find(icon.owner);
+    if (exe_it != fill_exe_by_owner_.end() && exe_it->second.first == pid) {
+      path = exe_it->second.second;
+    } else {
+      path = WindowExePath(icon.owner);
+      if (path.empty()) {
+        continue;
+      }
+      fill_exe_by_owner_[icon.owner] = {pid, path};
+    }
+    const auto tip_it = fill_tip_by_owner_.find(icon.owner);
+    if (tip_it != fill_tip_by_owner_.end()) {
+      if (tip_it->second == icon.tip) {
+        auto own = fill_owners_.find(icon.tip);
+        if (own != fill_owners_.end() && own->second.pid == pid) {
+          own->second.owner = icon.owner;
+          own->second.exe_path = path;
+          continue;
+        }
+      } else {
+        fill_owners_.erase(tip_it->second);
+      }
+    }
+    FillOwner rec;
+    rec.exe_path = std::move(path);
+    rec.owner = icon.owner;
+    rec.pid = pid;
+    fill_owners_[icon.tip] = rec;
+    fill_tip_by_owner_[icon.owner] = icon.tip;
+  }
+  PruneFillOwners();
+}
+
+void TrayMirror::PruneFillOwners() {
+  if (fill_owners_.size() <= kFillOwnerMax && fill_exe_by_owner_.size() <= kFillOwnerMax &&
+      fill_tip_by_owner_.size() <= kFillOwnerMax) {
+    return;
+  }
+  std::vector<HWND> dead;
+  dead.reserve(fill_exe_by_owner_.size());
+  for (const auto& one : fill_exe_by_owner_) {
+    if (IsWindow(one.first) == FALSE) {
+      dead.push_back(one.first);
+    }
+  }
+  for (HWND hwnd : dead) {
+    const auto tip_it = fill_tip_by_owner_.find(hwnd);
+    if (tip_it != fill_tip_by_owner_.end()) {
+      fill_owners_.erase(tip_it->second);
+      fill_tip_by_owner_.erase(tip_it);
+    }
+    fill_exe_by_owner_.erase(hwnd);
+  }
+  Log(L"tray", L"fill owners pruned n=%zu", dead.size());
+}
+
+bool TrayMirror::FillPngForExe(const std::wstring& exe_path, std::vector<uint8_t>* out) {
+  if (out == nullptr || exe_path.empty()) {
+    return false;
+  }
+  const auto cached = fill_png_cache_.find(exe_path);
+  if (cached != fill_png_cache_.end()) {
+    if (cached->second.empty()) {
+      return false;
+    }
+    *out = cached->second;
+    return true;
+  }
+  HICON extracted = nullptr;
+  const UINT got =
+      PrivateExtractIconsW(exe_path.c_str(), 0, kFillIconPx, kFillIconPx, &extracted, nullptr, 1, LR_DEFAULTCOLOR);
+  std::vector<uint8_t> png;
+  bool ok = false;
+  if (got != 0 && extracted != nullptr) {
+    ok = IconToPng(extracted, &png);
+    DestroyIcon(extracted);
+  }
+  fill_png_cache_[exe_path] = ok ? png : std::vector<uint8_t>{};
+  if (!ok) {
+    return false;
+  }
+  *out = std::move(png);
+  return true;
+}
+
+void TrayMirror::RefreshUiaFill(TrayBackend* uia, const std::vector<TrayIconInfo>& intercept) {
+  if (uia == nullptr) {
+    return;
+  }
+  std::vector<TrayIconInfo> icons;
+  const ULONGLONG t0 = GetTickCount64();
+  if (!uia->Enumerate(&icons)) {
+    return;
+  }
+  const ULONGLONG ms = GetTickCount64() - t0;
+  if (ms > kSlowEnumMs) {
+    Log(L"tray", L"fill enum slow ms=%llu count=%zu", ms, icons.size());
+  }
+  if (!fill_detail_logged_) {
+    fill_detail_logged_ = true;
+    LogRoster(L"intercept", intercept);
+    LogRoster(L"uia", icons);
+    LogUiaDetails(icons);
+  }
+  NoteFillUiaKeyProbe(icons);
+  fill_icons_.clear();
+  for (const TrayIconInfo& icon : icons) {
+    if (FillCandidate(icon)) {
+      fill_icons_.push_back(icon);
+    }
+  }
+}
+
+void TrayMirror::MergeUiaFill(std::vector<TrayIconInfo>* raw) {
+  if (raw == nullptr) {
+    return;
+  }
+  std::unordered_set<uint64_t> prev_keys;
+  std::unordered_map<uint64_t, std::wstring> prev_tips;
+  {
+    std::lock_guard lock(mu_);
+    prev_keys = fill_keys_;
+    for (uint64_t key : prev_keys) {
+      const auto it = items_.find(key);
+      if (it != items_.end()) {
+        prev_tips[key] = it->second.tip;
+      }
+    }
+  }
+  std::vector<TrayIconInfo> extra;
+  extra.reserve(fill_icons_.size());
+  for (const TrayIconInfo& icon : fill_icons_) {
+    if (InterceptOwns(*raw, icon)) {
+      continue;
+    }
+    const auto owner = fill_owners_.find(icon.tip);
+    if (owner == fill_owners_.end()) {
+      if (fill_skip_unknown_.insert(icon.key).second) {
+        Log(L"tray", L"fill skip unknown key=0x%llX tip=\"%s\"", static_cast<unsigned long long>(icon.key),
+            SanitizeTipForLog(icon.tip).c_str());
+      }
+      continue;
+    }
+    if (IsWindow(owner->second.owner) == FALSE) {
+      continue;
+    }
+    DWORD now_pid = 0;
+    GetWindowThreadProcessId(owner->second.owner, &now_pid);
+    if (now_pid != owner->second.pid) {
+      continue;
+    }
+    TrayIconInfo copy = icon;
+    if (!FillPngForExe(owner->second.exe_path, &copy.png)) {
+      continue;
+    }
+    copy.owner = owner->second.owner;
+    copy.owner_exe = owner->second.exe_path;
+    extra.push_back(std::move(copy));
+  }
+  std::unordered_set<uint64_t> keys;
+  keys.reserve(extra.size());
+  for (const TrayIconInfo& icon : extra) {
+    keys.insert(icon.key);
+    if (fill_logged_.insert(icon.key).second) {
+      const std::wstring tip = SanitizeTipForLog(icon.tip);
+      const wchar_t* exe = icon.owner_exe.empty() ? L"-" : icon.owner_exe.c_str();
+      Log(L"tray", L"fill key=0x%llX exe=%s tip=\"%s\"", static_cast<unsigned long long>(icon.key), exe, tip.c_str());
+    }
+  }
+  for (uint64_t key : prev_keys) {
+    if (keys.count(key) != 0) {
+      continue;
+    }
+    fill_logged_.erase(key);
+    std::wstring tip;
+    const auto remembered = prev_tips.find(key);
+    if (remembered != prev_tips.end()) {
+      tip = SanitizeTipForLog(remembered->second);
+    }
+    Log(L"tray", L"fill drop key=0x%llX tip=\"%s\"", static_cast<unsigned long long>(key), tip.c_str());
+  }
+  {
+    std::lock_guard lock(mu_);
+    fill_keys_ = std::move(keys);
+  }
+  raw->insert(raw->end(), extra.begin(), extra.end());
+}
+
+void TrayMirror::DoRound(TrayBackend* backend, bool events_live, TrayBackend* fill_uia, bool refresh_fill) {
   if (backend == nullptr) {
     return;
   }
@@ -760,12 +1136,22 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live) {
   if (!ok) {
     return;
   }
+  RememberFillOwners(raw);
   if (slow_streak_ >= kSlowStreakStop) {
     Log(L"tray", L"auto-stop enum_ms=%llu over %u ms x%d", elapsed, kSlowEnumMs, kSlowStreakStop);
     DropAll();
     std::lock_guard lock(mu_);
     stopped_slow_ = true;
     return;
+  }
+  if (fill_uia != nullptr) {
+    if (refresh_fill) {
+      RefreshUiaFill(fill_uia, raw);
+      // 보충 열거가 느리면 그 사이에 가로채기 응답이 들어온다. 최신 목록으로 다시 맞춘다.
+      backend->Enumerate(&raw);
+      RememberFillOwners(raw);
+    }
+    MergeUiaFill(&raw);
   }
 
   const int overflow = OverflowOrder(raw);
@@ -967,6 +1353,9 @@ void TrayMirror::WorkerLoop() {
   std::unique_ptr<TrayBackend> diag_uia;
   ULONGLONG diag_started = 0;
   ULONGLONG last_diag_enum = 0;
+  bool fill_started = false;
+  ULONGLONG last_fill_refresh = 0;
+  bool diag_finished = false;
   if (intercept) {
     diag_uia = MakeUiaTrayBackend();
     if (diag_uia != nullptr) {
@@ -1037,6 +1426,17 @@ void TrayMirror::WorkerLoop() {
         LogDiagRosters(intercept_.get(), diag_uia.get());
         diag_uia.reset();
       }
+      {
+        std::lock_guard lock(mu_);
+        fill_keys_.clear();
+      }
+      fill_icons_.clear();
+      fill_logged_.clear();
+      fill_skip_unknown_.clear();
+      fill_detail_logged_ = false;
+      ResetFillUiaKeyProbe();
+      fill_started = false;
+      last_fill_refresh = 0;
       if (backend != nullptr) {
         backend->UnsubscribeStructureChanged();
       }
@@ -1065,18 +1465,37 @@ void TrayMirror::WorkerLoop() {
       }
     }
     if (have_invoke) {
-      DrainInvoke(backend);
+      DrainInvoke(backend, intercept ? diag_uia.get() : nullptr);
     }
     if (active && backend != nullptr && run_enum) {
-      DoRound(backend, events_live);
-      if (diag_uia != nullptr) {
+      bool refresh_fill = false;
+      if (intercept && diag_uia != nullptr) {
+        const ULONGLONG now = GetTickCount64();
+        if (!fill_started) {
+          refresh_fill = true;
+          fill_started = true;
+        }
+        if (backend->TakeStartupFillPulse() > 0) {
+          refresh_fill = true;
+        }
+        if (last_fill_refresh == 0 || now - last_fill_refresh >= kFillRefreshMs) {
+          refresh_fill = true;
+        }
+        if (refresh_fill) {
+          last_fill_refresh = now;
+        }
+      }
+      DoRound(backend, events_live, intercept ? diag_uia.get() : nullptr, refresh_fill);
+      if (diag_uia != nullptr && !diag_finished) {
         const ULONGLONG now = GetTickCount64();
         if (diag_started != 0 && now - diag_started >= kDiagWindowMs) {
           LogDiagRosters(backend, diag_uia.get());
-          diag_uia.reset();
-        } else if (last_diag_enum == 0 || now - last_diag_enum >= kDiagEnumMinMs) {
+          diag_finished = true;
+        } else if (!refresh_fill && (last_diag_enum == 0 || now - last_diag_enum >= kDiagEnumMinMs)) {
           std::vector<TrayIconInfo> diag;
           diag_uia->Enumerate(&diag);
+          last_diag_enum = now;
+        } else if (refresh_fill) {
           last_diag_enum = now;
         }
       }

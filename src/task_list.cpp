@@ -236,7 +236,7 @@ std::unordered_set<HWND> ShellBrowserHwnds() {
   return out;
 }
 
-std::wstring WindowExePath(HWND hwnd) {
+std::wstring QueryWindowExePath(HWND hwnd) {
   DWORD pid = 0;
   GetWindowThreadProcessId(hwnd, &pid);
   if (pid == 0) {
@@ -651,7 +651,7 @@ const WindowCacheEntry& CachedWindow(HWND hwnd, bool* from_cache) {
     g_window_cache.clear();
   }
   WindowCacheEntry entry;
-  entry.path = WindowExePath(hwnd);
+  entry.path = QueryWindowExePath(hwnd);
   entry.props = ReadWindowProps(hwnd);
   if (entry.props.aumid.empty() && !entry.path.empty() && !IsHostExe(entry.path)) {
     entry.props.aumid = PathAumid(entry.path);
@@ -998,6 +998,10 @@ std::wstring BuildDockLaunchCommandLine(const DockApp& app) {
 }
 
 }  // namespace
+
+std::wstring WindowExePath(HWND hwnd) {
+  return QueryWindowExePath(hwnd);
+}
 
 std::wstring DockLaunchCommandLine(const DockApp& app) {
   return BuildDockLaunchCommandLine(app);
@@ -1399,6 +1403,10 @@ bool ExeHasLiveProcess(const std::wstring& exe_path) {
 }
 
 }  // namespace
+
+void InvalidateLiveProcessCache() {
+  g_live_process_cache.tick = 0;
+}
 
 std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_paths) {
   WatchdogStage(L"collect");
