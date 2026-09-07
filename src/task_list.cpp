@@ -19,6 +19,8 @@
 #include <winver.h>
 #include <wrl/client.h>
 
+#include <tlhelp32.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -1320,6 +1322,82 @@ double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
   return (end.QuadPart - start.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
 }
 
+constexpr ULONGLONG kLiveProcessCacheMs = 1000;
+
+struct LiveProcessCache {
+  ULONGLONG tick = 0;
+  std::unordered_map<std::wstring, std::vector<DWORD>> pids_by_name;
+};
+
+LiveProcessCache g_live_process_cache;
+
+std::wstring ExeFileName(const std::wstring& path) {
+  const size_t slash = path.find_last_of(L"\\/");
+  std::wstring name = slash == std::wstring::npos ? path : path.substr(slash + 1);
+  return Lower(std::move(name));
+}
+
+void RefreshLiveProcessCache() {
+  const ULONGLONG now = GetTickCount64();
+  if (g_live_process_cache.tick != 0 && now - g_live_process_cache.tick < kLiveProcessCacheMs) {
+    return;
+  }
+  std::unordered_map<std::wstring, std::vector<DWORD>> pids_by_name;
+  const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap != INVALID_HANDLE_VALUE) {
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snap, &entry)) {
+      do {
+        if (entry.th32ProcessID != 0) {
+          pids_by_name[Lower(entry.szExeFile)].push_back(entry.th32ProcessID);
+        }
+      } while (Process32NextW(snap, &entry));
+    }
+    CloseHandle(snap);
+  }
+  g_live_process_cache.pids_by_name = std::move(pids_by_name);
+  g_live_process_cache.tick = now;
+}
+
+// 주어진 실행 파일 경로로 도는 프로세스가 있는지 본다. 창이 없어도 참을 돌려준다.
+bool ExeHasLiveProcess(const std::wstring& exe_path) {
+  if (exe_path.empty()) {
+    return false;
+  }
+  const std::wstring name = ExeFileName(exe_path);
+  if (name.empty()) {
+    return false;
+  }
+  RefreshLiveProcessCache();
+  const auto it = g_live_process_cache.pids_by_name.find(name);
+  if (it == g_live_process_cache.pids_by_name.end() || it->second.empty()) {
+    return false;
+  }
+  if (it->second.size() == 1) {
+    return true;
+  }
+  bool any_image = false;
+  for (const DWORD pid : it->second) {
+    const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (process == nullptr) {
+      continue;
+    }
+    wchar_t image[32768]{};
+    DWORD n = static_cast<DWORD>(sizeof(image) / sizeof(image[0]));
+    const BOOL ok = QueryFullProcessImageNameW(process, 0, image, &n);
+    CloseHandle(process);
+    if (ok == FALSE || n == 0) {
+      continue;
+    }
+    any_image = true;
+    if (SameDockPin(exe_path, std::wstring(image, n))) {
+      return true;
+    }
+  }
+  return !any_image;
+}
+
 }  // namespace
 
 std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_paths) {
@@ -1573,6 +1651,9 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       }
       app.pinned = true;
       app.can_pin = true;
+      if (!app.exe_path.empty() && ExeHasLiveProcess(app.exe_path)) {
+        app.running = true;
+      }
       used_keys.push_back(app.key);
       result.push_back(std::move(app));
     } else {
@@ -1590,6 +1671,9 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       }
       app.pinned = true;
       app.can_pin = true;
+      if (!app.exe_path.empty() && ExeHasLiveProcess(app.exe_path)) {
+        app.running = true;
+      }
       used_keys.push_back(app.key);
       result.push_back(std::move(app));
     }

@@ -308,10 +308,13 @@ void TaskbarController::EnsureHidden() {
     APPBARDATA abd{};
     abd.cbSize = sizeof(abd);
     abd.hWnd = tray;
-    abd.lParam = (original_state_ & ABS_ALWAYSONTOP) | ABS_AUTOHIDE;
-    SHAppBarMessage(ABM_SETSTATE, &abd);
+    const UINT now = static_cast<UINT>(SHAppBarMessage(ABM_GETSTATE, &abd));
+    if ((now & ABS_AUTOHIDE) == 0) {
+      abd.lParam = (original_state_ & ABS_ALWAYSONTOP) | ABS_AUTOHIDE;
+      SHAppBarMessage(ABM_SETSTATE, &abd);
+    }
   }
-  HideTrayWindows();
+  Rehide();
 }
 
 bool TaskbarController::Rehide() {

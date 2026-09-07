@@ -216,6 +216,22 @@ void InjectWinKey(DWORD vk, bool up) {
   SendInput(1, &in, sizeof(INPUT));
 }
 
+bool InjectWinCombo(DWORD win_vk, const KBDLLHOOKSTRUCT& key) {
+  INPUT in[2]{};
+  in[0].type = INPUT_KEYBOARD;
+  in[0].ki.wVk = static_cast<WORD>(win_vk);
+  if (win_vk == VK_RWIN) {
+    in[0].ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+  }
+  in[1].type = INPUT_KEYBOARD;
+  in[1].ki.wVk = static_cast<WORD>(key.vkCode);
+  in[1].ki.wScan = static_cast<WORD>(key.scanCode);
+  if ((key.flags & LLKHF_EXTENDED) != 0) {
+    in[1].ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+  }
+  return SendInput(2, in, sizeof(INPUT)) == 2;
+}
+
 LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
   if (code != HC_ACTION) {
     return CallNextHookEx(g_key_hook, code, wparam, lparam);
@@ -243,15 +259,6 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
   }
   if (g_menu_bar == nullptr || g_menu_bar->hwnd() == nullptr || !g_menu_bar->win_key_enabled()) {
     return CallNextHookEx(g_key_hook, code, wparam, lparam);
-  }
-  if (g_win_held) {
-    const bool win_really_down = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
-                                 (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
-    if (!win_really_down) {
-      g_win_held = false;
-      g_win_combo = false;
-      g_win_injected = false;
-    }
   }
   const bool is_win = vk == VK_LWIN || vk == VK_RWIN;
 
@@ -291,6 +298,9 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
     if (!g_win_combo) {
       g_win_combo = true;
       g_win_injected = true;
+      if (InjectWinCombo(g_win_vk, *info)) {
+        return 1;
+      }
       InjectWinKey(g_win_vk, false);
     }
   }
@@ -301,8 +311,6 @@ int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
 }
 
-
-
 double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
   static LARGE_INTEGER freq{};
   if (freq.QuadPart == 0) {
@@ -312,6 +320,72 @@ double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
     return 0.0;
   }
   return (end.QuadPart - start.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+}
+
+RECT VisibleWindowRect(HWND hwnd) {
+  RECT rc{};
+  if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof(rc)))) {
+    return rc;
+  }
+  GetWindowRect(hwnd, &rc);
+  return rc;
+}
+
+void RemaximizeWindow(HWND hwnd) {
+  WINDOWPLACEMENT wp{};
+  wp.length = sizeof(wp);
+  if (GetWindowPlacement(hwnd, &wp) != FALSE) {
+    const RECT normal = wp.rcNormalPosition;
+    wp.showCmd = SW_RESTORE;
+    SetWindowPlacement(hwnd, &wp);
+    wp.length = sizeof(wp);
+    wp.rcNormalPosition = normal;
+    wp.showCmd = SW_SHOWMAXIMIZED;
+    if (SetWindowPlacement(hwnd, &wp) != FALSE) {
+      return;
+    }
+  }
+  ShowWindow(hwnd, SW_RESTORE);
+  ShowWindow(hwnd, SW_MAXIMIZE);
+}
+
+int RemaximizeOverlapping(HWND self, HMONITOR monitor, const RECT& work) {
+  struct Ctx {
+    HMONITOR monitor;
+    RECT work;
+    HWND self;
+    int moved;
+  } ctx{monitor, work, self, 0};
+  EnumWindows(
+      [](HWND hwnd, LPARAM lp) -> BOOL {
+        Ctx* ctx = reinterpret_cast<Ctx*>(lp);
+        if (hwnd == nullptr || hwnd == ctx->self || !IsWindowVisible(hwnd) || IsIconic(hwnd) ||
+            IsZoomed(hwnd) == FALSE) {
+          return TRUE;
+        }
+        wchar_t cls[64]{};
+        GetClassNameW(hwnd, cls, 64);
+        if (lstrcmpiW(cls, kMenuBarClass) == 0 || lstrcmpiW(cls, L"bamti.Dock") == 0 ||
+            lstrcmpiW(cls, L"Progman") == 0 || lstrcmpiW(cls, L"WorkerW") == 0 ||
+            lstrcmpiW(cls, L"Shell_TrayWnd") == 0) {
+          return TRUE;
+        }
+        if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) != ctx->monitor) {
+          return TRUE;
+        }
+        if (VisibleWindowRect(hwnd).top >= ctx->work.top) {
+          return TRUE;
+        }
+        const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if ((ex & WS_EX_NOACTIVATE) != 0 && (ex & WS_EX_APPWINDOW) == 0) {
+          return TRUE;
+        }
+        RemaximizeWindow(hwnd);
+        ++ctx->moved;
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&ctx));
+  return ctx.moved;
 }
 
 }  // namespace
@@ -417,6 +491,7 @@ bool MenuBar::Create(HINSTANCE instance) {
   ApplyBackdrop();
   Present();
   taskbar_.Hide();
+  ReserveWorkArea();
   Log(L"bar", L"ready hwnd=%p taskbar_hidden=%d", hwnd_, taskbar_.hidden() ? 1 : 0);
   spotlight_.Warmup(hwnd_, dark_);
   InstallWinHook();
@@ -600,7 +675,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       layout_.SetDpi(Dpi());
       clock_.SetDpi(Dpi());
-      Layout();
+      ReserveWorkArea();
       Present();
       return 0;
     case WM_WINDOWPOSCHANGED: {
@@ -1160,6 +1235,10 @@ bool MenuBar::RegisterAppBar() {
 }
 
 void MenuBar::UnregisterAppBar() {
+  if (work_area_forced_) {
+    work_area_forced_ = false;
+    SystemParametersInfoW(SPI_SETWORKAREA, 0, nullptr, SPIF_SENDCHANGE);
+  }
   if (!appbar_registered_ || hwnd_ == nullptr) {
     appbar_registered_ = false;
     return;
@@ -1205,6 +1284,36 @@ void MenuBar::Layout() {
     GetClientRect(hwnd_, &ti.rect);
     SendMessageW(tooltip_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&ti));
   }
+}
+
+void MenuBar::ReserveWorkArea() {
+  if (hwnd_ == nullptr || fullscreen_occluded_ || !appbar_registered_ || reserving_work_area_) {
+    return;
+  }
+  reserving_work_area_ = true;
+  Layout();
+
+  const HMONITOR monitor = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY);
+  MONITORINFO info{};
+  info.cbSize = sizeof(info);
+  int moved = 0;
+  if (GetMonitorInfoW(monitor, &info)) {
+    const LONG want = info.rcMonitor.top + BarHeightPx();
+    if (info.rcWork.top < want) {
+      RECT work = info.rcWork;
+      work.top = want;  // ABM_SETPOS is often ignored; keep left/right/bottom.
+      if (SystemParametersInfoW(SPI_SETWORKAREA, 0, &work, SPIF_SENDCHANGE) != FALSE) {
+        work_area_forced_ = true;
+        GetMonitorInfoW(monitor, &info);
+      }
+    }
+    if (info.rcWork.top >= want) {
+      moved = RemaximizeOverlapping(hwnd_, monitor, info.rcWork);
+    }
+    Log(L"bar", L"workarea top=%ld want=%ld forced=%d moved=%d", info.rcWork.top, want, work_area_forced_ ? 1 : 0,
+        moved);
+  }
+  reserving_work_area_ = false;
 }
 
 void MenuBar::ApplyBackdrop() {
@@ -2627,7 +2736,7 @@ void MenuBar::SetFullscreenOccluded(bool occluded) {
   } else {
     RegisterAppBar();
     ShowWindow(hwnd_, SW_SHOWNA);
-    Layout();
+    ReserveWorkArea();
     Present();
   }
 }
