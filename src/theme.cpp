@@ -51,10 +51,11 @@ D2D1_COLOR_F DockFillColor(bool dark) {
 }
 
 D2D1_COLOR_F BarFillColor(bool dark) {
+  // 독(DockFillColor)보다 옅다. 라이트는 어두운 글자 대비를 위해 조금 더 불투명하다.
   if (dark) {
-    return D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.78f);
+    return D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.60f);
   }
-  return D2D1::ColorF(0.98f, 0.98f, 0.98f, 0.82f);
+  return D2D1::ColorF(0.98f, 0.98f, 0.98f, 0.64f);
 }
 
 D2D1_COLOR_F DockStrokeColor(bool dark) {

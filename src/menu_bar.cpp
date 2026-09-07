@@ -79,70 +79,6 @@ constexpr UINT kCornerWatchMs = 30;
 constexpr UINT kCtrlPollMs = 200;
 constexpr ULONGLONG kCtrlHookGraceMs = 600;
 constexpr int kPeekZoneDip = 14;  // bar_layout.cpp의 kPadRightDip과 같다.
-
-enum AccentState : DWORD {
-  kAccentDisabled = 0,
-  kAccentEnableGradient = 1,
-  kAccentEnableTransparentGradient = 2,
-  kAccentEnableBlurBehind = 3,
-  kAccentEnableAcrylicBlurBehind = 4,
-  kAccentEnableHostBackdrop = 5,
-};
-
-// 화면이 검으면 실패다. 4 → 3 → 2 순으로 시험한다.
-constexpr DWORD kBarAccentState = kAccentEnableAcrylicBlurBehind;
-
-struct AccentPolicy {
-  DWORD state;
-  DWORD flags;
-  DWORD gradient_color;  // AABBGGRR 이다. RGB 가 아니라 BGR 순서인 것에 주의한다.
-  DWORD animation_id;
-};
-
-struct WindowCompositionAttributeData {
-  DWORD attrib;  // 19 = WCA_ACCENT_POLICY
-  PVOID data;
-  SIZE_T size;
-};
-
-using SetWindowCompositionAttributeFn = BOOL(WINAPI*)(HWND, WindowCompositionAttributeData*);
-
-SetWindowCompositionAttributeFn LoadSetWindowCompositionAttribute() {
-  static const SetWindowCompositionAttributeFn fn = []() -> SetWindowCompositionAttributeFn {
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    if (user32 == nullptr) {
-      Log(L"bar", L"composition user32 missing err=%lu", GetLastError());
-      return nullptr;
-    }
-    auto found = reinterpret_cast<SetWindowCompositionAttributeFn>(
-        GetProcAddress(user32, "SetWindowCompositionAttribute"));
-    Log(L"bar", L"composition GetProcAddress %s err=%lu", found != nullptr ? L"ok" : L"failed",
-        found != nullptr ? 0ul : GetLastError());
-    return found;
-  }();
-  return fn;
-}
-
-void ApplyAccentPolicy(HWND hwnd, bool dark) {
-  const auto fn = LoadSetWindowCompositionAttribute();
-  if (fn == nullptr) {
-    return;
-  }
-  AccentPolicy policy{};
-  policy.state = kBarAccentState;
-  policy.flags = 0;
-  policy.gradient_color = dark ? 0x99000000u : 0x99FFFFFFu;
-  policy.animation_id = 0;
-  WindowCompositionAttributeData data{};
-  data.attrib = 19;
-  data.data = &policy;
-  data.size = sizeof(policy);
-  SetLastError(ERROR_SUCCESS);
-  const BOOL ok = fn(hwnd, &data);
-  const DWORD err = GetLastError();
-  Log(L"bar", L"composition set ok=%d err=%lu state=%lu color=0x%08lx", ok ? 1 : 0, err, policy.state,
-      policy.gradient_color);
-}
 constexpr int kPeekRearmZoneDip = 96;  // 걸쇠를 다시 걸 수 있게 되는 거리.
 constexpr char kSpotlightItemId[] = "bamti.widget/spotlight";
 constexpr char kControlCenterItemId[] = "bamti.widget/control_center";
@@ -1287,8 +1223,6 @@ void MenuBar::ApplyBackdrop() {
 
   const MARGINS margins{0, 0, 0, 0};
   DwmExtendFrameIntoClientArea(hwnd_, &margins);
-
-  ApplyAccentPolicy(hwnd_, dark_);
 }
 
 void MenuBar::ArmRepaint() {
