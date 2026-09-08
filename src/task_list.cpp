@@ -1364,6 +1364,11 @@ void RefreshLiveProcessCache() {
   g_live_process_cache.tick = now;
 }
 
+// 셸 프로세스는 창이 하나도 없어도 계속 살아 있으므로, 탐색기는 프로세스 존재만으로 실행 중이라고 볼 수 없다.
+bool RunsAsShellProcess(const std::wstring& exe_path) {
+  return ExeFileName(exe_path) == L"explorer.exe";
+}
+
 // 주어진 실행 파일 경로로 도는 프로세스가 있는지 본다. 창이 없어도 참을 돌려준다.
 bool ExeHasLiveProcess(const std::wstring& exe_path) {
   if (exe_path.empty()) {
@@ -1659,7 +1664,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       }
       app.pinned = true;
       app.can_pin = true;
-      if (!app.exe_path.empty() && ExeHasLiveProcess(app.exe_path)) {
+      if (!app.exe_path.empty() && !RunsAsShellProcess(app.exe_path) && ExeHasLiveProcess(app.exe_path)) {
         app.running = true;
       }
       used_keys.push_back(app.key);
@@ -1679,7 +1684,7 @@ std::vector<DockApp> CollectDockApps(const std::vector<std::wstring>& pinned_pat
       }
       app.pinned = true;
       app.can_pin = true;
-      if (!app.exe_path.empty() && ExeHasLiveProcess(app.exe_path)) {
+      if (!app.exe_path.empty() && !RunsAsShellProcess(app.exe_path) && ExeHasLiveProcess(app.exe_path)) {
         app.running = true;
       }
       used_keys.push_back(app.key);
