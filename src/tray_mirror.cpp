@@ -496,7 +496,17 @@ void TrayMirror::SetSettings(const WidgetSettings& next) {
     }
     if (!stop_worker) {
       for (auto it = items_.begin(); it != items_.end();) {
-        if (KeyHidden(it->first, next.tray_hidden_keys)) {
+        const ItemState& st = it->second;
+        bool hidden = KeyHidden(it->first, next.tray_hidden_keys);
+        if (!hidden && !st.stable.empty()) {
+          for (const std::string& one : next.tray_hidden) {
+            if (one == st.stable) {
+              hidden = true;
+              break;
+            }
+          }
+        }
+        if (hidden) {
           drop.push_back(it->second.id);
           it = items_.erase(it);
         } else {
@@ -620,6 +630,44 @@ std::string TrayMirror::KeyText(uint64_t key) {
   return buf;
 }
 
+std::string TrayMirror::StableKey(const TrayIconInfo& icon) {
+  if (!icon.owner_exe.empty() && icon.owner_exe != L"?") {
+    std::wstring exe = icon.owner_exe;
+    CharLowerBuffW(exe.data(), static_cast<DWORD>(exe.size()));
+    return "exe:" + WideToUtf8Bytes(exe) + "#" + std::to_string(icon.uid);
+  }
+  if (!icon.tip.empty()) {
+    std::wstring tip = icon.tip;
+    if (tip.size() > 64) {
+      tip.resize(64);
+    }
+    return "tip:" + WideToUtf8Bytes(tip);
+  }
+  return {};
+}
+
+bool TrayMirror::StableHidden(const TrayIconInfo& icon, const std::vector<std::string>& hidden) {
+  const std::string key = StableKey(icon);
+  if (key.empty()) {
+    return false;
+  }
+  for (const std::string& one : hidden) {
+    if (one == key) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string TrayMirror::StableForKey(uint64_t key) const {
+  std::lock_guard lock(mu_);
+  const auto it = items_.find(key);
+  if (it == items_.end()) {
+    return {};
+  }
+  return it->second.stable;
+}
+
 std::vector<TrayMirror::MenuItem> TrayMirror::MenuItems() const {
   std::lock_guard lock(mu_);
   std::vector<ItemState> vis;
@@ -636,11 +684,13 @@ std::vector<TrayMirror::MenuItem> TrayMirror::MenuItems() const {
 
   std::vector<MenuItem> out;
   std::unordered_set<uint64_t> seen;
-  out.reserve(vis.size() + settings_.tray_hidden_keys.size());
+  std::unordered_set<std::string> seen_stable;
+  out.reserve(vis.size() + settings_.tray_hidden_keys.size() + settings_.tray_hidden.size());
   for (const ItemState& st : vis) {
     MenuItem row;
     row.key = st.key;
     row.shown = true;
+    row.stable = st.stable;
     GUID guid = st.guid;
     if (GuidEmpty(guid)) {
       const auto remembered = last_tips_.find(st.key);
@@ -651,6 +701,9 @@ std::vector<TrayMirror::MenuItem> TrayMirror::MenuItems() const {
     row.label = MenuLabel(st.tip, guid, false, st.key);
     out.push_back(std::move(row));
     seen.insert(st.key);
+    if (!st.stable.empty()) {
+      seen_stable.insert(st.stable);
+    }
   }
   for (const std::string& one : settings_.tray_hidden_keys) {
     const uint64_t key = ParseKeyText(one);
@@ -677,6 +730,27 @@ std::vector<TrayMirror::MenuItem> TrayMirror::MenuItems() const {
     }
     out.push_back(std::move(row));
     seen.insert(key);
+  }
+  for (const std::string& one : settings_.tray_hidden) {
+    if (one.empty() || seen_stable.find(one) != seen_stable.end()) {
+      continue;
+    }
+    MenuItem row;
+    row.shown = false;
+    row.stable = one;
+    std::wstring tip;
+    GUID guid{};
+    const auto remembered = last_stable_tips_.find(one);
+    if (remembered != last_stable_tips_.end()) {
+      tip = remembered->second.tip;
+      guid = remembered->second.guid;
+    }
+    row.label = MenuLabel(tip, guid, true, row.key);
+    if (LabelForGuid(guid) == nullptr && tip.empty()) {
+      continue;
+    }
+    out.push_back(std::move(row));
+    seen_stable.insert(one);
   }
   return out;
 }
@@ -841,7 +915,7 @@ bool TrayMirror::Include(const TrayIconInfo& icon, int overflow_order, const Wid
   if (overflow_order >= 0 && icon.order == overflow_order) {
     return false;
   }
-  if (KeyHidden(icon.key, settings.tray_hidden_keys)) {
+  if (KeyHidden(icon.key, settings.tray_hidden_keys) || StableHidden(icon, settings.tray_hidden)) {
     return false;
   }
   if (settings.bluetooth && IsSystemBluetoothIcon(icon)) {
@@ -890,6 +964,16 @@ void TrayMirror::Publish(const TrayIconInfo& icon, int order) {
       if (!GuidEmpty(icon.guid_item)) {
         rec.guid = icon.guid_item;
       }
+      const std::string stable = StableKey(icon);
+      if (!stable.empty()) {
+        LastTip& rec_s = last_stable_tips_[stable];
+        if (!icon.tip.empty()) {
+          rec_s.tip = icon.tip;
+        }
+        if (!GuidEmpty(icon.guid_item)) {
+          rec_s.guid = icon.guid_item;
+        }
+      }
     }
     ItemState st;
     st.key = icon.key;
@@ -899,6 +983,7 @@ void TrayMirror::Publish(const TrayIconInfo& icon, int order) {
     st.visible = item.visible;
     st.icon_hash = item.icon.cache_key;
     st.id = item.id;
+    st.stable = StableKey(icon);
     if (icon.owner != nullptr) {
       GetWindowThreadProcessId(icon.owner, &st.owner_pid);
     }
@@ -1159,11 +1244,13 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live, TrayBackend* fi
   std::vector<TrayIconInfo> keep;
   std::vector<LastTip> tips;
   std::vector<uint64_t> tip_keys;
+  std::vector<std::string> tip_stables;
   std::vector<uint64_t> live;
   next.reserve(raw.size());
   keep.reserve(raw.size());
   tips.reserve(raw.size());
   tip_keys.reserve(raw.size());
+  tip_stables.reserve(raw.size());
   live.reserve(raw.size());
   for (const TrayIconInfo& icon : raw) {
     TrayIconInfo copy = icon;
@@ -1187,6 +1274,7 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live, TrayBackend* fi
       rec.guid = copy.guid_item;
       tip_keys.push_back(copy.key);
       tips.push_back(std::move(rec));
+      tip_stables.push_back(StableKey(copy));
     }
     if (!Include(copy, overflow, settings)) {
       continue;
@@ -1199,6 +1287,7 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live, TrayBackend* fi
     st.visible = copy.from_overflow ? true : (copy.offscreen == FALSE);
     st.icon_hash = copy.png.empty() ? 0 : Fnv1a64(copy.png.data(), copy.png.size());
     st.id = MakeId(copy.key);
+    st.stable = StableKey(copy);
     if (copy.owner != nullptr) {
       GetWindowThreadProcessId(copy.owner, &st.owner_pid);
     }
@@ -1219,6 +1308,15 @@ void TrayMirror::DoRound(TrayBackend* backend, bool events_live, TrayBackend* fi
       }
       if (!GuidEmpty(tips[i].guid)) {
         rec.guid = tips[i].guid;
+      }
+      if (!tip_stables[i].empty()) {
+        LastTip& rec_s = last_stable_tips_[tip_stables[i]];
+        if (!tips[i].tip.empty()) {
+          rec_s.tip = tips[i].tip;
+        }
+        if (!GuidEmpty(tips[i].guid)) {
+          rec_s.guid = tips[i].guid;
+        }
       }
     }
   }

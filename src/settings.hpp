@@ -21,6 +21,7 @@ struct WidgetSettings {
   bool tray_overflow_icons = true;
   std::string tray_backend = "uia";
   std::vector<std::string> tray_hidden_keys;
+  std::vector<std::string> tray_hidden;  // 안정 식별자. tray_hidden_keys 를 대신한다.
   std::vector<std::string> bar_order;  // 화면 오른쪽부터의 순서
   int saver_threshold_backup = -1;
   bool Any() const { return battery || cpu || network || volume || bluetooth || control_center || widget_board; }

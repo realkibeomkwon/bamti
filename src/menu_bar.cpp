@@ -1103,6 +1103,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         next.tray_overflow_icons = tray.tray_overflow_icons;
         next.tray_backend = tray.tray_backend;
         next.tray_hidden_keys = tray.tray_hidden_keys;
+        next.tray_hidden = tray.tray_hidden;
         if (cmd == kWidgetBatteryCmd) {
           next.battery = !next.battery;
         } else if (cmd == kWidgetCpuCmd) {
@@ -1128,6 +1129,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         next.tray_overflow_icons = tray.tray_overflow_icons;
         next.tray_backend = tray.tray_backend;
         next.tray_hidden_keys = tray.tray_hidden_keys;
+        next.tray_hidden = tray.tray_hidden;
         if (cmd == kTrayMirrorToggleCmd) {
           next.tray_mirror = !next.tray_mirror;
         } else if (cmd == kTraySystemIconsCmd) {
@@ -1145,6 +1147,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         next.tray_overflow_icons = tray.tray_overflow_icons;
         next.tray_backend = tray.tray_backend == "intercept" ? "uia" : "intercept";
         next.tray_hidden_keys = tray.tray_hidden_keys;
+        next.tray_hidden = tray.tray_hidden;
         ApplySettings(next);
       }
       if (cmd == kTrayPeekCmd) {
@@ -1165,15 +1168,50 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           next.tray_overflow_icons = tray.tray_overflow_icons;
           next.tray_backend = tray.tray_backend;
           next.tray_hidden_keys = tray.tray_hidden_keys;
+          next.tray_hidden = tray.tray_hidden;
           const std::string hex = TrayMirror::KeyText(key);
+          const std::string stable = tray_.StableForKey(key);
+          std::vector<std::string> kept;
+          kept.reserve(next.tray_hidden_keys.size());
           bool have = false;
           for (const std::string& one : next.tray_hidden_keys) {
-            if (one == hex) {
+            uint64_t parsed = 0;
+            if (one.size() >= 2 && one[0] == '0' && (one[1] == 'x' || one[1] == 'X')) {
+              parsed = static_cast<uint64_t>(strtoull(one.c_str() + 2, nullptr, 16));
+            } else {
+              parsed = static_cast<uint64_t>(strtoull(one.c_str(), nullptr, 16));
+            }
+            if (parsed == key || one == hex) {
               have = true;
-              break;
+              continue;
+            }
+            kept.push_back(one);
+          }
+          if (!stable.empty()) {
+            for (const std::string& one : next.tray_hidden) {
+              if (one == stable) {
+                have = true;
+                break;
+              }
             }
           }
-          if (!have) {
+          if (have) {
+            next.tray_hidden_keys = std::move(kept);
+            std::vector<std::string> kept_stable;
+            kept_stable.reserve(next.tray_hidden.size());
+            for (const std::string& one : next.tray_hidden) {
+              if (!stable.empty() && one == stable) {
+                continue;
+              }
+              kept_stable.push_back(one);
+            }
+            next.tray_hidden = std::move(kept_stable);
+          } else if (!stable.empty()) {
+            next.tray_hidden.push_back(stable);
+            if (next.tray_hidden.size() > kTrayHiddenKeysMax) {
+              next.tray_hidden.erase(next.tray_hidden.begin());
+            }
+          } else {
             next.tray_hidden_keys.push_back(hex);
             if (next.tray_hidden_keys.size() > kTrayHiddenKeysMax) {
               next.tray_hidden_keys.erase(next.tray_hidden_keys.begin());
@@ -1193,7 +1231,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           next.tray_overflow_icons = tray.tray_overflow_icons;
           next.tray_backend = tray.tray_backend;
           next.tray_hidden_keys = tray.tray_hidden_keys;
+          next.tray_hidden = tray.tray_hidden;
           const std::string hex = TrayMirror::KeyText(key);
+          const std::string stable = idx < tray_menu_stable_.size() ? tray_menu_stable_[idx] : std::string();
           std::vector<std::string> kept;
           kept.reserve(next.tray_hidden_keys.size());
           bool have = false;
@@ -1210,8 +1250,30 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             kept.push_back(one);
           }
+          if (!stable.empty()) {
+            for (const std::string& one : next.tray_hidden) {
+              if (one == stable) {
+                have = true;
+                break;
+              }
+            }
+          }
           if (have) {
             next.tray_hidden_keys = std::move(kept);
+            std::vector<std::string> kept_stable;
+            kept_stable.reserve(next.tray_hidden.size());
+            for (const std::string& one : next.tray_hidden) {
+              if (!stable.empty() && one == stable) {
+                continue;
+              }
+              kept_stable.push_back(one);
+            }
+            next.tray_hidden = std::move(kept_stable);
+          } else if (!stable.empty()) {
+            next.tray_hidden.push_back(stable);
+            if (next.tray_hidden.size() > kTrayHiddenKeysMax) {
+              next.tray_hidden.erase(next.tray_hidden.begin());
+            }
           } else {
             next.tray_hidden_keys.push_back(hex);
             if (next.tray_hidden_keys.size() > kTrayHiddenKeysMax) {
@@ -1229,6 +1291,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         next.tray_overflow_icons = tray.tray_overflow_icons;
         next.tray_backend = tray.tray_backend;
         next.tray_hidden_keys = tray.tray_hidden_keys;
+        next.tray_hidden = tray.tray_hidden;
         ApplySettings(next);
       }
       if (cmd == kSettingsCmd) {
@@ -1957,6 +2020,7 @@ void MenuBar::FinishReorder() {
     next.tray_overflow_icons = tray.tray_overflow_icons;
     next.tray_backend = tray.tray_backend;
     next.tray_hidden_keys = tray.tray_hidden_keys;
+    next.tray_hidden = tray.tray_hidden;
     next.bar_order = bar_order_;
     SaveWidgetSettings(next);
   }
@@ -2533,15 +2597,18 @@ void MenuBar::OpenBarSubmenu(UINT cmd) {
   } else if (cmd == kMenuTraySubCmd) {
     bar_submenu_->SetMaxWidthDip(360);
     tray_menu_keys_.clear();
+    tray_menu_stable_.clear();
     const std::vector<TrayMirror::MenuItem> entries = tray_.MenuItems();
     if (entries.empty()) {
       bar_submenu_->Add(0, L"미러 중인 아이콘이 없습니다", false, false);
     } else {
       const size_t n = (std::min)(entries.size(), kTrayHiddenKeysMax);
       tray_menu_keys_.reserve(n);
+      tray_menu_stable_.reserve(n);
       for (size_t i = 0; i < n; ++i) {
         bar_submenu_->Add(kTrayItemCmdBase + static_cast<UINT>(i), entries[i].label, entries[i].shown);
         tray_menu_keys_.push_back(entries[i].key);
+        tray_menu_stable_.push_back(entries[i].stable);
       }
       if (entries.size() > kTrayHiddenKeysMax) {
         bar_submenu_->Add(0, L"이하 생략", false, false);

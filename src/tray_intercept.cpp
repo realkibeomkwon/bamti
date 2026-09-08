@@ -8,6 +8,7 @@
 #include <objbase.h>
 #include <objidl.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 #include <wincodec.h>
 #include <windows.h>
 #include <wrl/client.h>
@@ -134,24 +135,44 @@ std::wstring OwnerExeName(HWND owner) {
     return L"?";
   }
   HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-  if (process == nullptr) {
-    return L"?";
-  }
-  wchar_t buf[MAX_PATH]{};
-  DWORD n = MAX_PATH;
-  std::wstring name = L"?";
-  if (QueryFullProcessImageNameW(process, 0, buf, &n) != FALSE && n > 0) {
-    const wchar_t* file = buf;
-    for (DWORD i = 0; i < n; ++i) {
-      if (buf[i] == L'\\' || buf[i] == L'/') {
-        file = buf + i + 1;
+  if (process != nullptr) {
+    wchar_t buf[MAX_PATH]{};
+    DWORD n = MAX_PATH;
+    std::wstring name;
+    if (QueryFullProcessImageNameW(process, 0, buf, &n) != FALSE && n > 0) {
+      const wchar_t* file = buf;
+      for (DWORD i = 0; i < n; ++i) {
+        if (buf[i] == L'\\' || buf[i] == L'/') {
+          file = buf + i + 1;
+        }
+      }
+      if (file[0] != 0) {
+        name = file;
       }
     }
-    if (file[0] != 0) {
-      name = file;
+    CloseHandle(process);
+    if (!name.empty()) {
+      return name;
     }
   }
-  CloseHandle(process);
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) {
+    return L"?";
+  }
+  PROCESSENTRY32W pe{};
+  pe.dwSize = sizeof(pe);
+  std::wstring name = L"?";
+  if (Process32FirstW(snap, &pe)) {
+    do {
+      if (pe.th32ProcessID == pid) {
+        if (pe.szExeFile[0] != 0) {
+          name = pe.szExeFile;
+        }
+        break;
+      }
+    } while (Process32NextW(snap, &pe));
+  }
+  CloseHandle(snap);
   return name;
 }
 

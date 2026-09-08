@@ -231,6 +231,7 @@ class MenuBar {
   std::vector<std::string> reorder_order_;
   std::string tray_menu_id_;
   std::vector<uint64_t> tray_menu_keys_;
+  std::vector<std::string> tray_menu_stable_;
   std::vector<WinXEntry> winx_entries_;
   UINT open_submenu_cmd_ = 0;
   DesktopToggle desktop_toggle_;

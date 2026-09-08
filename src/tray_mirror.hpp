@@ -34,6 +34,7 @@ class TrayMirror : public StatusSource {
     uint64_t key = 0;
     std::wstring label;
     bool shown = true;
+    std::string stable;
   };
 
   WidgetSettings settings() const;
@@ -46,8 +47,13 @@ class TrayMirror : public StatusSource {
   // 대응 항목이 없으면 거짓을 돌려주고 아무것도 하지 않는다.
   bool InvokeByExe(const std::wstring& exe_path);
   std::vector<MenuItem> MenuItems() const;
+  std::string StableForKey(uint64_t key) const;  // items_ 에서 찾는다. 없으면 빈 문자열이다.
   static uint64_t ParseId(const std::string& id);
   static std::string KeyText(uint64_t key);
+  // 프로세스가 다시 떠도 유지되는 식별자다. 창 핸들과 RuntimeId 는 재실행마다
+  // 바뀌므로 숨김 목록에는 이 값을 저장한다.
+  static std::string StableKey(const TrayIconInfo& icon);
+  static bool StableHidden(const TrayIconInfo& icon, const std::vector<std::string>& hidden);
 
  private:
   struct LastTip {
@@ -64,6 +70,7 @@ class TrayMirror : public StatusSource {
     uint64_t icon_hash = 0;
     std::string id;
     DWORD owner_pid = 0;
+    std::string stable;
   };
 
   struct FillOwner {
@@ -103,6 +110,7 @@ class TrayMirror : public StatusSource {
   bool stopped_slow_ = false;
   std::unordered_map<uint64_t, ItemState> items_;
   std::unordered_map<uint64_t, LastTip> last_tips_;
+  std::unordered_map<std::string, LastTip> last_stable_tips_;
   std::vector<uint64_t> key_rounds_[5];
   int key_round_n_ = 0;
   bool use_runtime_id_ = true;

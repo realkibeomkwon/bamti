@@ -161,6 +161,15 @@ std::string FormatSettings(const WidgetSettings& s, std::string_view extra_topba
     out += json::Escape(s.tray_hidden_keys[i]);
     out += '"';
   }
+  out += "], \"tray_hidden\": [";
+  for (size_t i = 0; i < s.tray_hidden.size(); ++i) {
+    if (i != 0) {
+      out += ", ";
+    }
+    out += '"';
+    out += json::Escape(s.tray_hidden[i]);
+    out += '"';
+  }
   out += "], \"bar_order\": [";
   for (size_t i = 0; i < s.bar_order.size(); ++i) {
     if (i != 0) {
@@ -259,6 +268,12 @@ WidgetSettings LoadWidgetSettings() {
     s.tray_hidden_keys.erase(s.tray_hidden_keys.begin(),
                              s.tray_hidden_keys.begin() +
                                  static_cast<std::ptrdiff_t>(s.tray_hidden_keys.size() - kTrayHiddenKeysMax));
+  }
+  s.tray_hidden = json::GetStringArray(*widgets, "tray_hidden");
+  if (s.tray_hidden.size() > kTrayHiddenKeysMax) {
+    s.tray_hidden.erase(s.tray_hidden.begin(),
+                        s.tray_hidden.begin() +
+                            static_cast<std::ptrdiff_t>(s.tray_hidden.size() - kTrayHiddenKeysMax));
   }
   s.bar_order = json::GetStringArray(*widgets, "bar_order");
   if (s.bar_order.size() > kBarOrderMax) {
