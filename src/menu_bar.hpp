@@ -53,7 +53,8 @@ class MenuBar {
   bool RegisterAppBar();
   void UnregisterAppBar();
   void Layout();
-  void ReserveWorkArea();
+  void ReserveWorkArea(bool from_retry = false);
+  void NoteWorkAreaWait(const wchar_t* where);
   void ApplyBackdrop();
   void Paint();
   void Present();
@@ -244,6 +245,7 @@ class MenuBar {
   unsigned work_area_retry_ = 0;
   unsigned work_area_spi_fail_ = 0;
   LONG work_area_want_ = 0;
+  bool work_area_pending_ = false;
 };
 
 }  // namespace bamti

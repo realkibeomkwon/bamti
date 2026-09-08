@@ -78,8 +78,8 @@ constexpr UINT_PTR kTransitionsTimerId = 6;
 constexpr UINT_PTR kCornerWatchTimerId = 7;
 constexpr UINT_PTR kCtrlPollTimerId = 9;
 constexpr UINT_PTR kWorkAreaRetryTimerId = 10;
-constexpr UINT kWorkAreaRetryMs = 300;
-constexpr unsigned kWorkAreaRetryMax = 10;
+constexpr UINT kWorkAreaRetryMinMs = 300;
+constexpr UINT kWorkAreaRetryMaxMs = 30000;
 constexpr unsigned kWorkAreaSpiGiveUp = 3;
 constexpr UINT kDesktopPeekDwellMs = 120;
 constexpr UINT kTransitionsRestoreMs = 400;
@@ -480,6 +480,15 @@ void ReadWorkAreaTop(HWND hwnd, LONG* mi_top, LONG* spi_top) {
   }
 }
 
+// 실패가 이어질수록 간격을 늘린다. 300, 600, 1200, ... 30000 밀리초에서 멈춘다.
+UINT WorkAreaRetryDelayMs(unsigned tries) {
+  UINT ms = kWorkAreaRetryMinMs;
+  for (unsigned i = 0; i < tries && ms < kWorkAreaRetryMaxMs / 2; ++i) {
+    ms *= 2;
+  }
+  return ms > kWorkAreaRetryMaxMs ? kWorkAreaRetryMaxMs : ms;
+}
+
 }  // namespace
 
 void ReleaseLeftoverWorkArea() {
@@ -675,7 +684,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         LONG spi_top = -1;
         ReadWorkAreaTop(hwnd_, &mi_top, &spi_top);
         Log(L"bar", L"workarea retry n=%u mi=%ld spi=%ld", work_area_retry_, mi_top, spi_top);
-        ReserveWorkArea();
+        ReserveWorkArea(true);
         return 0;
       }
       if (wparam == kToggleTimerId) {
@@ -794,6 +803,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       layout_.SetDpi(Dpi());
       clock_.SetDpi(Dpi());
+      NoteWorkAreaWait(L"settingchange");
       ReserveWorkArea();
       Present();
       return 0;
@@ -1249,6 +1259,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case kAppBarCallback:
       switch (wparam) {
         case ABN_POSCHANGED:
+          NoteWorkAreaWait(L"appbar");
           Layout();
           break;
         case ABN_FULLSCREENAPP:
@@ -1410,7 +1421,7 @@ void MenuBar::Layout() {
   }
 }
 
-void MenuBar::ReserveWorkArea() {
+void MenuBar::ReserveWorkArea(bool from_retry) {
   if (hwnd_ == nullptr || fullscreen_occluded_ || !appbar_registered_ || reserving_work_area_) {
     return;
   }
@@ -1460,16 +1471,29 @@ void MenuBar::ReserveWorkArea() {
     if (info.rcWork.top >= want) {
       moved = RemaximizeOverlapping(hwnd_, monitor, info.rcWork);
       work_area_retry_ = 0;
-    } else if (work_area_retry_ < kWorkAreaRetryMax) {
-      ++work_area_retry_;
-      SetTimer(hwnd_, kWorkAreaRetryTimerId, kWorkAreaRetryMs, nullptr);
+      work_area_pending_ = false;
     } else {
-      Log(L"bar", L"workarea retry giveup n=%u top=%ld want=%ld", work_area_retry_, info.rcWork.top, want);
+      if (from_retry) {
+        ++work_area_retry_;  // 예산은 타이머 발화로만 쓴다. 바깥 알림은 세지 않는다.
+      }
+      work_area_pending_ = true;
+      SetTimer(hwnd_, kWorkAreaRetryTimerId, WorkAreaRetryDelayMs(work_area_retry_), nullptr);
     }
     Log(L"bar", L"workarea top=%ld want=%ld forced=%d moved=%d retry=%u spi_fail=%u", info.rcWork.top, want,
         work_area_forced_ ? 1 : 0, moved, work_area_retry_, work_area_spi_fail_);
   }
   reserving_work_area_ = false;
+}
+
+// 작업 영역을 아직 못 잡은 동안에만 알림 도착을 남긴다. 잡히면 조용해진다.
+void MenuBar::NoteWorkAreaWait(const wchar_t* where) {
+  if (!work_area_pending_ || hwnd_ == nullptr) {
+    return;
+  }
+  LONG mi_top = -1;
+  LONG spi_top = -1;
+  ReadWorkAreaTop(hwnd_, &mi_top, &spi_top);
+  Log(L"bar", L"workarea wait at=%s mi=%ld spi=%ld retry=%u", where, mi_top, spi_top, work_area_retry_);
 }
 
 void MenuBar::ApplyBackdrop() {
