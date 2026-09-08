@@ -1,5 +1,7 @@
 #pragma once
 
+#include "corner.hpp"
+
 #include <d2d1.h>
 #include <windows.h>
 #include <wrl/client.h>
@@ -44,6 +46,10 @@ class DockLabel {
   HGDIOBJ old_dib_ = nullptr;
   int dib_w_ = 0;
   int dib_h_ = 0;
+  int body_px_ = 0;    // 알약의 높이. 창 높이에서 꼬리를 뺀 값이다.
+  int tail_px_ = 0;
+  float apex_px_ = 0.0f;  // 꼭짓점 x. 창의 클라이언트 좌표계다.
+  corner::CalloutCache callout_;
 };
 
 }  // namespace bamti

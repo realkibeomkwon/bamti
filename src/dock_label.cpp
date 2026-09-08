@@ -14,6 +14,9 @@ namespace {
 
 constexpr int kLabelPadXDip = 16;
 constexpr int kLabelHeightDip = 26;
+// 메뉴 꼬리와 같은 2.5 대 1 비율이되, 알약 높이 26 DIP 에 맞게 줄인 값이다.
+constexpr int kLabelTailBaseDip = 20;
+constexpr int kLabelTailHeightDip = 8;
 
 int DipToPx(int dip, UINT dpi) {
   return MulDiv(dip, static_cast<int>(dpi), 96);
@@ -81,10 +84,16 @@ void DockLabel::Show(const std::wstring& text, POINT icon_center_screen, int doc
 
   const UINT dpi = Dpi();
   const int pad_x = DipToPx(kLabelPadXDip, dpi);
-  const int height = DipToPx(kLabelHeightDip, dpi);
+  const int body = DipToPx(kLabelHeightDip, dpi);
+  const int tail = DipToPx(kLabelTailHeightDip, dpi);
+  const int tail_base = DipToPx(kLabelTailBaseDip, dpi);
   const int gap = DipToPx(8, dpi);
   const int text_w = static_cast<int>(std::ceil(PopupTextWidth(dpi, text_)));
-  const int width = (std::max)(height, text_w + pad_x * 2);
+  int width = (std::max)(body, text_w + pad_x * 2);
+  // 알약은 양 끝이 반원이라 밑변이 놓일 곳이 좁다. 짧은 이름에서 꼬리가
+  // 조각으로 줄지 않게 최소 너비를 준다.
+  width = (std::max)(width, tail_base + body + DipToPx(4, dpi));
+  const int height = body + tail;
   if (width <= 0 || height <= 0) {
     Hide();
     return;
@@ -107,6 +116,10 @@ void DockLabel::Show(const std::wstring& text, POINT icon_center_screen, int doc
     }
   }
 
+  body_px_ = body;
+  tail_px_ = tail;
+  apex_px_ = static_cast<float>(icon_center_screen.x - x);
+
   SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
   Present();
   if (!shown_) {
@@ -127,6 +140,7 @@ void DockLabel::Hide() {
 
 void DockLabel::ReleaseLayeredTarget() {
   target_.Reset();
+  callout_.Reset();
   if (mem_dc_ != nullptr && old_dib_ != nullptr) {
     SelectObject(mem_dc_, old_dib_);
     old_dib_ = nullptr;
@@ -212,6 +226,7 @@ void DockLabel::Present() {
   RECT client{0, 0, dib_w_, dib_h_};
   if (FAILED(target_->BindDC(mem_dc_, &client))) {
     target_.Reset();
+    callout_.Reset();
     EnsureLayeredTarget();
     if (!target_ || FAILED(target_->BindDC(mem_dc_, &client))) {
       return;
@@ -220,8 +235,9 @@ void DockLabel::Present() {
 
   const float width = static_cast<float>(dib_w_);
   const float height = static_cast<float>(dib_h_);
-  const float radius = corner::PillPx(height);
-  const D2D1_ROUNDED_RECT pill{D2D1::RectF(0.5f, 0.5f, width - 0.5f, height - 0.5f), radius, radius};
+  const float body = height - static_cast<float>(tail_px_);
+  const float radius = corner::PillPx(body);
+  const D2D1_ROUNDED_RECT pill{D2D1::RectF(0.5f, 0.5f, width - 0.5f, body - 0.5f), radius, radius};
   const UINT dpi = Dpi();
   const float pad_x = static_cast<float>(DipToPx(kLabelPadXDip, dpi));
 
@@ -235,14 +251,28 @@ void DockLabel::Present() {
   target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
   target_->BeginDraw();
   target_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+  corner::Tail tail{};
+  tail.apex_x = apex_px_;
+  tail.base_px = static_cast<float>(DipToPx(kLabelTailBaseDip, dpi));
+  tail.height_px = static_cast<float>(tail_px_);
+  tail.tip_px = corner::ToPx(corner::kTailTipDip, dpi);
+  ID2D1PathGeometry* shape = tail_px_ > 0 ? callout_.Get(d2d_.Get(), pill.rect, radius, tail) : nullptr;
   if (fill) {
-    target_->FillRoundedRectangle(pill, fill.Get());
+    if (shape != nullptr) {
+      target_->FillGeometry(shape, fill.Get());
+    } else {
+      target_->FillRoundedRectangle(pill, fill.Get());
+    }
   }
   if (stroke) {
-    target_->DrawRoundedRectangle(pill, stroke.Get(), 1.0f);
+    if (shape != nullptr) {
+      target_->DrawGeometry(shape, stroke.Get(), 1.0f);
+    } else {
+      target_->DrawRoundedRectangle(pill, stroke.Get(), 1.0f);
+    }
   }
   if (text) {
-    DrawPopupText(target_.Get(), dpi, text_, D2D1::RectF(pad_x, 0.0f, width - pad_x, height), text.Get(),
+    DrawPopupText(target_.Get(), dpi, text_, D2D1::RectF(pad_x, 0.0f, width - pad_x, body), text.Get(),
                   DWRITE_TEXT_ALIGNMENT_CENTER);
   }
   const HRESULT hr = target_->EndDraw();
