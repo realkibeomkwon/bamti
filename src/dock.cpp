@@ -1191,6 +1191,7 @@ bool Dock::Create(HINSTANCE instance, HWND bar_hwnd) {
     Log(L"dock", L"submenu create failed err=%lu", GetLastError());
   }
   popup_.SetDark(dark_);
+  popup_.SetTail(true);
   submenu_.SetDark(dark_);
   popup_.SetAfterTick(&Dock::AfterPopupTick, this);
   RefreshFullscreen();

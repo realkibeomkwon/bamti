@@ -25,6 +25,84 @@ D2D1_POINT_2F SuperPoint(float radius_px, float t) {
 
 }  // namespace
 
+Microsoft::WRL::ComPtr<ID2D1PathGeometry> BuildCallout(ID2D1Factory* factory, const D2D1_RECT_F& card,
+                                                       float radius_px, const Tail& tail) {
+  Microsoft::WRL::ComPtr<ID2D1PathGeometry> geom;
+  const float w = card.right - card.left;
+  const float h = card.bottom - card.top;
+  if (factory == nullptr || w <= 0.0f || h <= 0.0f || tail.height_px <= 0.0f || tail.base_px <= 0.0f) {
+    return geom;
+  }
+  const float r = (std::max)(0.0f, (std::min)(radius_px, (std::min)(w, h) * 0.5f));
+  // 밑변이 둥근 모서리를 먹지 않게 자른다.
+  const float base = (std::min)(tail.base_px, (std::max)(0.0f, w - r * 2.0f - 4.0f));
+  if (base <= 1.0f) {
+    return geom;
+  }
+  const float half = base * 0.5f;
+  const float lo = card.left + r + half + 1.0f;
+  const float hi = card.right - r - half - 1.0f;
+  const float apex_x = hi < lo ? (card.left + card.right) * 0.5f : (std::min)(hi, (std::max)(lo, tail.apex_x));
+  const float apex_y = card.bottom + tail.height_px;
+
+  if (FAILED(factory->CreatePathGeometry(geom.GetAddressOf())) || !geom) {
+    return {};
+  }
+  Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+  if (FAILED(geom->Open(sink.GetAddressOf())) || !sink) {
+    return {};
+  }
+  auto arc = [&](float x, float y) {
+    sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(x, y), D2D1::SizeF(r, r), 0.0f,
+                                  D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+  };
+  // 꼭짓점에서 두 빗변을 tip 만큼 물러난 지점을 잇는 이차 곡선으로 둥글린다.
+  const float len = std::sqrt(half * half + tail.height_px * tail.height_px);
+  const float tip = (std::min)(tail.tip_px, len * 0.5f);
+  const float ux = half / len;
+  const float uy = tail.height_px / len;
+
+  sink->BeginFigure(D2D1::Point2F(card.left + r, card.top), D2D1_FIGURE_BEGIN_FILLED);
+  sink->AddLine(D2D1::Point2F(card.right - r, card.top));
+  arc(card.right, card.top + r);
+  sink->AddLine(D2D1::Point2F(card.right, card.bottom - r));
+  arc(card.right - r, card.bottom);
+  sink->AddLine(D2D1::Point2F(apex_x + half, card.bottom));
+  sink->AddLine(D2D1::Point2F(apex_x + tip * ux, apex_y - tip * uy));
+  sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(D2D1::Point2F(apex_x, apex_y),
+                                                        D2D1::Point2F(apex_x - tip * ux, apex_y - tip * uy)));
+  sink->AddLine(D2D1::Point2F(apex_x - half, card.bottom));
+  sink->AddLine(D2D1::Point2F(card.left + r, card.bottom));
+  arc(card.left, card.bottom - r);
+  sink->AddLine(D2D1::Point2F(card.left, card.top + r));
+  arc(card.left + r, card.top);
+  sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+
+  if (FAILED(sink->Close())) {
+    return {};
+  }
+  return geom;
+}
+
+ID2D1PathGeometry* CalloutCache::Get(ID2D1Factory* factory, const D2D1_RECT_F& card, float radius_px, const Tail& tail) {
+  auto same = [](float a, float b) { return std::fabs(a - b) < 0.01f; };
+  if (geom_ && same(radius_, radius_px) && same(card_.left, card.left) && same(card_.top, card.top) &&
+      same(card_.right, card.right) && same(card_.bottom, card.bottom) && same(tail_.apex_x, tail.apex_x) &&
+      same(tail_.base_px, tail.base_px) && same(tail_.height_px, tail.height_px)) {
+    return geom_.Get();
+  }
+  geom_ = BuildCallout(factory, card, radius_px, tail);
+  card_ = card;
+  radius_ = radius_px;
+  tail_ = tail;
+  return geom_.Get();
+}
+
+void CalloutCache::Reset() {
+  geom_.Reset();
+  radius_ = -1.0f;
+}
+
 Microsoft::WRL::ComPtr<ID2D1PathGeometry> BuildSquircle(ID2D1Factory* factory, const D2D1_RECT_F& rect,
                                                        float radius_px) {
   Microsoft::WRL::ComPtr<ID2D1PathGeometry> geom;

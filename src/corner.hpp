@@ -71,6 +71,38 @@ inline float ClampPx(float radius_px, float width_px, float height_px) {
   return (std::max)(0.0f, (std::min)(radius_px, half));
 }
 
+// 카드 아래로 뻗는 꼬리. 맥 독 메뉴 실측에서 밑변 30 DIP, 높이 12 DIP 이고,
+// 꼭짓점은 가리키려는 대상의 가로 중심에 둔다.
+inline constexpr int kTailBaseDip = 30;
+inline constexpr int kTailHeightDip = 12;
+// 꼭짓점을 살짝 둥글린다. 뾰족하면 저배율에서 지저분해진다.
+inline constexpr int kTailTipDip = 3;
+
+struct Tail {
+  float apex_x = 0.0f;    // 꼭짓점 x. 카드와 같은 좌표계다.
+  float base_px = 0.0f;
+  float height_px = 0.0f;
+  float tip_px = 0.0f;
+};
+
+// 둥근 사각형 카드와 꼬리를 이어 붙인 닫힌 경로. 실패하면 nullptr 이다.
+// 호출자는 그때 꼬리 없는 둥근 사각형으로 물러선다.
+Microsoft::WRL::ComPtr<ID2D1PathGeometry> BuildCallout(ID2D1Factory* factory, const D2D1_RECT_F& card,
+                                                       float radius_px, const Tail& tail);
+
+// 같은 모양을 다시 만들지 않게 들고 있는 그릇. SquircleCache 와 쓰임이 같다.
+class CalloutCache {
+ public:
+  ID2D1PathGeometry* Get(ID2D1Factory* factory, const D2D1_RECT_F& card, float radius_px, const Tail& tail);
+  void Reset();
+
+ private:
+  Microsoft::WRL::ComPtr<ID2D1PathGeometry> geom_;
+  D2D1_RECT_F card_{};
+  float radius_ = -1.0f;
+  Tail tail_{};
+};
+
 // hero 전용. 실패하면 nullptr 을 돌려준다. 호출자는 그때 원호로 물러선다.
 Microsoft::WRL::ComPtr<ID2D1PathGeometry> BuildSquircle(ID2D1Factory* factory, const D2D1_RECT_F& rect,
                                                        float radius_px);

@@ -73,6 +73,8 @@ class PopupSurface {
   int Hot() const { return hot_; }
 
   void SetDark(bool dark);
+  // 참이면 카드 아래에 꼬리를 붙이고, 꼭짓점이 앵커의 가로 좌표를 가리킨다.
+  void SetTail(bool on) { tail_ = on; }
   void Present();
   void SetAllied(PopupSurface* allied) { allied_ = allied; }
   void SetAlliedHwnd(HWND hwnd);
@@ -137,6 +139,9 @@ class PopupSurface {
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> fill_;
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> stroke_;
   corner::SquircleCache squircle_;
+  bool tail_ = false;
+  int tail_px_ = 0;
+  corner::CalloutCache callout_;
   HDC mem_dc_ = nullptr;
   HBITMAP dib_ = nullptr;
   HGDIOBJ old_dib_ = nullptr;

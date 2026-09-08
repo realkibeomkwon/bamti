@@ -253,11 +253,13 @@ bool PopupSurface::Open(PopupContent* content, POINT anchor_screen, Anchor mode,
   anchor_ = anchor_screen;
   capture_ = capture;
   const UINT dpi = Dpi();
-  const SIZE size = content_->Measure(dpi);
+  SIZE size = content_->Measure(dpi);
   if (size.cx <= 0 || size.cy <= 0) {
     content_ = nullptr;
     return false;
   }
+  tail_px_ = tail_ ? MulDiv(corner::kTailHeightDip, static_cast<int>(dpi), 96) : 0;
+  size.cy += tail_px_;
 
   Place(size, anchor_screen, mode);
   hot_ = -1;
@@ -646,6 +648,7 @@ void PopupSurface::ReleaseLayeredTarget() {
   stroke_.Reset();
   target_.Reset();
   squircle_.Reset();
+  callout_.Reset();
   if (mem_dc_ != nullptr && old_dib_ != nullptr) {
     SelectObject(mem_dc_, old_dib_);
     old_dib_ = nullptr;
@@ -718,6 +721,7 @@ void PopupSurface::EnsureLayeredTarget() {
   fill_.Reset();
   stroke_.Reset();
   squircle_.Reset();
+  callout_.Reset();
   const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
       D2D1_RENDER_TARGET_TYPE_DEFAULT,
       D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
@@ -738,7 +742,10 @@ void PopupSurface::Present() {
     ~PresentGuard() { busy = false; }
   } guard(presenting_);
   if (open_ && content_ != nullptr && hwnd_ != nullptr) {
-    const SIZE want = content_->Measure(Dpi());
+    SIZE want = content_->Measure(Dpi());
+    if (want.cy > 0) {
+      want.cy += tail_px_;
+    }
     RECT client{};
     GetClientRect(hwnd_, &client);
     const int width = client.right - client.left;
@@ -775,6 +782,7 @@ void PopupSurface::Render() {
     fill_.Reset();
     stroke_.Reset();
     squircle_.Reset();
+    callout_.Reset();
     EnsureLayeredTarget();
     if (!target_ || FAILED(target_->BindDC(mem_dc_, &client))) {
       return;
@@ -782,10 +790,11 @@ void PopupSurface::Render() {
   }
   const float width = static_cast<float>(dib_w_);
   const float height = static_cast<float>(dib_h_);
+  const float card_h = height - static_cast<float>(tail_px_);
   const bool own_chrome = content_->PaintsOwnChrome();
   const int tier = content_->CornerDip();
-  const float radius = corner::ClampPx(corner::ToPx(tier, Dpi()), width, height);
-  const D2D1_ROUNDED_RECT rounded{D2D1::RectF(0.5f, 0.5f, width - 0.5f, height - 0.5f), radius, radius};
+  const float radius = corner::ClampPx(corner::ToPx(tier, Dpi()), width, card_h);
+  const D2D1_ROUNDED_RECT rounded{D2D1::RectF(0.5f, 0.5f, width - 0.5f, card_h - 0.5f), radius, radius};
   const D2D1_COLOR_F fill = DockFillColor(dark_);
   const D2D1_COLOR_F stroke = DockStrokeColor(dark_);
   if (!fill_) {
@@ -802,18 +811,29 @@ void PopupSurface::Render() {
   target_->BeginDraw();
   target_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
   if (!own_chrome) {
-    ID2D1PathGeometry* squircle =
-        corner::IsHero(tier) ? squircle_.Get(d2d_.Get(), rounded.rect, radius) : nullptr;
+    ID2D1PathGeometry* shape = nullptr;
+    if (tail_px_ > 0) {
+      RECT wr{};
+      GetWindowRect(hwnd_, &wr);
+      corner::Tail tail{};
+      tail.apex_x = static_cast<float>(anchor_.x - wr.left);
+      tail.base_px = corner::ToPx(corner::kTailBaseDip, Dpi());
+      tail.height_px = static_cast<float>(tail_px_);
+      tail.tip_px = corner::ToPx(corner::kTailTipDip, Dpi());
+      shape = callout_.Get(d2d_.Get(), rounded.rect, radius, tail);
+    } else if (corner::IsHero(tier)) {
+      shape = squircle_.Get(d2d_.Get(), rounded.rect, radius);
+    }
     if (fill_) {
-      if (squircle != nullptr) {
-        target_->FillGeometry(squircle, fill_.Get());
+      if (shape != nullptr) {
+        target_->FillGeometry(shape, fill_.Get());
       } else {
         target_->FillRoundedRectangle(rounded, fill_.Get());
       }
     }
     if (stroke_) {
-      if (squircle != nullptr) {
-        target_->DrawGeometry(squircle, stroke_.Get(), 1.0f);
+      if (shape != nullptr) {
+        target_->DrawGeometry(shape, stroke_.Get(), 1.0f);
       } else {
         target_->DrawRoundedRectangle(rounded, stroke_.Get(), 1.0f);
       }
@@ -826,6 +846,7 @@ void PopupSurface::Render() {
     fill_.Reset();
     stroke_.Reset();
     squircle_.Reset();
+    callout_.Reset();
   }
 }
 
@@ -987,7 +1008,9 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         mouse_down_ = false;
         content_->StickyInvoke(index);
         if (open_ && content_ != nullptr) {
-          Place(content_->Measure(Dpi()), anchor_, mode_);
+          SIZE size = content_->Measure(Dpi());
+          size.cy += tail_px_;
+          Place(size, anchor_, mode_);
           Present();
         }
         if (after_tick_ != nullptr) {
@@ -1011,7 +1034,11 @@ LRESULT PopupSurface::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DPICHANGED:
     case WM_DISPLAYCHANGE:
       if (open_ && content_ != nullptr) {
-        Place(content_->Measure(Dpi()), anchor_, mode_);
+        const UINT dpi = Dpi();
+        SIZE size = content_->Measure(dpi);
+        tail_px_ = tail_ ? MulDiv(corner::kTailHeightDip, static_cast<int>(dpi), 96) : 0;
+        size.cy += tail_px_;
+        Place(size, anchor_, mode_);
         Present();
       }
       return 0;
