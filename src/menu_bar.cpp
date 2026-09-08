@@ -1850,6 +1850,18 @@ bool MenuBar::HitClock(POINT client) const {
   return rc.right > rc.left && PtInRect(&rc, client) != FALSE;
 }
 
+std::string MenuBar::OrderKey(const std::string& id) const {
+  const uint64_t key = TrayMirror::ParseId(id);
+  if (key == 0) {
+    return id;
+  }
+  const std::string stable = tray_.StableForKey(key);
+  if (stable.empty()) {
+    return id;
+  }
+  return "tray:" + stable;
+}
+
 std::vector<StatusItem> MenuBar::OrderedItems() const {
   std::vector<StatusItem> items = status_.Snapshot();
   const std::vector<StatusItem> chrome = ChromeItems(widgets_.settings().control_center);
@@ -1861,9 +1873,14 @@ std::vector<StatusItem> MenuBar::OrderedItems() const {
   std::vector<StatusItem> out;
   out.reserve(items.size());
   std::vector<char> used(items.size(), 0);
+  std::vector<std::string> item_keys;
+  item_keys.reserve(items.size());
+  for (const StatusItem& item : items) {
+    item_keys.push_back(OrderKey(item.id));
+  }
   for (const std::string& id : order) {
     for (size_t i = 0; i < items.size(); ++i) {
-      if (!used[i] && items[i].id == id) {
+      if (!used[i] && item_keys[i] == id) {
         used[i] = 1;
         out.push_back(std::move(items[i]));
         break;
@@ -1912,15 +1929,17 @@ void MenuBar::BeginReorder(const std::string& id, POINT pt) {
   const std::vector<StatusItem> chrome = ChromeItems(widgets_.settings().control_center);
   std::vector<std::string> missing_chrome;
   for (const StatusItem& item : chrome) {
-    if (!OrderContains(reorder_order_, item.id)) {
-      missing_chrome.push_back(item.id);
+    const std::string key = OrderKey(item.id);
+    if (!OrderContains(reorder_order_, key)) {
+      missing_chrome.push_back(key);
     }
   }
   reorder_order_.insert(reorder_order_.begin(), missing_chrome.begin(), missing_chrome.end());
   const std::vector<StatusItem> snap = status_.Snapshot();
   for (const StatusItem& item : snap) {
-    if (!OrderContains(reorder_order_, item.id)) {
-      reorder_order_.push_back(item.id);
+    const std::string key = OrderKey(item.id);
+    if (!OrderContains(reorder_order_, key)) {
+      reorder_order_.push_back(key);
     }
   }
   if (reorder_order_.size() > kBarOrderMax) {
@@ -1972,7 +1991,10 @@ bool MenuBar::UpdateReorder(POINT pt) {
   const std::string id = visual_ltr[from];
   visual_ltr.erase(visual_ltr.begin() + static_cast<std::ptrdiff_t>(from));
   visual_ltr.insert(visual_ltr.begin() + static_cast<std::ptrdiff_t>(to), id);
-  const std::vector<std::string> visual_rtl(visual_ltr.rbegin(), visual_ltr.rend());
+  std::vector<std::string> visual_rtl(visual_ltr.rbegin(), visual_ltr.rend());
+  for (std::string& one : visual_rtl) {
+    one = OrderKey(one);
+  }
   std::vector<std::string> next = ApplyVisiblePermutation(reorder_order_, visual_rtl);
   if (next == reorder_order_) {
     return false;

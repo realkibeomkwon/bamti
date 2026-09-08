@@ -114,6 +114,9 @@ class MenuBar {
   void OpenOverflow();
   void RefreshOpenPanel();
   StatusPanelHost MakePanelHost();
+  // 순서 목록에 적는 형태로 바꾼다. 트레이 항목의 런타임 아이디는 창 핸들에서
+  // 나오므로 재실행마다 달라진다. 위젯과 외부 항목은 이미 안정적이라 그대로 둔다.
+  std::string OrderKey(const std::string& id) const;
   std::vector<StatusItem> OrderedItems() const;
   void BeginReorder(const std::string& id, POINT pt);
   bool UpdateReorder(POINT pt);
