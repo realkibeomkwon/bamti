@@ -134,13 +134,8 @@ ULONGLONG g_win_down_tick = 0;
 bool g_win_expired = false;
 UINT g_win_stale_count = 0;
 UINT g_win_stale_logged = 0;
-UINT g_key_repeat_count = 0;    // 어떤 키든 눌린 채로 다시 온 누름
-UINT g_win_repeat_count = 0;    // Win 키가 눌린 채로 다시 온 누름
-UINT g_win_repeat_combo = 0;    // 그 가운데 조합 기억이 살아 있던 횟수
-UINT g_key_repeat_logged = 0;
-UINT g_win_repeat_logged = 0;
+UINT g_win_repeat_combo = 0;  // 조합 기억이 살아 있는 채로 들어온 Win 반복 누름
 UINT g_win_repeat_combo_logged = 0;
-DWORD g_last_down_vk = 0;       // 아직 뗌을 보지 못한 마지막 누름의 가상 키 코드
 bool g_win_combo = false;
 bool g_win_injected = false;
 bool g_swallow_space = false;
@@ -327,14 +322,6 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
       g_ctrl_held = false;
     }
   }
-  if (down) {
-    if (g_last_down_vk == vk) {
-      ++g_key_repeat_count;
-    }
-    g_last_down_vk = vk;
-  } else if (up && g_last_down_vk == vk) {
-    g_last_down_vk = 0;
-  }
   ExpireStaleWin();
   if (g_menu_bar == nullptr || g_menu_bar->hwnd() == nullptr || !g_menu_bar->win_key_enabled()) {
     return CallNextHookEx(g_key_hook, code, wparam, lparam);
@@ -349,11 +336,8 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
         g_win_combo = false;
         g_win_injected = false;
         g_win_vk = vk;
-      } else {
-        ++g_win_repeat_count;
-        if (g_win_combo) {
-          ++g_win_repeat_combo;
-        }
+      } else if (g_win_combo) {
+        ++g_win_repeat_combo;
       }
       g_win_held = true;
       return 1;
@@ -494,26 +478,6 @@ void ReadWorkAreaTop(HWND hwnd, LONG* mi_top, LONG* spi_top) {
   if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0) != FALSE) {
     *spi_top = work.top;
   }
-}
-
-// 관측 지점의 작업 영역을 찍는다. 직전에 찍은 값과 같으면 찍지 않는다.
-void LogWorkAreaPoint(HWND hwnd, const wchar_t* where) {
-  static bool seen = false;
-  static LONG last_mi = 0;
-  static LONG last_spi = 0;
-  if (hwnd == nullptr) {
-    return;
-  }
-  LONG mi_top = -1;
-  LONG spi_top = -1;
-  ReadWorkAreaTop(hwnd, &mi_top, &spi_top);
-  if (seen && mi_top == last_mi && spi_top == last_spi) {
-    return;
-  }
-  seen = true;
-  last_mi = mi_top;
-  last_spi = spi_top;
-  Log(L"bar", L"workarea at=%s mi=%ld spi=%ld", where, mi_top, spi_top);
 }
 
 }  // namespace
@@ -700,13 +664,9 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           g_win_stale_logged = g_win_stale_count;
           Log(L"bar", L"win stale expired count=%u", g_win_stale_count);
         }
-        if (g_key_repeat_count != g_key_repeat_logged || g_win_repeat_count != g_win_repeat_logged ||
-            g_win_repeat_combo != g_win_repeat_combo_logged) {
-          g_key_repeat_logged = g_key_repeat_count;
-          g_win_repeat_logged = g_win_repeat_count;
+        if (g_win_repeat_combo != g_win_repeat_combo_logged) {
           g_win_repeat_combo_logged = g_win_repeat_combo;
-          Log(L"bar", L"key repeat any=%u win=%u win_combo=%u", g_key_repeat_count, g_win_repeat_count,
-              g_win_repeat_combo);
+          Log(L"bar", L"win combo repeat count=%u", g_win_repeat_combo);
         }
       }
       if (wparam == kWorkAreaRecheckTimerId) {
@@ -834,10 +794,6 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       layout_.SetDpi(Dpi());
       clock_.SetDpi(Dpi());
-      if (msg == WM_SETTINGCHANGE && wparam == SPI_SETWORKAREA) {
-        Log(L"bar", L"workarea settingchange spi=1");
-      }
-      LogWorkAreaPoint(hwnd_, L"settingchange");
       ReserveWorkArea();
       Present();
       return 0;
@@ -1293,7 +1249,6 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
     case kAppBarCallback:
       switch (wparam) {
         case ABN_POSCHANGED:
-          LogWorkAreaPoint(hwnd_, L"appbar-poschanged");
           Layout();
           break;
         case ABN_FULLSCREENAPP:
@@ -1438,11 +1393,9 @@ void MenuBar::Layout() {
   abd.uEdge = ABE_TOP;
   abd.rc = info.rcMonitor;
   abd.rc.bottom = abd.rc.top + height;
-  LogWorkAreaPoint(hwnd_, L"layout-pre");
   SHAppBarMessage(ABM_QUERYPOS, &abd);
   abd.rc.bottom = abd.rc.top + height;
   SHAppBarMessage(ABM_SETPOS, &abd);
-  LogWorkAreaPoint(hwnd_, L"layout-post");
 
   SetWindowPos(hwnd_, HWND_TOPMOST, abd.rc.left, abd.rc.top, abd.rc.right - abd.rc.left, abd.rc.bottom - abd.rc.top,
                SWP_NOACTIVATE);
@@ -2495,7 +2448,6 @@ void MenuBar::RemoveWinHook() {
   g_win_expired = false;
   g_swallow_space = false;
   g_ctrl_held = false;
-  g_last_down_vk = 0;
 }
 
 void MenuBar::AfterBarPopupTick(void* ctx) {
