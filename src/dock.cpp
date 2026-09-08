@@ -428,6 +428,14 @@ bool PathImpliesGenericIcon(const std::wstring& path) {
          name == L"openwith";
 }
 
+bool IsExplorerExe(const std::wstring& path) {
+  if (path.empty()) {
+    return false;
+  }
+  const wchar_t* name = PathFindFileNameW(path.c_str());
+  return name != nullptr && _wcsicmp(name, L"explorer.exe") == 0;
+}
+
 HBITMAP BitmapFromIconResource(const std::wstring& resource, int px) {
   if (resource.empty()) {
     return nullptr;
@@ -1848,9 +1856,7 @@ HBITMAP Dock::LoadIconBitmap(const DockApp& app, int px, const wchar_t** source)
   }
   const bool identity = !app.aumid.empty() || PathImpliesGenericIcon(app.exe_path);
 
-  const wchar_t* exe_name = PathFindFileNameW(app.exe_path.c_str());
-  const bool explorer = exe_name != nullptr && _wcsicmp(exe_name, L"explorer.exe") == 0;
-  if (explorer && !app.exe_path.empty()) {
+  if (IsExplorerExe(app.exe_path)) {
     if (HBITMAP shell = BitmapFromShellItem(app.exe_path, ShellIconRequestPx(px))) {
       if (HBITMAP ready = FinalizeIconBitmap(shell, px, false)) {
         Log(L"dock", L"icon source=%s name=%s px=%d", L"exe_shell", app.display_name.c_str(), px);
@@ -2587,7 +2593,9 @@ const wchar_t* Dock::RevealDockApp(const DockApp& app, bool* launched) {
     ActivateHwnd(app.hwnd);
     return L"activate";
   }
-  if (app.running && tray_invoke_ && tray_invoke_(app.exe_path)) {
+  // explorer.exe 는 셸 자신이라 항상 실행 중이고, 셸이 띄운 트레이 아이콘까지
+  // 이 독 항목의 것으로 잡힌다. 그 아이콘을 눌러도 탐색기 창은 열리지 않는다.
+  if (app.running && !IsExplorerExe(app.exe_path) && tray_invoke_ && tray_invoke_(app.exe_path)) {
     return L"tray";
   }
   const bool ok = LaunchDockApp(app);
