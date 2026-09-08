@@ -480,7 +480,8 @@ void ReadWorkAreaTop(HWND hwnd, LONG* mi_top, LONG* spi_top) {
   }
 }
 
-// 실패가 이어질수록 간격을 늘린다. 300, 600, 1200, ... 30000 밀리초에서 멈춘다.
+// 실패가 이어질수록 간격을 늘린다. 300, 600, 1200, ... 19200 밀리초에서 멈춘다.
+// kWorkAreaRetryMaxMs 는 도달하는 상한이 아니라 두 배로 키우기를 멈출 기준이다.
 UINT WorkAreaRetryDelayMs(unsigned tries) {
   UINT ms = kWorkAreaRetryMinMs;
   for (unsigned i = 0; i < tries && ms < kWorkAreaRetryMaxMs / 2; ++i) {
