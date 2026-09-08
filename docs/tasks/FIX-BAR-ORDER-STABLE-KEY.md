@@ -147,13 +147,46 @@ cmake -S D:\repos\bamti -B D:\repos\bamti\build
 cmake --build D:\repos\bamti\build --config Release
 ```
 
-새 바이너리는 WMI 로 띄웁니다. bamti 는 단일 인스턴스라서 새로 띄우면 예전 것이 스스로 종료됩니다.
+**bamti 는 새로 띄우기 전에 먼저 종료시켜야 합니다.** 단일 인스턴스이지만 뒤에 뜬 쪽이 양보하는 방식이라, 그냥 띄우면 새 프로세스가 스스로 끝나고 예전 바이너리가 계속 돌아갑니다. WMI 가 돌려주는 새 pid 는 재시작의 증거가 되지 못합니다.
+
+상단바 창(클래스 `bamti.MenuBar`)에 `WM_COMMAND` 로 명령 1번을 보내면 `DestroyWindow` 를 거쳐 작업 표시줄과 작업 영역까지 되돌린 뒤 끝납니다.
+
+```powershell
+Add-Type -TypeDefinition @'
+using System; using System.Text; using System.Runtime.InteropServices;
+public static class Bar {
+  public delegate bool EnumProc(IntPtr h, IntPtr p);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+  public static IntPtr Find() {
+    IntPtr f = IntPtr.Zero;
+    EnumWindows((h, p) => { var sb = new StringBuilder(256); GetClassNameW(h, sb, 256);
+      if (sb.ToString() == "bamti.MenuBar") { f = h; return false; } return true; }, IntPtr.Zero);
+    return f;
+  }
+}
+'@ -Language CSharp
+$h = [Bar]::Find()
+if ($h -ne [IntPtr]::Zero) { [void][Bar]::PostMessageW($h, 0x0111, [IntPtr]1, [IntPtr]0) }
+$deadline = (Get-Date).AddSeconds(20)
+while ((Get-Process bamti -EA SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+"종료 후 남은 프로세스: " + $(if (Get-Process bamti -EA SilentlyContinue) { (Get-Process bamti).Id -join ',' } else { '없음' })
+```
+
+프로세스가 사라진 것을 확인한 뒤에 새 바이너리를 WMI 로 띄웁니다. 세션이 끝나도 살아 있어야 하므로 `Start-Process` 를 쓰지 마십시오.
 
 ```powershell
 $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
   CommandLine = '"D:\repos\bamti\build\Release\bamti.exe"'
 }
 "rc=$($r.ReturnValue) pid=$($r.ProcessId)"
+```
+
+재시작이 실제로 일어났는지는 로그로 판정하십시오. `[host] start` 줄이 새로 늘어야 합니다.
+
+```powershell
+Select-String -Path "$env:USERPROFILE\.bamti\bamti.log" -Pattern '\[host\] start ' | Select-Object -Last 2
 ```
 
 **화면에 클릭이나 키 입력을 합성하지 마십시오.** 아래의 1번과 3번은 사용자에게 부탁하고 결과를 받으십시오. 설정 파일을 읽는 것과 화면을 캡처해서 위치를 재는 것은 괜찮습니다.
