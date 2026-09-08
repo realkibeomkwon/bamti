@@ -15,7 +15,9 @@ namespace bamti {
 namespace {
 
 constexpr float kStartHitWidthDip = 34.0f;
-constexpr float kStartLogoDip = 20.0f;
+// 맥 메뉴바 실측: 바 높이의 세로 0.567, 가로 0.450. 정사각형 로고의 면적을
+// 맞추면 0.505 이고, 32 DIP 바에서 16 DIP 다. 다른 상태 아이콘과도 같은 크기다.
+constexpr float kStartLogoDip = 16.0f;
 constexpr float kStartHoverInsetXDip = 3.0f;
 constexpr float kStartHoverInsetYDip = 3.0f;
 constexpr float kBatteryIconDip = 24.0f;
