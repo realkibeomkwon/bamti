@@ -41,7 +41,8 @@ void DrawPopupText(ID2D1RenderTarget* target, UINT dpi, const std::wstring& text
 
 class PopupSurface {
  public:
-  enum class Anchor { AboveAt, BelowAt, RightOf };
+  // AboveCenter 는 앵커의 가로 중심에 메뉴의 가운데를 맞추고 앵커 위에 놓는다.
+  enum class Anchor { AboveCenter, BelowAt, RightOf };
 
   enum class DismissReason {
     kInvoke,
@@ -129,7 +130,7 @@ class PopupSurface {
   int hot_ = -1;
   int drag_index_ = -1;
   unsigned tick_ = 0;
-  Anchor mode_ = Anchor::AboveAt;
+  Anchor mode_ = Anchor::AboveCenter;
   POINT anchor_{};
   Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
   Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> target_;

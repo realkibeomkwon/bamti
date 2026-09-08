@@ -396,9 +396,12 @@ void PopupSurface::Place(SIZE size, POINT anchor_screen, Anchor mode) {
     if (x + size.cx > info.rcWork.right) {
       x = anchor_screen.x - size.cx;
     }
+  } else if (mode == Anchor::AboveCenter) {
+    x = anchor_screen.x - size.cx / 2;
+    y = anchor_screen.y - size.cy - gap;
   } else {
     x = anchor_screen.x - inset;
-    y = mode == Anchor::AboveAt ? anchor_screen.y - size.cy - gap : anchor_screen.y + gap;
+    y = anchor_screen.y + gap;
   }
   if (x + size.cx > info.rcWork.right) {
     x = info.rcWork.right - size.cx;

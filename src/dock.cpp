@@ -1536,9 +1536,7 @@ LRESULT Dock::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       const int index = HitTest(pt);
       if (index >= 0) {
-        POINT screen = pt;
-        ClientToScreen(hwnd_, &screen);
-        OpenDockMenu(screen, index);
+        OpenDockMenu(index);
       } else if (popup_.IsOpen()) {
         popup_.Close();
       }
@@ -2211,19 +2209,36 @@ void Dock::HidePill() {
   UpdateIdleTimer();
 }
 
+bool Dock::IconAnchor(int index, POINT* center, int* dock_top) const {
+  if (hwnd_ == nullptr || index < 0 || index >= static_cast<int>(slots_.size())) {
+    return false;
+  }
+  RECT dock{};
+  if (GetWindowRect(hwnd_, &dock) == FALSE) {
+    return false;
+  }
+  const int icon_px = Dip(kIconDip);
+  const float x = SlotIconX(static_cast<size_t>(index));
+  POINT pt{static_cast<int>(x + static_cast<float>(icon_px) * 0.5f + 0.5f), 0};
+  ClientToScreen(hwnd_, &pt);
+  if (center != nullptr) {
+    *center = pt;
+  }
+  if (dock_top != nullptr) {
+    *dock_top = dock.top;
+  }
+  return true;
+}
+
 void Dock::UpdateHoverLabel() {
+  POINT center{};
+  int dock_top = 0;
   if (!shown_ || dragging_ || fullscreen_occluded_ || popup_.IsOpen() || hover_ < 0 ||
-      hover_ >= static_cast<int>(items_.size()) || hover_ >= static_cast<int>(slots_.size())) {
+      hover_ >= static_cast<int>(items_.size()) || !IconAnchor(hover_, &center, &dock_top)) {
     label_.Hide();
     return;
   }
-  RECT dock{};
-  GetWindowRect(hwnd_, &dock);
-  const int icon_px = Dip(kIconDip);
-  const float x = SlotIconX(static_cast<size_t>(hover_));
-  POINT center{static_cast<int>(x + static_cast<float>(icon_px) * 0.5f + 0.5f), 0};
-  ClientToScreen(hwnd_, &center);
-  label_.Show(items_[static_cast<size_t>(hover_)].display_name, center, dock.top, dark_);
+  label_.Show(items_[static_cast<size_t>(hover_)].display_name, center, dock_top, dark_);
 }
 
 void Dock::StartHideTimer() {
@@ -2355,7 +2370,7 @@ void Dock::SetOverlaysTopmost(bool topmost) {
   }
 }
 
-void Dock::OpenDockMenu(POINT screen, int index) {
+void Dock::OpenDockMenu(int index) {
   WatchdogStage(L"dock.menu");
   if (index < 0 || index >= static_cast<int>(items_.size())) {
     return;
@@ -2383,8 +2398,15 @@ void Dock::OpenDockMenu(POINT screen, int index) {
     Log(L"dock", L"menu empty index=%d", index);
     return;
   }
+  POINT center{};
+  int dock_top = 0;
+  if (!IconAnchor(index, &center, &dock_top)) {
+    Log(L"dock", L"menu anchor missing index=%d", index);
+    return;
+  }
+  const POINT anchor{center.x, dock_top};
   popup_.SetDark(dark_);
-  if (!popup_.Open(menu_content_.get(), screen, PopupSurface::Anchor::AboveAt)) {
+  if (!popup_.Open(menu_content_.get(), anchor, PopupSurface::Anchor::AboveCenter)) {
     Log(L"dock", L"menu open failed err=%lu", GetLastError());
     return;
   }

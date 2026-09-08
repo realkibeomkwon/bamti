@@ -68,7 +68,7 @@ class Dock {
   void RefreshFullscreen();
   void SetFullscreenOccluded(bool occluded);
   void RaiseOverlays();
-  void OpenDockMenu(POINT screen, int index);
+  void OpenDockMenu(int index);
   void ApplyMenuCommand(UINT cmd, const DockApp& app, const std::vector<HWND>& window_cmds);
   void SyncOptionsSubmenu();
   void OpenOptionsSubmenu();
@@ -80,6 +80,8 @@ class Dock {
   void UpdateIdleTimer();
   bool NeedProcessRecheck() const;
   const wchar_t* RevealDockApp(const DockApp& app, bool* launched = nullptr);
+  // 아이콘의 가로 중심(화면 좌표)과 독 창의 위쪽 변. 호버 라벨과 우클릭 메뉴가 함께 쓴다.
+  bool IconAnchor(int index, POINT* center, int* dock_top) const;
   void SetOverlaysTopmost(bool topmost);
   void SanitizePins();
   void EnsureSpotlightPin();
