@@ -77,7 +77,7 @@ constexpr UINT_PTR kDesktopPeekDwellTimerId = 5;
 constexpr UINT_PTR kTransitionsTimerId = 6;
 constexpr UINT_PTR kCornerWatchTimerId = 7;
 constexpr UINT_PTR kCtrlPollTimerId = 9;
-constexpr UINT_PTR kWorkAreaRecheckTimerId = 10;
+constexpr UINT_PTR kWorkAreaRetryTimerId = 10;
 constexpr UINT kWorkAreaRetryMs = 300;
 constexpr unsigned kWorkAreaRetryMax = 10;
 constexpr unsigned kWorkAreaSpiGiveUp = 3;
@@ -669,8 +669,8 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
           Log(L"bar", L"win combo repeat count=%u", g_win_repeat_combo);
         }
       }
-      if (wparam == kWorkAreaRecheckTimerId) {
-        KillTimer(hwnd_, kWorkAreaRecheckTimerId);
+      if (wparam == kWorkAreaRetryTimerId) {
+        KillTimer(hwnd_, kWorkAreaRetryTimerId);
         LONG mi_top = -1;
         LONG spi_top = -1;
         ReadWorkAreaTop(hwnd_, &mi_top, &spi_top);
@@ -1295,7 +1295,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
         KillTimer(hwnd_, kRepaintTimerId);
         KillTimer(hwnd_, kToggleTimerId);
         KillTimer(hwnd_, kPeekTimerId);
-        KillTimer(hwnd_, kWorkAreaRecheckTimerId);
+        KillTimer(hwnd_, kWorkAreaRetryTimerId);
         StopFullscreenWatch(hwnd_);
         UnregisterSessionWatch();
         status_.StopAll();
@@ -1314,7 +1314,7 @@ LRESULT MenuBar::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) {
       KillTimer(hwnd_, kTransitionsTimerId);
       KillTimer(hwnd_, kCornerWatchTimerId);
       KillTimer(hwnd_, kCtrlPollTimerId);
-      KillTimer(hwnd_, kWorkAreaRecheckTimerId);
+      KillTimer(hwnd_, kWorkAreaRetryTimerId);
       desktop_toggle_.RestoreTransitions();
       peek_dwell_armed_ = false;
       last_corner_hit_ = false;
@@ -1462,7 +1462,7 @@ void MenuBar::ReserveWorkArea() {
       work_area_retry_ = 0;
     } else if (work_area_retry_ < kWorkAreaRetryMax) {
       ++work_area_retry_;
-      SetTimer(hwnd_, kWorkAreaRecheckTimerId, kWorkAreaRetryMs, nullptr);
+      SetTimer(hwnd_, kWorkAreaRetryTimerId, kWorkAreaRetryMs, nullptr);
     } else {
       Log(L"bar", L"workarea retry giveup n=%u top=%ld want=%ld", work_area_retry_, info.rcWork.top, want);
     }
