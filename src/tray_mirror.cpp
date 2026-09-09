@@ -173,6 +173,32 @@ const wchar_t* LabelForGuid(const GUID& guid) {
   return nullptr;
 }
 
+bool IsBatteryKnownGuid(const GUID& guid) {
+  const wchar_t* label = LabelForGuid(guid);
+  return label != nullptr && wcscmp(label, L"배터리") == 0;
+}
+
+bool LooksLikeSystemBatteryTip(const std::wstring& tip) {
+  return tip.find(L"배터리 상태") != std::wstring::npos || tip.find(L"배터리 수준") != std::wstring::npos;
+}
+
+bool OmitBatteryFromTrayMenu(const GUID& guid, const std::wstring& tip) {
+  return IsBatteryKnownGuid(guid) || LooksLikeSystemBatteryTip(tip);
+}
+
+bool IsSystemBatteryIcon(const TrayIconInfo& icon) {
+  if (IsBatteryKnownGuid(icon.guid_item)) {
+    return true;
+  }
+  if (!LooksLikeSystemBatteryTip(icon.tip)) {
+    return false;
+  }
+  if (icon.owner_exe.empty()) {
+    return true;
+  }
+  return _wcsicmp(icon.owner_exe.c_str(), kExplorerExe) == 0;
+}
+
 std::wstring MenuLabel(const std::wstring& tip, const GUID& guid, bool hidden, uint64_t key) {
   if (const wchar_t* known = LabelForGuid(guid)) {
     return ClipMenuLabel(known);
@@ -687,10 +713,6 @@ std::vector<TrayMirror::MenuItem> TrayMirror::MenuItems() const {
   std::unordered_set<std::string> seen_stable;
   out.reserve(vis.size() + settings_.tray_hidden_keys.size() + settings_.tray_hidden.size());
   for (const ItemState& st : vis) {
-    MenuItem row;
-    row.key = st.key;
-    row.shown = true;
-    row.stable = st.stable;
     GUID guid = st.guid;
     if (GuidEmpty(guid)) {
       const auto remembered = last_tips_.find(st.key);
@@ -698,12 +720,19 @@ std::vector<TrayMirror::MenuItem> TrayMirror::MenuItems() const {
         guid = remembered->second.guid;
       }
     }
-    row.label = MenuLabel(st.tip, guid, false, st.key);
-    out.push_back(std::move(row));
     seen.insert(st.key);
     if (!st.stable.empty()) {
       seen_stable.insert(st.stable);
     }
+    if (OmitBatteryFromTrayMenu(guid, st.tip)) {
+      continue;
+    }
+    MenuItem row;
+    row.key = st.key;
+    row.shown = true;
+    row.stable = st.stable;
+    row.label = MenuLabel(st.tip, guid, false, st.key);
+    out.push_back(std::move(row));
   }
   for (const std::string& one : settings_.tray_hidden_keys) {
     const uint64_t key = ParseKeyText(one);
@@ -719,6 +748,10 @@ std::vector<TrayMirror::MenuItem> TrayMirror::MenuItems() const {
     if (remembered != last_tips_.end()) {
       tip = remembered->second.tip;
       guid = remembered->second.guid;
+    }
+    if (OmitBatteryFromTrayMenu(guid, tip)) {
+      seen.insert(key);
+      continue;
     }
     row.label = MenuLabel(tip, guid, true, key);
     const std::string hex = KeyText(key);
@@ -744,6 +777,10 @@ std::vector<TrayMirror::MenuItem> TrayMirror::MenuItems() const {
     if (remembered != last_stable_tips_.end()) {
       tip = remembered->second.tip;
       guid = remembered->second.guid;
+    }
+    if (OmitBatteryFromTrayMenu(guid, tip)) {
+      seen_stable.insert(one);
+      continue;
     }
     row.label = MenuLabel(tip, guid, true, row.key);
     if (LabelForGuid(guid) == nullptr && tip.empty()) {
@@ -910,6 +947,9 @@ bool TrayMirror::Include(const TrayIconInfo& icon, int overflow_order, const Wid
   // explorer가 콜백 없이 등록한 옛 시스템 아이콘(볼륨, 전원)은 누를 수 없다.
   // 같은 기능을 내장 위젯과 제어 센터가 이미 담당한다.
   if (icon.callback_message == 0 && _wcsicmp(icon.owner_exe.c_str(), L"explorer.exe") == 0) {
+    return false;
+  }
+  if (IsSystemBatteryIcon(icon)) {
     return false;
   }
   if (overflow_order >= 0 && icon.order == overflow_order) {
