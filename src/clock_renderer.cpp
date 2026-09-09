@@ -30,9 +30,7 @@ constexpr wchar_t kVolume0Fluent[] = L"\xE992";
 constexpr wchar_t kVolume1Fluent[] = L"\xE993";
 constexpr wchar_t kVolume2Fluent[] = L"\xE994";
 constexpr wchar_t kVolume3Fluent[] = L"\xE995";
-constexpr wchar_t kWifiFluent[] = L"\xE701";
 constexpr wchar_t kVolumeFallback[] = L"\x266A";
-constexpr wchar_t kWifiFallback[] = L"Wi";
 
 float ClampUnit(float value) {
   if (!std::isfinite(value) || value < 0.0f) {
@@ -117,6 +115,63 @@ void DrawBluetoothIcon(ID2D1RenderTarget* rt, ID2D1Factory* factory, ID2D1SolidC
   if (SUCCEEDED(sink->Close())) {
     rt->DrawGeometry(path.Get(), brush, width, stroke);
   }
+}
+
+void DrawWifiIcon(ID2D1RenderTarget* rt, ID2D1Factory* factory, ID2D1SolidColorBrush* brush,
+                  ID2D1StrokeStyle* stroke, const D2D1_RECT_F& box, D2D1_COLOR_F color, int level) {
+  if (rt == nullptr || factory == nullptr || brush == nullptr || stroke == nullptr) {
+    return;
+  }
+  const float s = (box.bottom - box.top) / 12.0f;
+  if (s <= 0.0f) {
+    return;
+  }
+  const float cx = box.left + 8.00f * s;
+  const float cy = box.top + 10.70f * s;
+  const float sin44 = 0.69966f;
+  const float cos44 = 0.71448f;
+  const float width = 2.20f * s;
+  auto tint = [&](int index) {
+    brush->SetColor(index <= level ? color : ScaleAlpha(color, 0.30f));
+  };
+  tint(0);
+  const D2D1_POINT_2F bottom = D2D1::Point2F(cx, cy + 0.15f * s);
+  const D2D1_POINT_2F wedge_l = D2D1::Point2F(cx - 1.10f * s, cy - 0.95f * s);
+  const D2D1_POINT_2F wedge_r = D2D1::Point2F(cx + 1.10f * s, cy - 0.95f * s);
+  Microsoft::WRL::ComPtr<ID2D1PathGeometry> wedge;
+  Microsoft::WRL::ComPtr<ID2D1GeometrySink> wedge_sink;
+  if (SUCCEEDED(factory->CreatePathGeometry(wedge.ReleaseAndGetAddressOf())) &&
+      SUCCEEDED(wedge->Open(wedge_sink.GetAddressOf()))) {
+    wedge_sink->BeginFigure(bottom, D2D1_FIGURE_BEGIN_FILLED);
+    wedge_sink->AddLine(wedge_l);
+    wedge_sink->AddLine(wedge_r);
+    wedge_sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    if (SUCCEEDED(wedge_sink->Close())) {
+      rt->FillGeometry(wedge.Get(), brush);
+      rt->DrawGeometry(wedge.Get(), brush, width, stroke);
+    }
+  }
+
+  auto draw_arc = [&](float r, int index) {
+    tint(index);
+    const D2D1_POINT_2F left = D2D1::Point2F(cx - r * sin44, cy - r * cos44);
+    const D2D1_POINT_2F right = D2D1::Point2F(cx + r * sin44, cy - r * cos44);
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
+    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(factory->CreatePathGeometry(path.ReleaseAndGetAddressOf())) ||
+        FAILED(path->Open(sink.GetAddressOf()))) {
+      return;
+    }
+    sink->BeginFigure(left, D2D1_FIGURE_BEGIN_HOLLOW);
+    sink->AddArc(D2D1::ArcSegment(right, D2D1::SizeF(r, r), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                  D2D1_ARC_SIZE_SMALL));
+    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+    if (SUCCEEDED(sink->Close())) {
+      rt->DrawGeometry(path.Get(), brush, width, stroke);
+    }
+  };
+  draw_arc(5.20f * s, 1);
+  draw_arc(9.55f * s, 2);
 }
 
 D2D1_COLOR_F StatusItemColor(bool dark, uint32_t accent) {
@@ -568,8 +623,12 @@ void ClockRenderer::DrawVectorIcon(ID2D1SolidColorBrush* brush, const StatusIcon
       }
       break;
     case VectorIcon::kWifi:
-      brush->SetColor(value < 0.5f ? ScaleAlpha(ClockTextColor(dark), 0.45f) : ClockTextColor(dark));
-      DrawFluentOrFallback(brush, box, kWifiFluent, kWifiFallback);
+      if (EnsureStroke() && d2d_) {
+        const int level = (icon.flags & kVectorFlagOffline) != 0
+                              ? -1
+                              : static_cast<int>(std::lround(value * 2.0f));
+        DrawWifiIcon(rt_.Get(), d2d_.Get(), brush, round_stroke_.Get(), box, ClockTextColor(dark), level);
+      }
       break;
     case VectorIcon::kVolume: {
       brush->SetColor(ClockTextColor(dark));
@@ -754,6 +813,9 @@ bool ClockRenderer::Draw(HDC hdc, const RECT& client, const RECT& dirty, bool da
       } else if (seg.icon.vector == VectorIcon::kBluetooth) {
         icon_w = kBluetoothIconDip;
         icon_h = kBluetoothIconHeightDip;
+      } else if (seg.icon.vector == VectorIcon::kWifi) {
+        icon_w = kWifiIconDip;
+        icon_h = kWifiIconHeightDip;
       }
       const float icon_top = (height_dip - icon_h) * 0.5f;
       DrawVectorIcon(brush.Get(), seg.icon, D2D1::RectF(x0, icon_top, x0 + icon_w, icon_top + icon_h), dark);

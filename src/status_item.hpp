@@ -38,6 +38,7 @@ enum class VectorIcon : uint8_t {
 
 inline constexpr uint32_t kVectorFlagCharging = 1u << 0;
 inline constexpr uint32_t kVectorFlagMuted = 1u << 1;
+inline constexpr uint32_t kVectorFlagOffline = 1u << 2;
 
 struct StatusIcon {
   IconKind kind = IconKind::kNone;

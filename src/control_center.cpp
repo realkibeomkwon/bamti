@@ -146,6 +146,12 @@ WlanStatus QueryWlanStatus() {
                               static_cast<int>(ssid.uSSIDLength), info.name.data(), n);
         }
       }
+      info.quality = static_cast<int>(attrs->wlanAssociationAttributes.wlanSignalQuality);
+      if (info.quality < 0) {
+        info.quality = 0;
+      } else if (info.quality > 100) {
+        info.quality = 100;
+      }
       info.connected = true;
       WlanFreeMemory(attrs);
       break;

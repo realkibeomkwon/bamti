@@ -122,6 +122,7 @@ class BuiltinWidgets : public StatusSource {
   float last_brightness_ = 0.0f;
   bool last_wifi_on_ = false;
   std::wstring last_wifi_name_ = L"연결 안 됨";
+  int last_wifi_level_ = -1;
   bool last_eth_on_ = false;
   std::wstring last_eth_name_;
   bool last_bt_present_ = false;

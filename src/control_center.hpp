@@ -21,6 +21,7 @@ struct WlanStatus {
   bool radio = false;
   bool connected = false;
   std::wstring name = L"연결 안 됨";
+  int quality = 0;  // 0~100, 연결되지 않았으면 0
   double ms = 0.0;
 };
 

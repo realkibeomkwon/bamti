@@ -119,6 +119,28 @@ void SetGlyph(StatusItem* item, const wchar_t* glyph) {
   item->icon.cache_key = HashStatusIcon(item->icon);
 }
 
+constexpr int kWifiLevelEdges[2] = {34, 67};
+constexpr int kWifiLevelHysteresis = 3;
+
+int WifiLevel(int quality, int prev) {
+  int level = 0;
+  for (int i = 0; i < 2; ++i) {
+    if (quality >= kWifiLevelEdges[i]) {
+      level = i + 1;
+    }
+  }
+  if (prev < 0) {
+    return level;
+  }
+  if (level == prev + 1 && quality < kWifiLevelEdges[prev] + kWifiLevelHysteresis) {
+    return prev;
+  }
+  if (level == prev - 1 && quality >= kWifiLevelEdges[level] - kWifiLevelHysteresis) {
+    return prev;
+  }
+  return level;
+}
+
 void SetVectorIcon(StatusItem* item, VectorIcon vector, float value, uint32_t flags) {
   item->icon.kind = IconKind::kVector;
   item->icon.vector = vector;
@@ -1281,13 +1303,22 @@ void BuiltinWidgets::SampleNetwork() {
     }
   }
   bool publish = false;
+  int wifi_level = -1;
   {
     std::lock_guard lock(mu_);
     last_wifi_on_ = wifi.radio || wifi.connected;
     last_wifi_name_ = wifi.connected ? wifi.name : std::wstring(L"연결 안 됨");
+    last_wifi_level_ = wifi.connected ? WifiLevel(wifi.quality, last_wifi_level_) : -1;
+    wifi_level = last_wifi_level_;
     last_eth_on_ = route.kind == NetKind::kEthernet;
     last_eth_name_ = route.alias;
     publish = settings_.network && sink_ != nullptr;
+  }
+  static bool logged_wifi_level = false;
+  if (!logged_wifi_level) {
+    logged_wifi_level = true;
+    Log(L"widget", L"wifi quality=%d level=%d connected=%d", wifi.quality, wifi_level,
+        wifi.connected ? 1 : 0);
   }
   if (!publish) {
     return;
@@ -1303,12 +1334,13 @@ void BuiltinWidgets::SampleNetwork() {
     tip = L"이더넷 · ";
     tip += route.alias.empty() ? std::wstring(L"연결됨") : route.alias;
   } else if (route.kind == NetKind::kWifi) {
-    SetVectorIcon(&item, VectorIcon::kWifi, 1.0f, 0);
+    const float level = static_cast<float>(wifi_level < 0 ? 0 : wifi_level);
+    SetVectorIcon(&item, VectorIcon::kWifi, level / 2.0f, 0);
     item.state = StatusState::kOn;
     tip = L"Wi-Fi · ";
     tip += wifi.connected ? wifi.name : std::wstring(L"연결 안 됨");
   } else {
-    SetVectorIcon(&item, VectorIcon::kWifi, 0.0f, 0);
+    SetVectorIcon(&item, VectorIcon::kWifi, 0.0f, kVectorFlagOffline);
     item.state = StatusState::kOff;
     tip = L"연결 안 됨";
   }
