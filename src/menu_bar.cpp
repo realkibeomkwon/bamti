@@ -1472,8 +1472,8 @@ void MenuBar::Layout() {
   abd.rc.bottom = abd.rc.top + height;
   SHAppBarMessage(ABM_SETPOS, &abd);
 
-  SetWindowPos(hwnd_, HWND_TOPMOST, abd.rc.left, abd.rc.top, abd.rc.right - abd.rc.left, abd.rc.bottom - abd.rc.top,
-               SWP_NOACTIVATE);
+  SetWindowPos(hwnd_, nullptr, abd.rc.left, abd.rc.top, abd.rc.right - abd.rc.left, abd.rc.bottom - abd.rc.top,
+               SWP_NOACTIVATE | SWP_NOZORDER);
 
   if (tooltip_ != nullptr) {
     TOOLINFOW ti{};
