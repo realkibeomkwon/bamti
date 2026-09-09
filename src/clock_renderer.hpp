@@ -61,5 +61,7 @@ class ClockRenderer {
 
 void DrawBatteryIcon(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const D2D1_RECT_F& box, bool dark, float level,
                      bool charging);
+void DrawWifiIcon(ID2D1RenderTarget* rt, ID2D1Factory* factory, ID2D1SolidColorBrush* brush, ID2D1StrokeStyle* stroke,
+                  const D2D1_RECT_F& box, D2D1_COLOR_F color, int level);
 
 }  // namespace bamti

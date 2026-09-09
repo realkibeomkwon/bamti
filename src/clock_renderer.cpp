@@ -117,63 +117,6 @@ void DrawBluetoothIcon(ID2D1RenderTarget* rt, ID2D1Factory* factory, ID2D1SolidC
   }
 }
 
-void DrawWifiIcon(ID2D1RenderTarget* rt, ID2D1Factory* factory, ID2D1SolidColorBrush* brush,
-                  ID2D1StrokeStyle* stroke, const D2D1_RECT_F& box, D2D1_COLOR_F color, int level) {
-  if (rt == nullptr || factory == nullptr || brush == nullptr || stroke == nullptr) {
-    return;
-  }
-  const float s = (box.bottom - box.top) / 12.0f;
-  if (s <= 0.0f) {
-    return;
-  }
-  const float cx = box.left + 8.00f * s;
-  const float cy = box.top + 10.70f * s;
-  const float sin44 = 0.69966f;
-  const float cos44 = 0.71448f;
-  const float width = 2.20f * s;
-  auto tint = [&](int index) {
-    brush->SetColor(index <= level ? color : ScaleAlpha(color, 0.30f));
-  };
-  tint(0);
-  const D2D1_POINT_2F bottom = D2D1::Point2F(cx, cy + 0.15f * s);
-  const D2D1_POINT_2F wedge_l = D2D1::Point2F(cx - 1.10f * s, cy - 0.95f * s);
-  const D2D1_POINT_2F wedge_r = D2D1::Point2F(cx + 1.10f * s, cy - 0.95f * s);
-  Microsoft::WRL::ComPtr<ID2D1PathGeometry> wedge;
-  Microsoft::WRL::ComPtr<ID2D1GeometrySink> wedge_sink;
-  if (SUCCEEDED(factory->CreatePathGeometry(wedge.ReleaseAndGetAddressOf())) &&
-      SUCCEEDED(wedge->Open(wedge_sink.GetAddressOf()))) {
-    wedge_sink->BeginFigure(bottom, D2D1_FIGURE_BEGIN_FILLED);
-    wedge_sink->AddLine(wedge_l);
-    wedge_sink->AddLine(wedge_r);
-    wedge_sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-    if (SUCCEEDED(wedge_sink->Close())) {
-      rt->FillGeometry(wedge.Get(), brush);
-      rt->DrawGeometry(wedge.Get(), brush, width, stroke);
-    }
-  }
-
-  auto draw_arc = [&](float r, int index) {
-    tint(index);
-    const D2D1_POINT_2F left = D2D1::Point2F(cx - r * sin44, cy - r * cos44);
-    const D2D1_POINT_2F right = D2D1::Point2F(cx + r * sin44, cy - r * cos44);
-    Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
-    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
-    if (FAILED(factory->CreatePathGeometry(path.ReleaseAndGetAddressOf())) ||
-        FAILED(path->Open(sink.GetAddressOf()))) {
-      return;
-    }
-    sink->BeginFigure(left, D2D1_FIGURE_BEGIN_HOLLOW);
-    sink->AddArc(D2D1::ArcSegment(right, D2D1::SizeF(r, r), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE,
-                                  D2D1_ARC_SIZE_SMALL));
-    sink->EndFigure(D2D1_FIGURE_END_OPEN);
-    if (SUCCEEDED(sink->Close())) {
-      rt->DrawGeometry(path.Get(), brush, width, stroke);
-    }
-  };
-  draw_arc(5.20f * s, 1);
-  draw_arc(9.55f * s, 2);
-}
-
 D2D1_COLOR_F StatusItemColor(bool dark, uint32_t accent) {
   if (accent != 0) {
     return D2D1::ColorF(accent);
@@ -398,6 +341,63 @@ void DrawCpuRing(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, ID2D1Stroke
 void DrawBatteryIcon(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const D2D1_RECT_F& box, bool dark, float level,
                      bool charging) {
   DrawBattery(rt, brush, box, dark, level, charging);
+}
+
+void DrawWifiIcon(ID2D1RenderTarget* rt, ID2D1Factory* factory, ID2D1SolidColorBrush* brush, ID2D1StrokeStyle* stroke,
+                  const D2D1_RECT_F& box, D2D1_COLOR_F color, int level) {
+  if (rt == nullptr || factory == nullptr || brush == nullptr || stroke == nullptr) {
+    return;
+  }
+  const float s = (box.bottom - box.top) / 12.0f;
+  if (s <= 0.0f) {
+    return;
+  }
+  const float cx = box.left + 8.00f * s;
+  const float cy = box.top + 10.70f * s;
+  const float sin44 = 0.69966f;
+  const float cos44 = 0.71448f;
+  const float width = 2.20f * s;
+  auto tint = [&](int index) {
+    brush->SetColor(index <= level ? color : ScaleAlpha(color, 0.30f));
+  };
+  tint(0);
+  const D2D1_POINT_2F bottom = D2D1::Point2F(cx, cy + 0.15f * s);
+  const D2D1_POINT_2F wedge_l = D2D1::Point2F(cx - 1.10f * s, cy - 0.95f * s);
+  const D2D1_POINT_2F wedge_r = D2D1::Point2F(cx + 1.10f * s, cy - 0.95f * s);
+  Microsoft::WRL::ComPtr<ID2D1PathGeometry> wedge;
+  Microsoft::WRL::ComPtr<ID2D1GeometrySink> wedge_sink;
+  if (SUCCEEDED(factory->CreatePathGeometry(wedge.ReleaseAndGetAddressOf())) &&
+      SUCCEEDED(wedge->Open(wedge_sink.GetAddressOf()))) {
+    wedge_sink->BeginFigure(bottom, D2D1_FIGURE_BEGIN_FILLED);
+    wedge_sink->AddLine(wedge_l);
+    wedge_sink->AddLine(wedge_r);
+    wedge_sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    if (SUCCEEDED(wedge_sink->Close())) {
+      rt->FillGeometry(wedge.Get(), brush);
+      rt->DrawGeometry(wedge.Get(), brush, width, stroke);
+    }
+  }
+
+  auto draw_arc = [&](float r, int index) {
+    tint(index);
+    const D2D1_POINT_2F left = D2D1::Point2F(cx - r * sin44, cy - r * cos44);
+    const D2D1_POINT_2F right = D2D1::Point2F(cx + r * sin44, cy - r * cos44);
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
+    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(factory->CreatePathGeometry(path.ReleaseAndGetAddressOf())) ||
+        FAILED(path->Open(sink.GetAddressOf()))) {
+      return;
+    }
+    sink->BeginFigure(left, D2D1_FIGURE_BEGIN_HOLLOW);
+    sink->AddArc(D2D1::ArcSegment(right, D2D1::SizeF(r, r), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                  D2D1_ARC_SIZE_SMALL));
+    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+    if (SUCCEEDED(sink->Close())) {
+      rt->DrawGeometry(path.Get(), brush, width, stroke);
+    }
+  };
+  draw_arc(5.20f * s, 1);
+  draw_arc(9.55f * s, 2);
 }
 
 bool ClockRenderer::Initialize() {

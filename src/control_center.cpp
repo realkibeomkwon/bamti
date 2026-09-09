@@ -2,6 +2,7 @@
 
 #include "audio_devices.hpp"
 #include "bt_devices.hpp"
+#include "clock_renderer.hpp"
 #include "corner.hpp"
 #include "log.hpp"
 #include "night_light.hpp"
@@ -49,7 +50,6 @@ constexpr wchar_t kWlanNotifyClass[] = L"bamti.WlanNotify";
 
 constexpr wchar_t kFluentFont[] = L"Segoe Fluent Icons";
 constexpr wchar_t kUiFont[] = L"Segoe UI";
-constexpr wchar_t kWifiGlyph[] = L"\xE701";
 constexpr wchar_t kBtGlyph[] = L"\xE702";
 constexpr wchar_t kSaverGlyph[] = L"\xE8BE";
 constexpr wchar_t kNightGlyph[] = L"\xE708";
@@ -82,6 +82,28 @@ int DipToPx(int dip, UINT dpi) {
 
 float DipToPxF(float dip, UINT dpi) {
   return dip * static_cast<float>(dpi) / 96.0f;
+}
+
+Microsoft::WRL::ComPtr<ID2D1StrokeStyle> MakeRoundStroke(ID2D1Factory* factory) {
+  Microsoft::WRL::ComPtr<ID2D1StrokeStyle> stroke;
+  if (factory == nullptr) {
+    return stroke;
+  }
+  D2D1_STROKE_STYLE_PROPERTIES props{};
+  props.startCap = D2D1_CAP_STYLE_ROUND;
+  props.endCap = D2D1_CAP_STYLE_ROUND;
+  props.dashCap = D2D1_CAP_STYLE_ROUND;
+  props.lineJoin = D2D1_LINE_JOIN_ROUND;
+  props.miterLimit = 1.0f;
+  props.dashStyle = D2D1_DASH_STYLE_SOLID;
+  factory->CreateStrokeStyle(props, nullptr, 0, stroke.GetAddressOf());
+  return stroke;
+}
+
+D2D1_RECT_F WifiIconBox(float cx, float cy, float square) {
+  const float icon_w = square;
+  const float icon_h = square * (kWifiIconHeightDip / kWifiIconDip);
+  return D2D1::RectF(cx - icon_w * 0.5f, cy - icon_h * 0.5f, cx + icon_w * 0.5f, cy + icon_h * 0.5f);
 }
 
 double QpcMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
@@ -1934,6 +1956,9 @@ void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_i
   const float radius = corner::ToPx(corner::kOverlayDip, dpi);
   const D2D1_COLOR_F fg = ClockTextColor(dark);
   const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
+  ID2D1Factory* d2d = nullptr;
+  target->GetFactory(&d2d);
+  const Microsoft::WRL::ComPtr<ID2D1StrokeStyle> round_stroke = MakeRoundStroke(d2d);
   auto fill_round = [&](const RECT& rc, D2D1_COLOR_F color) {
     brush->SetColor(color);
     const D2D1_ROUNDED_RECT rr{D2D1::RectF(static_cast<float>(rc.left), static_cast<float>(rc.top),
@@ -1964,7 +1989,7 @@ void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_i
   };
   const wchar_t* bt_sub = !bt_known_ ? L"알 수 없음" : (bt_on_ ? L"켜짐" : L"꺼짐");
   const ConnectRow connects[] = {
-      {kWifi, connect0, kWifiGlyph, L"Wi-Fi", wifi_on_ ? wifi_name_ : std::wstring(L"연결 안 됨"), wifi_on_},
+      {kWifi, connect0, nullptr, L"Wi-Fi", wifi_on_ ? wifi_name_ : std::wstring(L"연결 안 됨"), wifi_on_},
       {kBluetooth, connect1, kBtGlyph, L"Bluetooth", std::wstring(bt_sub), bt_on_},
   };
   for (const ConnectRow& row : connects) {
@@ -1974,7 +1999,12 @@ void ControlCenterContent::Render(ID2D1RenderTarget* target, UINT dpi, int hot_i
     }
     const float cy = static_cast<float>(row.rc.top + row.rc.bottom) * 0.5f;
     const float cx = static_cast<float>(row.rc.left) + static_cast<float>(DipToPx(12 + 17, dpi));
-    draw_badge(cx, cy, static_cast<float>(DipToPx(34, dpi)), row.on, fluent17_.Get(), row.glyph);
+    const float diameter = static_cast<float>(DipToPx(34, dpi));
+    draw_badge(cx, cy, diameter, row.on, fluent17_.Get(), row.glyph);
+    if (row.id == kWifi && d2d != nullptr && round_stroke) {
+      const D2D1_COLOR_F icon = row.on ? AccentOnColor(dark) : fg;
+      DrawWifiIcon(target, d2d, brush.Get(), round_stroke.Get(), WifiIconBox(cx, cy, diameter * 0.55f), icon, 2);
+    }
     const float text_x = static_cast<float>(row.rc.left + DipToPx(55, dpi));
     const float chevron_l = static_cast<float>(row.rc.right - DipToPx(24, dpi));
     const float text_r = chevron_l - static_cast<float>(DipToPx(8, dpi));
@@ -2105,6 +2135,9 @@ void ControlCenterContent::RenderNetworkPage(ID2D1RenderTarget* target, UINT dpi
   const bool dark = host_.dark;
   const D2D1_COLOR_F fg = ClockTextColor(dark);
   const D2D1_COLOR_F muted = ScaleAlpha(fg, 0.55f);
+  ID2D1Factory* d2d = nullptr;
+  target->GetFactory(&d2d);
+  const Microsoft::WRL::ComPtr<ID2D1StrokeStyle> round_stroke = MakeRoundStroke(d2d);
   const int other_n = (std::max)(0, static_cast<int>(wifi_nets_.size()) - wifi_known_n_);
   const NetworkPageMetrics m = MakeNetworkPage(eth_on_, wifi_iface_ok_, wifi_radio_on_, wifi_known_n_, other_n);
   const int width = DipToPx(panel::kWidthDip, dpi);
@@ -2181,7 +2214,11 @@ void ControlCenterContent::RenderNetworkPage(ID2D1RenderTarget* target, UINT dpi
       const float cy = static_cast<float>(row.top + row.bottom) * 0.5f;
       const float cx = static_cast<float>(row.left) + circle * 0.5f;
       panel::DrawRowCircle(target, dwrite_.Get(), fluent14_.Get(), brush, cx, cy, dpi, dark, net.connected,
-                           kWifiGlyph);
+                           nullptr);
+      if (d2d != nullptr && round_stroke) {
+        const D2D1_COLOR_F icon = net.connected ? AccentOnColor(dark) : ClockTextColor(dark);
+        DrawWifiIcon(target, d2d, brush, round_stroke.Get(), WifiIconBox(cx, cy, circle * 0.55f), icon, 2);
+      }
       const float text_l = static_cast<float>(DipToPx(panel::kTextLeftDip, dpi));
       float text_r = static_cast<float>(row.right);
       if (net.secure) {
